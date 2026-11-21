@@ -125,6 +125,7 @@ int main(void)
     set(placed, "content", clamped);
     cJSON_AddItemToArray(whistle, placed);
     if (compendium_placement_evidence(nullptr, whistle, "She fastens the silver whistle to the railing.", &prop, &evidence) ||
+        compendium_placement_evidence(nullptr, whistle, "The silver whistle is now clipped securely to the railing.", &prop, &evidence) ||
         compendium_placement_evidence(nullptr, whistle, "Iona considers the tide. She glances at the railing.", &prop, &evidence)) {
         fputs("Repeating the current attachment or mentioning the destination must not file a placement.\n", stderr);
         rc = 1;
@@ -420,6 +421,23 @@ int main(void)
     }
     release(&pressed_name);
     release(&pressed_evidence);
+    const char *clipped = "Captain Mara, the silver whistle is now clipped securely to the railing, "
+        "signaling to Iona that the tide is rising and the copper key must be retrieved before the west gate opens.";
+    Json *placements = compendium_placement_entries(nullptr, nullptr, clipped);
+    const Json *whistle_state = cJSON_GetArrayItem(placements, 0);
+    if (cJSON_GetArraySize(placements) != 1 || strcmp(js(whistle_state, "name"), "silver whistle") ||
+        strcmp(js(whistle_state, "description"), clipped)) {
+        fputs("File the completed passive placement under the prop named in the narration.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(placements);
+    placements = compendium_placement_entries(nullptr, nullptr,
+        "Sera puts the brass compass inside the oak drawer. The blue satchel is fastened to the peg. "
+        "\"The silver whistle is attached to the railing.\" She wonders whether the lantern is secured to the shelf.");
+    if (cJSON_GetArraySize(placements) != 2 || strcmp(js(cJSON_GetArrayItem(placements, 0), "name"), "brass compass") ||
+        strcmp(js(cJSON_GetArrayItem(placements, 1), "name"), "blue satchel")) {
+        fputs("Recover multiple narrated placements while excluding dialogue and uncertainty.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(placements);
     cJSON_Delete(batch);
     cJSON_Delete(known);
     return rc;

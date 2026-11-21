@@ -28,6 +28,7 @@ bool compendium_novel_claims(const Json *known, const Json *batch, const char *t
                              const char *name, const char *description, Text *out);
 bool compendium_placement_evidence(const Json *known, const Json *history, const char *reply,
                                    Text *name, Text *evidence);
+Json *compendium_placement_entries(const Json *known, const Json *history, const char *reply);
 Json *compendium_opening_evidence(const char *reply);
 Json *compendium_signal_evidence(const char *reply);
 Json *compendium_scene_evidence(const char *reply);

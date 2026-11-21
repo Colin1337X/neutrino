@@ -271,7 +271,10 @@ static const char *sentence_end(const char *s)
             if (*next == '"') next++;
             const char *punctuation_end = next;
             while (*next == ' ' || *next == '\t') next++;
-            if (next > punctuation_end && isupper((unsigned char)*next) &&
+            bool starts_sentence = isupper((unsigned char)*next) ||
+                (*next == '"' && isupper((unsigned char)next[1])) ||
+                (!strncmp(next, "“", sizeof "“" - 1) && isupper((unsigned char)next[sizeof "“" - 1]));
+            if (next > punctuation_end && starts_sentence &&
                 !(p > s && isupper((unsigned char)p[-1]) &&
                   (p - s == 1 || p[-2] == ' '))) return next;
         }
@@ -608,6 +611,7 @@ finish:
 }
 
 static bool physical_object(const char *object);
+static bool uncertain_observation(const char *line);
 
 static bool placement_object(const char *sentence, Text *name, Text *target)
 {
@@ -615,15 +619,17 @@ static bool placement_object(const char *sentence, Text *name, Text *target)
     static const char *const verbs[] = {"places", "puts", "sets", "slides", "ties", "fastens", "secures",
         "clamps", "clips", "attaches", "hooks", "hangs", "pins", "straps", "lashes",
         "placed", "tied", "fastened", "secured", "clamped", "clipped", "attached",
+        "strapped", "hooked", "pinned",
         "press", "presses", "pressed", "drops", "dropped", "tosses", "tossed",
         "moves", "moved", "pulls", "pulled", "pushes", "pushed"};
     static const struct { const char *word, *relation; } prepositions[] = {
         {"inside", "in"}, {"within", "in"}, {"into", "in"}, {"in", "in"},
         {"onto", "on"}, {"on", "on"}, {"to", "to"}, {"against", "against"},
-        {"beneath", "under"}, {"under", "under"}
+        {"beneath", "under"}, {"underneath", "under"}, {"under", "under"}
     };
     static const char *const vague[] = {"it", "them", "something", "anything", "everything", "nothing",
         "this", "that", "these", "those", "him", "her", "me", "us", "himself", "herself", "yourself"};
+    if (*sentence == '"' || !strncmp(sentence, "“", sizeof "“" - 1)) return false;
     Text words = {0}, full = {0};
     const char *comma = strchr(sentence, ',');
     Text first = {0};
@@ -632,7 +638,8 @@ static bool placement_object(const char *sentence, Text *name, Text *target)
     normalize_words(&full, sentence);
     const char *s = str(&words), *verb = nullptr, *begin = nullptr, *end = nullptr;
     const char *relation = nullptr, *destination = nullptr;
-    if (strchr(sentence, '?') || words.len > 250 || !simple(s) || word(str(&full), "or") || word(str(&full), "imagines") ||
+    if (strchr(sentence, '?') || words.len > 250 || !simple(s) || uncertain_observation(s) ||
+        word(str(&full), "or") || word(str(&full), "imagines") ||
         word(str(&full), "pretends") || word(str(&full), "perhaps") || word(str(&full), "hypothetically")) goto end;
     for (size_t i = 0; i < sizeof verbs / sizeof *verbs; i++) {
         const char *at = word(s, verbs[i]);
@@ -673,6 +680,56 @@ end:
     return name->len != 0;
 }
 
+static bool attached_placement(const char *sentence, Text *name, Text *target)
+{
+    static const char *const states[] = {"is", "remains", "was"};
+    static const char *const verbs[] = {"clipped", "tied", "fastened", "secured",
+        "attached", "clamped", "strapped", "hooked", "pinned"};
+    if (strpbrk(sentence, "?\"") || strstr(sentence, "“")) return false;
+    Text clause = {0}, words = {0}, active = {0};
+    for (const char *start = sentence; *start && !name->len;) {
+        const char *end = strchr(start, ',');
+        if (!end) end = start + strlen(start);
+        copy_sentence(&clause, start, end);
+        clear(&words);
+        normalize_words(&words, str(&clause));
+        const char *line = str(&words);
+        if (uncertain_observation(line) || word(line, "not") || word(line, "or")) break;
+        for (size_t i = 0; i < sizeof states / sizeof *states && !name->len; i++) {
+            const char *state = word(line, states[i]);
+            if (!state || state == line || state[strlen(states[i])] != ' ') continue;
+            const char *article = word(line, "the");
+            if (!article || article >= state) continue;
+            for (const char *next = word(article + 3, "the"); next && next < state; next = word(next + 3, "the"))
+                article = next;
+            const char *action = state + strlen(states[i]) + 1;
+            if (!prefix(&action, "now ")) prefix(&action, "still ");
+            for (size_t j = 0; j < sizeof verbs / sizeof *verbs; j++) {
+                if (word(action, verbs[j]) != action || action[strlen(verbs[j])] != ' ') continue;
+                const char *location = action + strlen(verbs[j]) + 1;
+                if (!prefix(&location, "securely ")) prefix(&location, "firmly ");
+                if (!*location) break;
+                clear(&active);
+                format(&active, "Someone %s ", verbs[j]);
+                append_n(&active, article, (size_t)(state - article));
+                append(&active, location);
+                placement_object(str(&active), name, target);
+                break;
+            }
+        }
+        start = *end ? end + 1 : end;
+    }
+    release(&clause);
+    release(&words);
+    release(&active);
+    return name->len != 0;
+}
+
+static bool placement_observation(const char *sentence, Text *name, Text *target)
+{
+    return placement_object(sentence, name, target) || attached_placement(sentence, name, target);
+}
+
 static bool observed_placement(const char *text, const char *type, const char *label,
                                 const char *name, Text *target)
 {
@@ -683,7 +740,7 @@ static bool observed_placement(const char *text, const char *type, const char *l
         copy_sentence(&sentence, s, end);
         clear(&object);
         clear(&location);
-        if (sentence.len <= 700 && placement_object(str(&sentence), &object, &location) &&
+        if (sentence.len <= 700 && placement_observation(str(&sentence), &object, &location) &&
             !strcmp(str(&object), name)) {
             clear(target);
             append(target, str(&location));
@@ -726,14 +783,15 @@ static bool unchanged_placement(const Json *known, const Json *history, const ch
     return same;
 }
 
-bool compendium_placement_evidence(const Json *known, const Json *history, const char *reply,
-                                   Text *name, Text *evidence)
+static bool next_placement(const Json *known, const Json *history, const char **reply,
+                          Text *name, Text *evidence)
 {
     Text sentence = {0}, target = {0};
-    for (const char *s = reply; *s;) {
+    for (const char *s = *reply; *s;) {
         const char *end = sentence_end(s);
+        *reply = end;
         copy_sentence(&sentence, s, end);
-        if (sentence.len <= 700 && placement_object(str(&sentence), name, &target) &&
+        if (sentence.len <= 700 && placement_observation(str(&sentence), name, &target) &&
             !unchanged_placement(known, history, str(name), str(&target))) {
             append(evidence, str(&sentence));
             release(&sentence);
@@ -747,6 +805,30 @@ bool compendium_placement_evidence(const Json *known, const Json *history, const
     release(&sentence);
     release(&target);
     return false;
+}
+
+bool compendium_placement_evidence(const Json *known, const Json *history, const char *reply,
+                                   Text *name, Text *evidence)
+{
+    return next_placement(known, history, &reply, name, evidence);
+}
+
+Json *compendium_placement_entries(const Json *known, const Json *history, const char *reply)
+{
+    Json *entries = cJSON_CreateArray();
+    Text name = {0}, evidence = {0};
+    while (cJSON_GetArraySize(entries) < 6 && next_placement(known, history, &reply, &name, &evidence)) {
+        Json *entry = cJSON_CreateObject();
+        set(entry, "type", "item");
+        set(entry, "name", str(&name));
+        set(entry, "description", str(&evidence));
+        cJSON_AddItemToArray(entries, entry);
+        clear(&name);
+        clear(&evidence);
+    }
+    release(&name);
+    release(&evidence);
+    return entries;
 }
 
 /* Resolve only a locally named object in an explicit witnessed action. In
@@ -901,7 +983,7 @@ static bool uncertain_observation(const char *line)
 {
     static const char *const uncertain[] = {"never", "if", "might", "would", "could",
         "may", "should", "perhaps", "imagines", "imagined", "pretends", "dreams",
-        "asks", "orders", "expects", "hopes", "plans", "seems", "maybe"};
+        "asks", "orders", "expects", "hopes", "plans", "seems", "maybe", "whether", "wonders", "wondered"};
     for (size_t i = 0; i < sizeof uncertain / sizeof *uncertain; i++)
         if (word(line, uncertain[i])) return true;
     return false;

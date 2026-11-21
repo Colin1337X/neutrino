@@ -496,9 +496,14 @@ static Json *parse_filing(const Text *output, const Json *story, const Json *rep
     Json *result = cJSON_CreateArray();
     Json *known = collect_entries(story, number(reply, "parent"));
     int index = 0;
+    Json *history = story_path(story, number(reply, "parent"));
+    Json *placements = compendium_placement_entries(known, history, js(reply, "content"));
+    file_candidates(result, known, placements, reply, true, &index);
+    cJSON_Delete(placements);
+    cJSON_Delete(history);
     if (valid) file_candidates(result, known, answer, reply, false, &index);
     cJSON_Delete(answer);
-    if (!result->child && opening_reply(story, reply)) {
+    if (cJSON_GetArraySize(result) < 6 && opening_reply(story, reply)) {
         Json *fallback = compendium_opening_evidence(js(reply, "content"));
         file_candidates(result, known, fallback, reply, true, &index);
         cJSON_Delete(fallback);
@@ -507,24 +512,6 @@ static Json *parse_filing(const Text *output, const Json *story, const Json *rep
         Json *signals = compendium_signal_evidence(js(reply, "content"));
         file_candidates(result, known, signals, reply, true, &index);
         cJSON_Delete(signals);
-    }
-    if (cJSON_GetArraySize(result) < 6) {
-        Json *history = story_path(story, number(reply, "parent"));
-        Text name = {0}, evidence = {0};
-        bool found = compendium_placement_evidence(known, history, js(reply, "content"), &name, &evidence);
-        Json *accepted;
-        if (found) cJSON_ArrayForEach(accepted, result)
-            if (strstr(js(accepted, "description"), str(&evidence))) { found = false; break; }
-        if (found) {
-            char id[40];
-            snprintf(id, sizeof id, "A%d.%d", number(reply, "id"), ++index);
-            Json *fact = entry(id, "item", str(&name), str(&evidence));
-            set(fact, "memorySource", "reply-evidence");
-            cJSON_AddItemToArray(result, fact);
-        }
-        release(&name);
-        release(&evidence);
-        cJSON_Delete(history);
     }
     if (cJSON_GetArraySize(result) < 6) {
         Json *scene = compendium_scene_evidence(js(reply, "content"));
