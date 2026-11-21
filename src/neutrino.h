@@ -18,6 +18,7 @@ void format(Text *text, const char *pattern, ...);
 void clear(Text *text);
 void release(Text *text);
 const char *str(const Text *text);
+void normalize_words(Text *text, const char *value);
 char *copy(const char *value);
 const char *js(const Json *obj, const char *key);
 Json *at(const Json *obj, const char *key);
@@ -70,7 +71,7 @@ size_t utf_encode(int cp, char bytes[4]);
 int utf_width(const char *s, size_t n);
 
 typedef struct Inference Inference;
-typedef struct { int slot, max_tokens, timeout_ms; } RequestOptions;
+typedef struct { int slot, max_tokens, timeout_ms; const char *json_schema; } RequestOptions;
 Inference *inference_start(const char *endpoint, const char *key, const char *model,
                            const Json *messages);
 Inference *inference_request(const char *endpoint, const char *key, const char *model,

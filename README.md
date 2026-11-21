@@ -74,7 +74,7 @@ The server listens on loopback. To use a server on another machine, forward the 
 
 ## Compendium and prompt trace
 
-Each completed narrator reply queues filing. The filing agent writes typed facts such as characters, places, items, events, and notes onto the reply that established them. The historian compacts older turns into a cumulative recap. Recall combines relevant active entries with recent dialogue, the recap, and other story sources. Switching or swiping a branch changes the reply history and the memory entries visible to the narrator.
+Each completed narrator reply queues filing. The filing agent writes typed facts such as characters, places, items, events, and notes onto the reply that established them. Neutrino filters duplicate facts within a filing pass and against the current branch, including longer verbatim facts returned under a different label. The historian compacts older turns into a cumulative recap. Recall combines relevant active entries with recent dialogue, the recap, and other story sources. Switching or swiping a branch changes the reply history and the memory entries visible to the narrator.
 
 | Command | Action |
 | --- | --- |
@@ -89,11 +89,11 @@ Each completed narrator reply queues filing. The filing agent writes typed facts
 
 `auto` and `prefetch` use a completed recall result from the active path when available, with lexical matching as a fallback. `sync` waits for model recall on the current turn. `lexical` and recall mode `off` use keyword matching without a recall model call. Model recall failures fall back to keyword matching.
 
-`/trace` includes the complete ordered messages as JSON, the chosen memory entries and recap coverage, and the reason each lore entry was included or skipped. Lore matching covers constant entries, primary keywords, selective secondary keywords, and the source budget. Exported traces contain story text.
+`/trace` includes the complete ordered messages as JSON, the chosen memory entries and recap coverage, and the reason each lore entry was included or skipped. Lore matching covers constant entries, primary keywords, selective secondary keywords, and the source budget. When the narrator echoes its previous reply, Neutrino discards the draft and tries once with a fresh-response prompt. The trace labels the retry. If the model echoes the reply again, the turn stays open for `/narrate`. Exported traces contain story text.
 
 ### llama.cpp cache isolation
 
-Start llama.cpp with at least two separate cache slots (`-np 2 --no-kv-unified`) and set `NEUTRINO_LLAMA_SLOTS=1` in Neutrino's server environment. Narration uses slot 0. Filing, history, and same-provider recall use slot 1. A separately configured recall provider manages its own cache. Enable this setting only for a llama.cpp instance configured with separate slots. [rp-core guide on local server caching](https://github.com/LeviTheWeasel/rp-core/blob/main/docs/USER-GUIDE.md#local-servers-speed-and-caching)
+Start llama.cpp with at least two separate cache slots (`-np 2 --no-kv-unified`) and set `NEUTRINO_LLAMA_SLOTS=1` in Neutrino's server environment. Narration uses slot 0. Filing, history, and same-provider recall use slot 1. In this mode llama.cpp constrains filing responses to the Compendium JSON schema. A separately configured recall provider manages its own cache. Enable this setting only for a llama.cpp instance configured with separate slots. [rp-core guide on local server caching](https://github.com/LeviTheWeasel/rp-core/blob/main/docs/USER-GUIDE.md#local-servers-speed-and-caching) · [llama.cpp server documentation](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md#post-v1chatcompletions-openai-compatible-chat-completions-api)
 
 Run `neutrino bench ttft [ROUNDS]` against the running Neutrino server to compare cold, warm, and post-agent time to first token using synthetic prompts. The reported ratio and verdict use timing. Compendium prompts and the benchmark are based on the [rp-core Compendium workflow](https://github.com/LeviTheWeasel/rp-core/blob/main/docs/USER-GUIDE.md#the-compendium).
 

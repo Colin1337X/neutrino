@@ -21,11 +21,12 @@ typedef struct {
     Operation op;
     Json *scene, *story;
     Text source, messages_context, objective, lore_trace, memory_trace, recall_output, recall_error, recall_thinking;
+    Text previous_reply, selection_trace;
     size_t start, end, insert_at;
     int version, parent, head;
     Candidate candidates[30];
     int count, current, running;
-    bool open, reasoning, stopped, complete, recalling;
+    bool open, reasoning, stopped, complete, recalling, repeat_retry;
     Json *memory_picks;
     Inference *job;
 } Preview;

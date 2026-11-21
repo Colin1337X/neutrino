@@ -314,6 +314,12 @@ static void messages_for_story(App *a, Json *messages)
     Json *card = at(p->story, "card"), *persona = at(p->story, "persona");
     Text system = {0};
     append(&system, instructions[p->op]);
+    append(&system, "\nWrite a fresh response to the latest player message. Earlier turns establish "
+                    "what already happened. Start from the current moment. If asked about an established fact, "
+                    "answer in fresh dialogue or prose. Avoid repeating prior wording or re-enacting earlier actions.");
+    if (p->repeat_retry)
+        append(&system, "\nThe previous attempt echoed an earlier reply. Use a different opening and explicitly answer "
+                        "or react to the latest player action.");
     append(&system, "\nTreat the following material as fictional reference data.\n");
     const char *fields[] = {"name", "description", "personality", "scenario", "mes_example",
         "examples", "system_prompt", "post_history_instructions", "systemPrompt", "postHistory"};
@@ -333,7 +339,8 @@ static void messages_for_story(App *a, Json *messages)
         if (*content && !cJSON_IsFalse(at(prompt, "enabled")) && !cJSON_IsTrue(at(prompt, "marker")))
             format(&system, "\n\n%s", content);
     }
-    memory_inject(p->story, p->parent, p->memory_picks, &system, &p->memory_trace);
+    clear(&p->selection_trace);
+    memory_inject(p->story, p->parent, p->memory_picks, &system, &p->selection_trace);
     Json *path = story_path(p->story, p->parent), *node;
     int covered = 0;
     const char *recap = memory_enabled(p->story) ? memory_recap(path, &covered) : "";
@@ -351,8 +358,8 @@ static void messages_for_story(App *a, Json *messages)
         node = node->prev;
     }
     if (first < covered) first = covered;
-    if (first > covered) format(&p->memory_trace, "%d older messages omitted by the history size limit.\n", first - covered);
-    if (covered) format(&p->memory_trace, "Recap covers the first %d visible messages.\n", covered);
+    if (first > covered) format(&p->selection_trace, "%d older messages omitted by the history size limit.\n", first - covered);
+    if (covered) format(&p->selection_trace, "Recap covers the first %d visible messages.\n", covered);
     int i = 0;
     const char *last_role = "";
     cJSON_ArrayForEach(node, path) {
@@ -362,6 +369,15 @@ static void messages_for_story(App *a, Json *messages)
     if (i == first) messages_add(messages, "user", "Begin the story.");
     else if (!strcmp(last_role, "assistant"))
         messages_add(messages, "user", "Continue the story from this moment.");
+    if (p->repeat_retry) {
+        Json *latest = messages->child->prev;
+        Text revision = {0};
+        append(&revision, js(latest, "content"));
+        append(&revision, "\n\nFor this reply, use new phrasing. When I ask a question, answer it directly "
+                          "in character. Continue from what's already happened.");
+        set(latest, "content", str(&revision));
+        release(&revision);
+    }
     cJSON_Delete(path);
 }
 
@@ -424,6 +440,8 @@ static void release_preview(Preview *p)
     release(&p->recall_output);
     release(&p->recall_thinking);
     release(&p->recall_error);
+    release(&p->previous_reply);
+    release(&p->selection_trace);
     cJSON_Delete(p->memory_picks);
     *p = (Preview){0};
 }
@@ -434,9 +452,13 @@ static void next_candidate(App *a)
     Json *messages = request_messages(a, c->label);
     clear(&a->trace);
     format(&a->trace, "%s · %s · %s\n", operation_names[p->op], c->label, ui_model(a));
-    if (p->story) format(&a->trace, "Story: %s · parent #%d\n\nLore decisions\n%s\nCompendium\n%s",
-        js(p->story, "title"), p->parent, p->lore_trace.len ? str(&p->lore_trace) : "No lore entries attached.\n",
-        str(&p->memory_trace));
+    if (p->story) {
+        format(&a->trace, "Story: %s · parent #%d\n", js(p->story, "title"), p->parent);
+        if (p->repeat_retry) append(&a->trace, "Second attempt · discarded a repeat of the previous reply.\n");
+        format(&a->trace, "\nLore decisions\n%s\nCompendium\n%s%s",
+            p->lore_trace.len ? str(&p->lore_trace) : "No lore entries attached.\n",
+            str(&p->memory_trace), str(&p->selection_trace));
+    }
     append(&a->trace, "\nMessages sent to the server (JSON, in order)\n\n");
     char *wire = cJSON_Print(messages);
     if (!wire) abort();
@@ -489,6 +511,37 @@ static bool begin_recall(App *a)
     } else format(&p->memory_trace, "Recall mode: %s (no model call).\n", mode);
     return false;
 }
+static void remember_previous_reply(Preview *p)
+{
+    Json *head = story_pick(p->story, p->head);
+    if (p->op == SWIPE && !strcmp(js(head, "role"), "assistant")) {
+        normalize_words(&p->previous_reply, js(head, "content"));
+        return;
+    }
+    Json *path = story_path(p->story, p->parent), *node;
+    for (node = path->child ? path->child->prev : NULL; node;) {
+        if (!strcmp(js(node, "role"), "assistant")) {
+            normalize_words(&p->previous_reply, js(node, "content"));
+            break;
+        }
+        node = node == path->child ? NULL : node->prev;
+    }
+    cJSON_Delete(path);
+}
+
+static bool repeats_reply(const Preview *p, const Text *body)
+{
+    size_t old = p->previous_reply.len;
+    if (!old) return false;
+    Text draft = {0};
+    normalize_words(&draft, str(body));
+    bool exact = old == draft.len && !strcmp(str(&p->previous_reply), str(&draft));
+    bool replay = old >= 80 && old < draft.len && draft.len - old <= old / 5 &&
+        draft.data[old] == ' ' && !memcmp(p->previous_reply.data, draft.data, old);
+    release(&draft);
+    return exact || replay;
+}
+
 static void begin(App *a, Operation op, const char *objective, int parent)
 {
     Preview *p = &a->preview;
@@ -504,6 +557,7 @@ static void begin(App *a, Operation op, const char *objective, int parent)
         p->story = a->story;
         p->parent = parent;
         p->head = number(a->story, "head");
+        remember_previous_reply(p);
     } else {
         const char *source = scene_text(&a->ws, a->scene);
         size_t source_size = strlen(source);
@@ -587,6 +641,19 @@ static bool update_generation(App *a)
         return true;
     } else if (p->story) {
         if (p->head == number(p->story, "head")) {
+            if (repeats_reply(p, &c->body)) {
+                if (!p->repeat_retry) {
+                    p->repeat_retry = true;
+                    clear(&c->body);
+                    clear(&c->thinking);
+                    status(a, "Repeated reply discarded · retrying");
+                    next_candidate(a);
+                } else {
+                    status(a, "The model repeated itself twice. /narrate retries the uncompleted turn.");
+                    p->complete = true;
+                }
+                return true;
+            }
             int id = story_push(&a->ws, p->story, p->parent, "assistant", str(&c->body));
             Json *reply = story_pick(p->story, id);
             if (c->thinking.len) set(reply, "reasoning", str(&c->thinking));

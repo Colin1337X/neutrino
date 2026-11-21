@@ -26,6 +26,13 @@ typedef ssize_t Count;
 #endif
 
 enum { CLIENTS = 16, HEADER_LIMIT = 16384, BODY_LIMIT = 16 * 1024 * 1024 };
+static const char filing_schema[] =
+    "{\"type\":\"array\",\"maxItems\":6,\"items\":{\"type\":\"object\","
+    "\"properties\":{\"type\":{\"enum\":[\"character\",\"place\",\"item\",\"event\",\"note\",\"faction\","
+    "\"rule\",\"relationship\",\"plot\",\"quest\",\"creature\"]},"
+    "\"name\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":160},"
+    "\"description\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":2400}},"
+    "\"required\":[\"type\",\"name\",\"description\"],\"additionalProperties\":false}}";
 typedef struct {
     const char *endpoint, *key, *model;
     RequestOptions options;
@@ -88,6 +95,7 @@ static bool route_for(const char *name, Route *route)
     route->model = env("NEUTRINO_AGENT_MODEL", route->model);
     if (!strcmp(name, "file") || !strcmp(name, "history") || !strcmp(name, "bench-agent")) {
         route->options.max_tokens = !strcmp(name, "bench-agent") ? 1 : 1200;
+        if (slots && !strcmp(name, "file")) route->options.json_schema = filing_schema;
         return *route->model != 0;
     }
     if (strcmp(name, "recall") && strncmp(name, "recall/", 7)) return false;

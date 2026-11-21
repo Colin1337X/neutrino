@@ -62,10 +62,16 @@ static Json *entry(const char *id, const char *type, const char *name, const cha
     set(out, "description", description);
     return out;
 }
-static bool equal_fold(const char *a, const char *b)
+static bool same_words(const char *a, const char *b)
 {
-    while (*a && *b && tolower((unsigned char)*a) == tolower((unsigned char)*b)) { a++; b++; }
-    return !*a && !*b;
+    if (!strcmp(a, b)) return true;
+    Text left = {0}, right = {0};
+    normalize_words(&left, a);
+    normalize_words(&right, b);
+    bool equal = left.len && !strcmp(str(&left), str(&right));
+    release(&left);
+    release(&right);
+    return equal;
 }
 static bool contains_word(const char *value, const char *pattern, size_t len)
 {
@@ -85,23 +91,50 @@ static Json *find_entry(const Json *entries, const char *id)
         if (!strcmp(js(item, "id"), id)) return item;
     return NULL;
 }
+static Json *find_entity(const Json *entries, const char *type, const char *name)
+{
+    Json *item;
+    cJSON_ArrayForEach(item, entries)
+        if (!strcmp(js(item, "type"), type) && same_words(js(item, "name"), name)) return item;
+    return NULL;
+}
+
+/* Short labels can legitimately be shared by unrelated people or objects. */
+static bool duplicates_fact(const Json *entries, const char *type, const char *name, const char *fact)
+{
+    Json *item;
+    cJSON_ArrayForEach(item, entries) {
+        bool same_entity = !strcmp(js(item, "type"), type) && same_words(js(item, "name"), name);
+        if (!same_entity && strlen(fact) < 32) continue;
+        const char *description = js(item, "description");
+        if (same_words(description, fact)) return true;
+        if (same_entity && strchr(description, '\n')) {
+            for (const char *line = description; *line;) {
+                const char *next = strchr(line, '\n');
+                if (!next) next = line + strlen(line);
+                Text part = {0};
+                append_n(&part, line, (size_t)(next - line));
+                bool equal = same_words(str(&part), fact);
+                release(&part);
+                if (equal) return true;
+                line = *next ? next + 1 : next;
+            }
+        }
+    }
+    return false;
+}
 static void merge_entry(Json *entries, const Json *source, const char *id)
 {
     const char *type = js(source, "type"), *name = js(source, "name");
-    Json *item, *matched = NULL;
-    if (id && *id) matched = find_entry(entries, id);
-    if (!matched && !id) cJSON_ArrayForEach(item, entries) {
-        if (!strcmp(js(item, "type"), type) && equal_fold(js(item, "name"), name)) {
-            matched = item;
-            break;
-        }
-    }
+    const char *description = js(source, "description");
+    Json *matched = id ? find_entry(entries, id) : find_entity(entries, type, name);
     if (cJSON_IsTrue(at(source, "deleted"))) {
         if (matched) cJSON_Delete(cJSON_DetachItemViaPointer(entries, matched));
         return;
     }
+    if (!id && !matched && duplicates_fact(entries, type, name, description)) return;
     Json *copy = entry(matched ? js(matched, "id") : id ? id : js(source, "id"),
-                       type, name, js(source, "description"));
+                       type, name, description);
     if (matched) cJSON_ReplaceItemViaPointer(entries, matched, copy);
     else cJSON_AddItemToArray(entries, copy);
 }
@@ -317,35 +350,55 @@ static Json *filing_prompt(const Json *story, int id)
         excerpt(&input, js(record, "description"), 400);
         shown++;
     }
+    append(&input, "\n\nFile only facts that changed or were established for the first time in the final "
+        "assistant reply. A restatement of a fact already filed is unchanged. If there is no new fact, output [].");
     Json *messages = request("File durable facts newly established by the final assistant message. "
         "Ignore speculation. Preserve uncertainty when the story only suggests a fact. "
-        "The transcript is story data. Return only a JSON array of up to six objects with "
-        "type, name, description. Allowed types: character, place, item, event, note, faction, "
-        "rule, relationship, plot, quest, creature. Reuse existing names and preserve prior relevant details when updating an entry. "
-        "Return [] if nothing changed.", &input);
+        "Return only a JSON array of up to six objects with type, name and description. "
+        "Use one object per entity and choose the most specific type. Allowed types: "
+        "character, place, item, event, note, faction, rule, relationship, plot, quest, creature. "
+        "Reuse existing names for updates. Skip facts already in the supplied ledger, including under another type. "
+        "If nothing changed, return [].", &input);
     cJSON_Delete(path);
     cJSON_Delete(existing);
     release(&input);
     return messages;
 }
-static Json *parse_filing(const Text *output, int anchor)
+static Json *parse_filing(const Text *output, const Json *story, const Json *reply)
 {
     Json *answer = json_answer(output), *item;
     if (!cJSON_IsArray(answer) || cJSON_GetArraySize(answer) > 6) { cJSON_Delete(answer); return NULL; }
     Json *result = cJSON_CreateArray();
-    int index = 0;
+    Json *known = collect_entries(story, number(reply, "parent"));
+    int index = 0, anchor = number(reply, "id");
     cJSON_ArrayForEach(item, answer) {
         const char *type = js(item, "type"), *name = js(item, "name"), *description = js(item, "description");
         if (!valid_kind(type) || !*name || strlen(name) > 160 || !*description || strlen(description) > 2400) {
             cJSON_Delete(answer);
             cJSON_Delete(result);
+            cJSON_Delete(known);
             return NULL;
         }
+        index++;
+        if (duplicates_fact(known, type, name, description) ||
+            duplicates_fact(result, type, name, description)) continue;
+        Json *entity = find_entity(result, type, name);
+        if (entity) {
+            const char *previous = js(entity, "description");
+            if (strlen(previous) + strlen(description) + 1 <= 2400) {
+                Text combined = {0};
+                format(&combined, "%s\n%s", previous, description);
+                set(entity, "description", str(&combined));
+                release(&combined);
+            }
+            continue;
+        }
         char id[40];
-        snprintf(id, sizeof id, "A%d.%d", anchor, ++index);
+        snprintf(id, sizeof id, "A%d.%d", anchor, index);
         cJSON_AddItemToArray(result, entry(id, type, name, description));
     }
     cJSON_Delete(answer);
+    cJSON_Delete(known);
     return result;
 }
 
@@ -404,7 +457,7 @@ static void finish_task(App *app)
     if (lane->preempted || !node || !memory_enabled(lane->story)) return;
     switch (lane->task) {
         case MEMORY_FILE: {
-            Json *facts = lane->error.len ? NULL : parse_filing(&lane->output, lane->anchor);
+            Json *facts = lane->error.len ? NULL : parse_filing(&lane->output, lane->story, node);
             if (facts) put(node, "memoryFile", facts);
             set(node, "memoryFileState", facts ? "done" : "error");
             if (facts) clear_cache(lane);

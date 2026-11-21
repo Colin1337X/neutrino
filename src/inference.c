@@ -334,6 +334,12 @@ Inference *inference_request(const char *endpoint, const char *key, const char *
         put(body, "cache_prompt", cJSON_CreateTrue());
     }
     if (options.max_tokens > 0) integer(body, "max_tokens", options.max_tokens);
+    if (options.json_schema) {
+        Json *format = cJSON_CreateObject();
+        set(format, "type", "json_schema");
+        put(format, "schema", cJSON_ParseWithOpts(options.json_schema, NULL, 1));
+        put(body, "response_format", format);
+    }
     j->body = cJSON_PrintUnformatted(body);
     cJSON_Delete(body);
     if (!j->body) abort();

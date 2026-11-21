@@ -41,6 +41,22 @@ void clear(Text *t) { t->len = 0; if (t->data) *t->data = 0; }
 void release(Text *t) { free(t->data); *t = (Text){0}; }
 const char *str(const Text *t) { return t->data ? t->data : ""; }
 
+void normalize_words(Text *t, const char *value)
+{
+    bool separator = false;
+    for (; *value; value++) {
+        unsigned char byte = (unsigned char)*value;
+        if (byte < 128 && !isalnum(byte)) {
+            separator = t->len > 0;
+        } else {
+            if (separator) append(t, " ");
+            char word_byte = (char)(byte < 128 ? tolower(byte) : byte);
+            append_n(t, &word_byte, 1);
+            separator = false;
+        }
+    }
+}
+
 void format(Text *t, const char *pattern, ...)
 {
     va_list args, measure;
