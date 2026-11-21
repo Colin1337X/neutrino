@@ -407,6 +407,13 @@ int main(void)
         fputs("Only an observed actor action can survive the final fallback.\n", stderr); rc = 1;
     }
     cJSON_Delete(actors);
+    if (!compendium_placement_evidence(nullptr, nullptr,
+        "She places the key into the red box, the metal clinking softly against the solid wood.",
+        &pressed_name, &pressed_evidence) || strcmp(str(&pressed_name), "key")) {
+        fputs("A named physical item needs no adjective to support a narrated placement.\n", stderr); rc = 1;
+    }
+    release(&pressed_name);
+    release(&pressed_evidence);
     cJSON_Delete(batch);
     cJSON_Delete(known);
     return rc;

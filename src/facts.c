@@ -607,6 +607,8 @@ finish:
     return type;
 }
 
+static bool physical_object(const char *object);
+
 static bool placement_object(const char *sentence, Text *name, Text *target)
 {
     /* A complete leading action is required. Keep the full sentence as evidence. */
@@ -658,7 +660,7 @@ static bool placement_object(const char *sentence, Text *name, Text *target)
     phrase(name, begin, end);
     for (size_t i = 0; i < sizeof vague / sizeof *vague; i++)
         if (!strcmp(str(name), vague[i])) clear(name);
-    if (name->len > 100 || !strchr(str(name), ' ')) clear(name);
+    if (name->len > 100 || (!strchr(str(name), ' ') && !physical_object(str(name)))) clear(name);
     if (name->len && target) {
         const char *detail = word(destination, "as");
         format(target, "%s ", relation);
