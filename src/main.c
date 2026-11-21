@@ -33,8 +33,10 @@ const Command commands[] = {
     {"story", " title", "Start a roleplay story"},
     {"play", " [title]", "Start a roleplay linked to this scene"},
     {"branch", " [message ID]", "Inspect or switch the active path"},
+    {"rewind", " [ancestor ID]", "Rewind one exchange or return to an earlier message"},
     {"memory", " [mode|new|edit|status]", "Open or manage branch-aware story memory"},
     {"world", " [log]", "Inspect this branch's room, inventory, or activity"},
+    {"map", " [destination]", "Show world links or the shortest route from this room"},
     {"room", " NAME | DESCRIPTION", "Define a room"},
     {"connect", " ROOM | ROOM", "Link two rooms"},
     {"go", " ROOM", "Move through an exit"},
@@ -56,6 +58,7 @@ const Command commands[] = {
     {"transcript", " /folder/book/chapter/scene", "Copy the active conversation to a new scene"},
     {"continue", " [objective]", "Generate the next passage for review"},
     {"rewrite", " [objective]", "Revise the scene or selection"},
+    {"rewrite-preset", " [preset] [direction]", "Apply a focused revision to the scene or selection"},
     {"expand", " [objective]", "Develop the scene or selection"},
     {"describe", " [subject]", "Generate sensory details"},
     {"draft", " outline", "Draft prose from an outline"},
@@ -1017,12 +1020,35 @@ static void show_branches(App *a)
 }
 static void change_branch(App *a, int id)
 {
-    if (!a->story || !story_pick(a->story, id)) { status(a, "Unknown message ID."); return; }
+    if (!a->story || (id != 0 && !story_pick(a->story, id))) { status(a, "Unknown message ID."); return; }
     integer(a->story, "head", id);
     a->ws.dirty = true;
     a->scroll = INT_MAX;
     close_panel(a);
-    status(a, "Active branch changed");
+    status(a, id ? "Active branch changed" : "Rewound to the start of the story");
+}
+static void rewind_story(App *a, const char *arg)
+{
+    if (!a->roleplay || !a->story) { status(a, "Open a roleplay story first."); return; }
+    if (preview_busy(&a->preview)) { status(a, "Finish or cancel generation before rewinding."); return; }
+    int head = number(a->story, "head");
+    if (!head) { status(a, "Already at the start of the story."); return; }
+    int target = *arg ? parse_number(arg, 0, INT_MAX) : 0;
+    if (target < 0) { status(a, "Use /rewind [ancestor ID]."); return; }
+    for (int id = number(story_pick(a->story, head), "parent"); id > 0 && id < head;) {
+        Json *node = story_pick(a->story, id);
+        if (!node) break;
+        if ((*arg && id == target) ||
+            (!*arg && !strcmp(js(node, "role"), "assistant") && !cJSON_IsTrue(at(node, "hidden")))) {
+            change_branch(a, id);
+            return;
+        }
+        int parent = number(node, "parent");
+        if (parent >= id) break;
+        id = parent;
+    }
+    if (!target) change_branch(a, 0);
+    else status(a, "Choose an earlier message on this branch.");
 }
 static void sibling(App *a, bool next)
 {
@@ -1155,6 +1181,42 @@ static void quit(App *a)
     else status(a, "Save failed. /export can write a backup before closing.");
 }
 
+static void rewrite_preset(App *a, const char *arg)
+{
+    static const struct { const char *name, *objective; } presets[] = {
+        {"clarity", "Clarify the action, references, and sequence while preserving the meaning."},
+        {"concise", "Cut repetition and wordiness while preserving the essential facts and voice."},
+        {"description", "Sharpen concrete sensory details without adding story facts."},
+        {"dialogue", "Give each speaker a distinct voice and make the exchange sound natural."},
+        {"emotion", "Convey the emotion through actions, sensations, and subtext."},
+        {"pacing", "Improve the rhythm and transitions while preserving the order of events."},
+        {"tone", "Make the tone consistent with the direction and the surrounding manuscript."}
+    };
+    if (!*arg) {
+        show_info(a, "Rewrite presets");
+        for (size_t i = 0; i < sizeof presets / sizeof *presets; i++)
+            format(&a->info, "%s\n  %s\n", presets[i].name, presets[i].objective);
+        append(&a->info, "\n/rewrite-preset NAME [additional direction]");
+        return;
+    }
+    if (!a->roleplay && !*scene_text(&a->ws, a->scene)) {
+        status(a, "Write or open a passage before applying a rewrite preset.");
+        return;
+    }
+    size_t len = strcspn(arg, " \t");
+    for (size_t i = 0; i < sizeof presets / sizeof *presets; i++) {
+        if (strlen(presets[i].name) != len || strncmp(arg, presets[i].name, len)) continue;
+        Text objective = {0};
+        append(&objective, presets[i].objective);
+        const char *direction = trim_left(arg + len);
+        if (*direction) format(&objective, "\nAdditional direction: %s", direction);
+        begin(a, REWRITE, str(&objective), 0, nullptr);
+        release(&objective);
+        return;
+    }
+    status(a, "Unknown preset. Use /rewrite-preset to list them.");
+}
+
 static void slash_command(App *a, char *line)
 {
     char *arg = line;
@@ -1168,7 +1230,7 @@ static void slash_command(App *a, char *line)
         return;
     }
     const char *const world_commands[] = {"world", "room", "connect", "go", "item",
-        "take", "drop", "npc", "weather", "say"};
+        "take", "drop", "npc", "weather", "say", "map"};
     for (size_t i = 0; i < sizeof world_commands / sizeof *world_commands; i++) {
         if (!strcmp(line, world_commands[i])) { world_command(a, line, arg); return; }
     }
@@ -1180,6 +1242,8 @@ static void slash_command(App *a, char *line)
     }
     if (!strcmp(line, "help")) show_help(a);
     else if (!strcmp(line, "edit")) edit_start(a);
+    else if (!strcmp(line, "rewrite-preset")) rewrite_preset(a, arg);
+    else if (!strcmp(line, "rewind")) rewind_story(a, arg);
     else if (!strcmp(line, "quit")) quit(a);
     else if (!strcmp(line, "save")) { status(a, "Workspace saved"); save(a); }
     else if (!strcmp(line, "focus")) a->compact = !a->compact;

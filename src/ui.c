@@ -592,19 +592,23 @@ static void neofetch(App *a, const Layout *l, int x, int y, int width, int heigh
     if (width >= 28) right(a, x + width, l->top, 13, gateway_style, gateway);
     if (y > l->top + 1) rule(a, x, l->top + 1, width, ROOT LINE NORMAL);
     const char *const mark[] = {
-        "       ╱╲       ",
-        "     ╱    ╲     ",
-        "   ╱   ╱╲   ╲   ",
-        "  ╲   ╲╱   ╱  ",
-        "    ╲    ╱    ",
-        "      ╲╱      ",
+        "          *         ",
+        "     .  ))|((  .    ",
+        "          |         ",
+        "         /|\\        ",
+        "        /-+-\\       ",
+        "       /  |  \\      ",
+        "      /---+---\\     ",
+        "     /____|____\\    ",
+        "   ~~~  ~~~  ~~~    ",
     };
     if (width >= 61 && height >= 8) {
-        for (size_t row = 0; row < sizeof mark / sizeof *mark; row++)
-            cell(a, x + 1, y + (int)row, 17, a->roleplay ? ROOT LAV BOLD : ROOT MINT BOLD, mark[row]);
-        cell(a, x + 3, y + 7, 16, ROOT QUIET, "NEUTRINO");
-        x += 21;
-        width -= 21;
+        const int art_rows = (int)(sizeof mark / sizeof *mark);
+        for (int row = 0; row < minimum(art_rows, height); row++)
+            cell(a, x, y + row, 20, row == 0 ? ROOT GOLD BOLD :
+                 a->roleplay ? ROOT LAV BOLD : ROOT MINT BOLD, mark[row]);
+        x += 24;
+        width -= 24;
     }
     Text body = {0};
     format(&body, "Gateway  %s%s%s\n", gateway, server ? " · " : "", js(server, "version"));
@@ -635,6 +639,18 @@ static void neofetch(App *a, const Layout *l, int x, int y, int width, int heigh
     format(&body, "Sample window  %d/%d completed\n\n", neo->count, NEOFETCH_SAMPLES);
     format(&body, "Terminal  %d×%d · %s\nClient  %s · %s\n", a->cols, a->rows,
            a->roleplay ? "Roleplay" : "Manuscript", NEUTRINO_VERSION, a->ssh_session ? "SSH" : "Local");
+    if (neo->count) {
+        append(&body, "\nRecent generations (oldest first)\n");
+        int recent = minimum(neo->count, 5);
+        for (int i = 0; i < recent; i++) {
+            InferenceMetrics sample = neo->samples[(neo->next + NEOFETCH_SAMPLES - recent + i) % NEOFETCH_SAMPLES];
+            format(&body, "%d  ", i + 1);
+            if (sample.tokens_per_second > 0) format(&body, "%.1f tok/s", sample.tokens_per_second);
+            else append(&body, "— tok/s");
+            if (sample.has_ttft) format(&body, "  ·  %llu ms TTFT", (unsigned long long)sample.ttft_ms);
+            append(&body, "\n");
+        }
+    }
     Rows rows = wrap(str(&body), body.len, width);
     a->panel_scroll = clamp(a->panel_scroll, 0, maximum(0, rows.count - height));
     draw_lines(a, str(&body), rows, a->panel_scroll, x, y, width, height, 0, 0);

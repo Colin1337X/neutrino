@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+enum { WORLD_ROOM_LIMIT = 128 };
+
 static bool equal_name(const char *a, const char *b)
 {
     while (*a && *b && tolower((unsigned char)*a) == tolower((unsigned char)*b)) { a++; b++; }
@@ -241,9 +243,82 @@ static void world_panel(App *a, bool log)
         describe_world(a->story, state, &a->info);
         if (!a->info.len) append(&a->info, "Create the starting room with /room NAME | DESCRIPTION.\n");
         append(&a->info, "\n/room  /connect  /go  /item  /take  /drop  /npc  /weather  /say\n"
-                         "@Name MESSAGE addresses a character in this room.\n/world log shows branch activity.");
+                         "@Name MESSAGE addresses a character in this room.\n/world log shows branch activity. /map shows room links.");
     }
     cJSON_Delete(state);
+}
+
+static int map_index(const char *const rooms[], int count, const char *name)
+{
+    for (int i = 0; i < count; i++)
+        if (equal_name(rooms[i], name)) return i;
+    return -1;
+}
+
+static void world_map(App *a, const char *destination)
+{
+    const Json *world = at(a->story, "world");
+    const char *rooms[WORLD_ROOM_LIMIT];
+    int count = 0;
+    Json *item;
+    cJSON_ArrayForEach(item, at(world, "rooms")) {
+        if (count == WORLD_ROOM_LIMIT) break;
+        if (*js(item, "name")) rooms[count++] = js(item, "name");
+    }
+    if (!count) { app_status(a, "Create a starting room with /room first."); return; }
+    Text current = {0};
+    world_room(a->story, number(a->story, "head"), &current);
+    int start = map_index(rooms, count, str(&current));
+    release(&current);
+    if (start < 0) { app_status(a, "The current room is missing from the map."); return; }
+    int end = *destination ? map_index(rooms, count, destination) : -1;
+    if (*destination && end < 0) { app_status(a, "Unknown destination. Use /map to list the rooms."); return; }
+
+    bool links[WORLD_ROOM_LIMIT][WORLD_ROOM_LIMIT] = {0};
+    cJSON_ArrayForEach(item, at(world, "links")) {
+        int from = map_index(rooms, count, js(item, "from"));
+        int to = map_index(rooms, count, js(item, "to"));
+        if (from >= 0 && to >= 0 && from != to) links[from][to] = links[to][from] = true;
+    }
+    int parents[WORLD_ROOM_LIMIT], distance[WORLD_ROOM_LIMIT], queue[WORLD_ROOM_LIMIT] = {start};
+    for (int i = 0; i < count; i++) distance[i] = -1;
+    parents[start] = -1;
+    distance[start] = 0;
+    for (int head = 0, tail = 1; head < tail; head++) {
+        int from = queue[head];
+        for (int to = 0; to < count; to++) {
+            if (!links[from][to] || distance[to] >= 0) continue;
+            parents[to] = from;
+            distance[to] = distance[from] + 1;
+            queue[tail++] = to;
+        }
+    }
+
+    app_info(a, "World map");
+    format(&a->info, "You are here: %s\n\n", rooms[start]);
+    if (end >= 0) {
+        if (distance[end] < 0) format(&a->info, "No route to %s.\n", rooms[end]);
+        else if (end == start) format(&a->info, "You are already at %s.\n", rooms[end]);
+        else {
+            format(&a->info, "Shortest route to %s (%d %s)\n", rooms[end], distance[end],
+                   distance[end] == 1 ? "step" : "steps");
+            int route[WORLD_ROOM_LIMIT], steps = 0;
+            for (int at = end; at >= 0; at = parents[at]) route[steps++] = at;
+            for (int i = steps - 1; i >= 0; i--)
+                format(&a->info, "%s%s", i == steps - 1 ? "" : " → ", rooms[route[i]]);
+            format(&a->info, "\n\nNext move: /go %s\n", rooms[route[steps - 2]]);
+        }
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        format(&a->info, "%s%s", i == start ? "● " : "○ ", rooms[i]);
+        if (distance[i] < 0) append(&a->info, " (unreachable)");
+        int exits = 0;
+        for (int to = 0; to < count; to++)
+            if (links[i][to]) format(&a->info, "%s%s", exits++ ? ", " : " → ", rooms[to]);
+        append(&a->info, "\n");
+    }
+    append(&a->info, "\n/map ROOM  Plot the shortest route");
 }
 
 static void add_event(App *a, Json *world, const char *type, const char *name,
@@ -266,6 +341,7 @@ void world_command(App *a, const char *verb, char *argument)
 {
     if (!a->roleplay || !a->story) { app_status(a, "Open a roleplay story to use its world."); return; }
     if (!strcmp(verb, "world")) { world_panel(a, !strcmp(argument, "log")); return; }
+    if (!strcmp(verb, "map")) { world_map(a, trim(argument)); return; }
     if (preview_busy(&a->preview)) { app_status(a, "Finish the active reply before changing the world."); return; }
 
     bool room_cmd = !strcmp(verb, "room"), link_cmd = !strcmp(verb, "connect");
@@ -286,7 +362,7 @@ void world_command(App *a, const char *verb, char *argument)
     Json *world = at(a->story, "world"), *rooms = at(world, "rooms");
     if (room_cmd) {
         if (named(rooms, name)) { app_status(a, "A room with that name already exists."); return; }
-        if (cJSON_GetArraySize(rooms) >= 128) { app_status(a, "Room limit reached."); return; }
+        if (cJSON_GetArraySize(rooms) >= WORLD_ROOM_LIMIT) { app_status(a, "Room limit reached."); return; }
         Json *r = cJSON_CreateObject();
         set(r, "name", name);
         set(r, "text", text);
