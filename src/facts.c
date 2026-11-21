@@ -725,3 +725,40 @@ Json *compendium_opening_evidence(const char *reply)
     release(&words);
     return entries;
 }
+
+Json *compendium_signal_evidence(const char *reply)
+{
+    Json *facts = cJSON_CreateArray();
+    Text sentence = {0}, tokens = {0};
+    for (const char *s = reply; *s && cJSON_GetArraySize(facts) < 6;) {
+        const char *end = sentence_end(s);
+        copy_sentence(&sentence, s, end);
+        s = end;
+        if (sentence.len > 700 || strchr(str(&sentence), '?')) continue;
+        clear(&tokens);
+        normalize_words(&tokens, str(&sentence));
+        const char *line = str(&tokens);
+        static const char *const uncertain[] = {"not", "never", "if", "might", "would", "could",
+            "may", "should", "perhaps", "imagines", "imagined", "pretends", "dreams", "asks", "orders"};
+        bool explicit = true;
+        for (size_t i = 0; i < sizeof uncertain / sizeof *uncertain; i++)
+            if (word(line, uncertain[i])) { explicit = false; break; }
+        if (!explicit) continue;
+        const char *label = nullptr;
+        if (word(line, "rings the brass bell") || word(line, "rang the brass bell")) label = "brass bell";
+        else if (word(line, "rings the bell") || word(line, "rang the bell") ||
+                 word(line, "bell tolls") || word(line, "bell tolled")) label = "bell";
+        else if (word(line, "flare rises") || word(line, "flare rose") || word(line, "flare floats") ||
+                 word(line, "flare drifts") || (word(line, "flare") &&
+                  (word(line, "now floats") || word(line, "descends toward")))) label = "flare";
+        if (!label) continue;
+        Json *fact = cJSON_CreateObject();
+        set(fact, "type", "event");
+        set(fact, "name", label);
+        set(fact, "description", str(&sentence));
+        cJSON_AddItemToArray(facts, fact);
+    }
+    release(&sentence);
+    release(&tokens);
+    return facts;
+}

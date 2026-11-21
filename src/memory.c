@@ -401,6 +401,7 @@ static bool file_candidates(Json *result, const Json *known, const Json *answer,
     const char *prose = js(reply, "content");
     Json *item;
     cJSON_ArrayForEach(item, answer) {
+        if (cJSON_GetArraySize(result) >= 6) break;
         const char *type = js(item, "type"), *name = js(item, "name"), *description = js(item, "description");
         if (!valid_kind(type) || !*name || strlen(name) > 160 || !*description || strlen(description) > 2400)
             return false;
@@ -458,6 +459,11 @@ static Json *parse_filing(const Text *output, const Json *story, const Json *rep
         Json *fallback = compendium_opening_evidence(js(reply, "content"));
         valid = file_candidates(result, known, fallback, reply, true, &index);
         cJSON_Delete(fallback);
+    }
+    if (valid && cJSON_GetArraySize(result) < 6) {
+        Json *signals = compendium_signal_evidence(js(reply, "content"));
+        valid = file_candidates(result, known, signals, reply, true, &index);
+        cJSON_Delete(signals);
     }
     if (valid && cJSON_GetArraySize(result) < 6) {
         Json *history = story_path(story, number(reply, "parent"));

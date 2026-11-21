@@ -202,6 +202,18 @@ int main(void)
         rc = 1;
     }
     release(&quote);
+    Json *signals = compendium_signal_evidence("Iona smiles as she rings the brass bell twice, signaling the approaching tide to the west gate. "
+        "Captain Mara's distress flare, once held high above the water, now floats gently on the surface as it descends toward the shore.");
+    if (cJSON_GetArraySize(signals) != 2 ||
+        strcmp(js(cJSON_GetArrayItem(signals, 0), "name"), "brass bell") ||
+        strcmp(js(cJSON_GetArrayItem(signals, 1), "name"), "flare")) {
+        fputs("Recover the two explicit signals from the exact historical reply.\n", stderr);
+        rc = 1;
+    }
+    cJSON_Delete(signals);
+    signals = compendium_signal_evidence("Iona imagines she rings the bell. Would she ring the bell? She watches the water.");
+    if (signals->child) { fputs("Imagined or proposed signals must not become facts.\n", stderr); rc = 1; }
+    cJSON_Delete(signals);
     cJSON_Delete(batch);
     cJSON_Delete(known);
     return rc;
