@@ -56,6 +56,19 @@ static bool tool_protocol(void)
         strstr(str(&p.tool_results), "Repeated tool request skipped inside the batch");
     free_protocol(&p);
     p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    ok = ok && simulation_tool_reply(&p, str(&batch)) == SIM_REGENERATE &&
+         simulation_tool_reply(&p, "Iona studies the [JsOn] output.") == SIM_REGENERATE &&
+         strstr(str(&p.tool_results), "Discarded prose that mentioned the tool protocol.") &&
+         simulation_tool_reply(&p, "The neutrino_tool output showed a result.") == SIM_NO_PROSE &&
+         simulation_tool_reply(&p, "Iona leans around the cabinet and listens.") == SIM_NARRATIVE;
+    Text player_action = {0}, reference = {0};
+    format(&player_action, "Iona watches the drain. %s Then she listens. [Move closer.]", str(&batch));
+    simulation_player_reference(&reference, str(&player_action));
+    ok = ok && !strcmp(str(&reference), "Iona watches the drain.  Then she listens. [Move closer.]");
+    release(&player_action);
+    release(&reference);
+    free_protocol(&p);
+    p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
     clear(&batch);
     format(&batch, "[%s,{\"neutrino_tool\":\"tune\",\"setting\":\"gravity\",\"value\":1}]", fluid);
     ok = ok && simulation_tool_reply(&p, str(&batch)) == SIM_REGENERATE &&

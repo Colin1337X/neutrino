@@ -458,9 +458,10 @@ static void messages_for_story(App *a, Json *messages)
     const char *recap = memory_enabled(p->story) ? memory_recap(path, &covered) : "";
     if (*recap) format(&system, "\n\nRecap of older story messages:\n%s", recap);
     const Json *last = path->child ? path->child->prev : nullptr;
-    if (p->tool_prose_only && !strcmp(js(last, "role"), "user"))
-        format(&system, "\n\nLatest player action and scene direction (reference only for the prose reply):\n%s",
-               js(last, "content"));
+    if (p->tool_prose_only && !strcmp(js(last, "role"), "user")) {
+        append(&system, "\n\nLatest player action and scene direction (reference only for the prose reply):\n");
+        simulation_player_reference(&system, js(last, "content"));
+    }
     simulation_prompt(p, &system);
     messages_add(messages, "system", str(&system));
     release(&system);
@@ -489,8 +490,8 @@ static void messages_for_story(App *a, Json *messages)
             "Continue the scene in one or two sentences of dialogue or action. Focus on the current tool result only. "
             "Describe the character's reaction in words and leave all numbers to the instrument readout." :
             p->tool_prose_retry ?
-            "Write one complete sentence of story dialogue or action. Use any simulator reading above in words." :
-            "Continue the scene in plain prose. Describe the effect of any simulator readings in words. Leave measurements to the instrument readout. The calculations are finished.");
+            "Write one complete sentence of dialogue or physical action. Describe what the character experiences." :
+            "Continue the scene in plain prose with the character's immediate reaction. Leave measurements to the instrument readout.");
     else if (i == first) messages_add(messages, "user", "Begin the story.");
     else if (!strcmp(last_role, "assistant"))
         messages_add(messages, "user", "Continue the story from this moment.");

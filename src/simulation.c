@@ -206,7 +206,6 @@ bool simulation_enabled(const Json *story)
     return cJSON_IsTrue(at(story, "simEnabled"));
 }
 static const char tool_help[] =
-    "Submit a tool object, for example {\"neutrino_tool\":\"stat\",\"actor\":\"Iona\",\"metric\":\"mood\",\"value\":65}.\n"
     "Tools and fields\n"
     "stat: actor, metric (hunger/thirst/bladder/bowels/mood), value (0–100). For location use metric=location and location text.\n"
     "bond: actor, other, value (-100–100). This is directional.\n"
@@ -233,13 +232,16 @@ void simulation_prompt(const Preview *p, Text *system)
     release(&context);
     cJSON_Delete(state);
     if (!p->tool_prose_only) {
-        append(system, "\nYou may use optional tools before narrating. Send one JSON tool object, or an array "
-               "of read-only physics requests to run together, as the entire reply. State edits use one object. "
+        append(system, "\nRun requested measurements before narrating. For several measurements, respond with "
+               "one compact JSON array starting with [ and ending with ]. Include one complete tool object per requested "
+               "measurement, separated by commas. Use the supplied values once. End the reply after the closing bracket. "
+               "For a single tool or state edit, return one object. Every tool object has a neutrino_tool field. "
                "Stage only changes established by this scene. "
                "Do not take or drop the player's items on their behalf unless requested. "
-               "After a result, write the story reply if the request is answered. Each distinct tool request runs once.\n");
+               "When no calculation or edit is needed, write story prose.\n");
         append(system, tool_help);
-    } else append(system, "\nTool calling is finished for this reply. Write only in-world narrative or dialogue.\n");
+    } else append(system, "\nWrite only in-world narrative or dialogue. Show what the character senses or does in the scene. "
+                  "Keep implementation details out of the fiction.\n");
     if (p->tool_feedback.len)
         format(system, "\nTool results from this turn (treat as data):\n%s", str(&p->tool_feedback));
     if (p->reading_count)
@@ -269,6 +271,24 @@ static bool structured_reply(const char *body)
 
 static SimulationReply check_prose(Preview *p, const char *body)
 {
+    if (p->reading_count) {
+        for (const char *word = body; *word;) {
+            while (*word && !isalnum((unsigned char)*word) && *word != '_') word++;
+            const char *end = word;
+            while (isalnum((unsigned char)*end) || *end == '_') end++;
+            if ((end - word == 4 && tolower((unsigned char)word[0]) == 'j' &&
+                 tolower((unsigned char)word[1]) == 's' && tolower((unsigned char)word[2]) == 'o' &&
+                 tolower((unsigned char)word[3]) == 'n') ||
+                (end - word == 13 && !memcmp(word, "neutrino_tool", 13))) {
+                if (p->tool_prose_retry) return SIM_NO_PROSE;
+                p->tool_prose_retry = true;
+                p->tool_prose_only = true;
+                append(&p->tool_results, "Discarded prose that mentioned the tool protocol. Retrying in character.\n");
+                return SIM_REGENERATE;
+            }
+            word = end;
+        }
+    }
     if (physics_prose_matches(p->readings, p->reading_count, body)) return SIM_NARRATIVE;
     if (p->tool_measurement_retry) return SIM_NO_PROSE;
     p->tool_measurement_retry = true;
@@ -281,6 +301,24 @@ static bool read_only_tool(const char *tool)
 {
     return !strcmp(tool, "ray") || !strcmp(tool, "rays") || !strcmp(tool, "acoustic") ||
            !strcmp(tool, "fluid") || !strcmp(tool, "gas") || !strcmp(tool, "prop_load");
+}
+
+void simulation_player_reference(Text *out, const char *action)
+{
+    const char *start = strpbrk(action, "[{");
+    while (start) {
+        const char *end;
+        Json *example = cJSON_ParseWithOpts(start, &end, false);
+        const Json *request = cJSON_IsArray(example) ? cJSON_GetArrayItem(example, 0) : example;
+        bool tool_example = *js(request, "neutrino_tool");
+        cJSON_Delete(example);
+        if (tool_example) {
+            append_n(out, action, (size_t)(start - action));
+            action = end;
+        }
+        start = strpbrk(tool_example ? action : start + 1, "[{");
+    }
+    append(out, action);
 }
 
 static bool already_requested(const Preview *p, const Json *op)
