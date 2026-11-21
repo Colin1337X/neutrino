@@ -42,6 +42,7 @@ const Command commands[] = {
     {"inspect", " [name]", "Read details about the room, a nearby character, or an item"},
     {"inventory", " [held|worn|nearby]", "Browse items you hold, wear, or can reach"},
     {"who", "", "Show characters currently in the room"},
+    {"exits", "", "List exits and their destination descriptions"},
     {"room", " NAME | DESCRIPTION", "Define a room"},
     {"connect", " ROOM | ROOM", "Link two rooms"},
     {"go", " ROOM", "Move through an exit"},
@@ -61,6 +62,7 @@ const Command commands[] = {
     {"persona", " name | description", "Set the player's persona"},
     {"lore", " file", "Attach a keyed lorebook to the current story"},
     {"lore-test", " text", "Preview lore triggers for a possible next message"},
+    {"note", " [text|off]", "Show, set, or clear the roleplay author's note"},
     {"preset", " file", "Attach enabled prompt text from a chat preset"},
     {"link", " /folder/book/chapter/scene", "Share manuscript and canon with this story"},
     {"transcript", " /folder/book/chapter/scene", "Copy the active conversation to a new scene"},
@@ -86,6 +88,7 @@ const Command commands[] = {
     {"select", " all | clear | START END", "Select a UTF-8 byte range for writing tools"},
     {"find", " text", "Find literal text across the manuscript"},
     {"batch", " PATH", "Read scenes together from a folder, book, or chapter"},
+    {"cat", " [PATH]", "Read one manuscript scene without switching to it"},
     {"replace", " OLD | NEW", "Replace literal text in the current scene and save a revision"},
     {"append", " text", "Add a paragraph to the manuscript and save a revision"},
     {"revisions", "", "Inspect saved drafts"},
@@ -426,6 +429,7 @@ static void messages_for_story(App *a, Json *messages)
     if (*js(persona, "name"))
         format(&system, "\nPlayer persona: %s — %s", js(persona, "name"), js(persona, "description"));
     if (p->objective.len) format(&system, "\nPlayer direction: %s", str(&p->objective));
+    if (*js(p->story, "authorNote")) format(&system, "\nAuthor's note: %s", js(p->story, "authorNote"));
     if (p->messages_context.len) format(&system, "\n\nStory sources:\n%s", str(&p->messages_context));
     if (p->world_context.len)
         format(&system, "\n\nCurrent world state (set through player actions):\n%s", str(&p->world_context));
@@ -1399,6 +1403,41 @@ static void test_lore(App *a, const char *cue)
     release(&context);
 }
 
+static void author_note(App *a, const char *text)
+{
+    if (!a->story || !a->roleplay) { status(a, "Open a roleplay story first."); return; }
+    if (!*text) {
+        show_info(a, "Author's note");
+        const char *current = js(a->story, "authorNote");
+        append(&a->info, *current ? current : "No author's note set. Use /note TEXT.");
+        return;
+    }
+    if (preview_busy(&a->preview)) { status(a, "Finish generation before changing the author's note."); return; }
+    if (strlen(text) > 1600) { status(a, "The author's note can be up to 1600 bytes."); return; }
+    const bool off = !strcmp(text, "off");
+    set(a->story, "authorNote", off ? "" : text);
+    a->ws.dirty = true;
+    status(a, off ? "Author's note cleared" : "Author's note saved");
+}
+
+static void read_scene(App *a, const char *path)
+{
+    if (a->roleplay) { status(a, "Switch to Manuscript with F2 first."); return; }
+    Json *scene = *path ? scene_find(&a->ws, path) : a->scene;
+    if (*path && (!scene || strcmp(js(scene, "type"), "scene"))) {
+        status(a, "Choose an existing manuscript scene path.");
+        return;
+    }
+    app_info(a, scene ? js(scene, "name") : "Scratchpad");
+    const char *body = scene_text(&a->ws, scene);
+    const size_t len = strlen(body);
+    size_t shown = len > 64000 ? 64000 : len;
+    while (shown && ((unsigned char)body[shown] & 0xc0) == 0x80) shown--;
+    if (!shown) append(&a->info, "The scene is empty.");
+    else append_n(&a->info, body, shown);
+    if (shown < len) append(&a->info, "\n… Remaining text omitted.");
+}
+
 static void append_manuscript(App *a, const char *text)
 {
     if (a->roleplay) { status(a, "Switch to Manuscript with F2 first."); return; }
@@ -1436,7 +1475,7 @@ static void slash_command(App *a, char *line)
         return;
     }
     const char *const world_commands[] = {"world", "room", "connect", "go", "item",
-        "take", "drop", "wear", "remove", "npc", "weather", "say", "map", "inspect", "inventory", "who"};
+        "take", "drop", "wear", "remove", "npc", "weather", "say", "map", "inspect", "inventory", "who", "exits"};
     for (size_t i = 0; i < sizeof world_commands / sizeof *world_commands; i++) {
         if (!strcmp(line, world_commands[i])) { world_command(a, line, arg); return; }
     }
@@ -1453,6 +1492,8 @@ static void slash_command(App *a, char *line)
     else if (!strcmp(line, "tails")) show_tails(a);
     else if (!strcmp(line, "batch")) read_batch(a, arg);
     else if (!strcmp(line, "lore-test")) test_lore(a, arg);
+    else if (!strcmp(line, "note")) author_note(a, arg);
+    else if (!strcmp(line, "cat")) read_scene(a, arg);
     else if (!strcmp(line, "append")) append_manuscript(a, arg);
     else if (!strcmp(line, "search")) search_story(a, arg);
     else if (!strcmp(line, "replace")) replace_scene_text(a, arg);

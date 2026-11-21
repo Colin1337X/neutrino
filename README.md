@@ -48,6 +48,8 @@ Create a scene with `/scene /Folder/Book/Chapter/Scene`. In the editor, use **Ct
 
 `/append TEXT` adds a paragraph to the current manuscript scene or scratchpad. For a scene, it saves the previous draft in revision history.
 
+`/cat` reads the current scene in a panel. `/cat /folder/book/chapter/scene` reads another scene while keeping the active editor selection.
+
 In Manuscript, plain input supplies a direction for Continue. The writing palette has Continue, Rewrite, Expand, Describe, Draft, Brainstorm, Critique, Continuity, and Bible extraction. Up to three candidate requests run on worker threads. Review shows each candidate's status and keeps their original order as they finish. Compare them with the left and right arrows, then accept or reject. Describe offers selectable senses and multiple variants per sense via `/senses` and `/count`. Use `/insert` to add a detail after the target, or `/preview-save FILE` to keep a candidate separately. If the source has changed since generation, Neutrino blocks applying the candidate. Accepted extracts land as Bible drafts for manual promotion.
 
 Use `/play` from a scene to start a linked roleplay. The narrator receives the linked manuscript and shared story sources. Use `/story TITLE` to start independently, or `/import FILE` to start from a character card. A roleplay turn saves the player message, then streams the reply. `/swipe` generates a sibling reply. `/previous`, `/next`, and `/branch ID` navigate the tree. Use `/persona NAME | DESCRIPTION` for a player persona, `/lore FILE` for keyword-triggered sources, and `/preset FILE` for enabled prompt text. `/transcript /Folder/Book/Chapter/Scene` copies the active branch into a new manuscript scene.
@@ -57,6 +59,8 @@ Use `/rewind` to return to the previous narrator reply, `/rewind ID` to return t
 `/tails` lists visible branch ends with a short excerpt and their message IDs. Use `/branch ID` to open one.
 
 `/lore-test TEXT` checks the triggers and source budget for a proposed next player message. It uses the current branch and leaves the transcript alone.
+
+`/note TEXT` sets a story-wide author's note in the narrator's system prompt. `/note` displays it and `/note off` clears it. The note controls narration and does not become filing evidence.
 
 ## Rooms, inventory, and characters
 
@@ -71,6 +75,8 @@ Use `/wear ITEM` for a carried article and `/remove ITEM` to take it off and kee
 `/inventory` shows items on you and in reach. Use `/inventory held`, `/inventory worn`, or `/inventory nearby` to focus the list.
 
 `/who` lists the characters currently in the room and the names you can address.
+
+`/exits` lists the destinations reachable from the current room, their descriptions, and the matching `/go` commands.
 
 ## Serve the TUI over SSH
 
