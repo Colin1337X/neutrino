@@ -60,8 +60,22 @@ static bool tool_protocol(void)
     format(&batch, "[%s,{\"neutrino_tool\":\"tune\",\"setting\":\"gravity\",\"value\":1}]", fluid);
     ok = ok && simulation_tool_reply(&p, str(&batch)) == SIM_REGENERATE &&
         p.reading_count == 0 && !p.tool_pending && strstr(str(&p.tool_results), "Malformed tool");
-    release(&batch);
     free_protocol(&p);
+    const char *const separators[] = {"\n\n", ","};
+    for (int i = 0; i < 2; i++) {
+        p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+        clear(&batch);
+        format(&batch, "%s%s%s", acoustic, separators[i], fluid);
+        ok = ok && simulation_tool_reply(&p, str(&batch)) == SIM_REGENERATE &&
+             p.tool_rounds == 2 && p.tool_prose_only && p.reading_count == 2;
+        free_protocol(&p);
+    }
+    p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    append(&batch, "\nThe instruments showed a result.");
+    ok = ok && simulation_tool_reply(&p, str(&batch)) == SIM_REGENERATE &&
+         p.reading_count == 0 && strstr(str(&p.tool_results), "Malformed tool");
+    free_protocol(&p);
+    release(&batch);
     return ok;
 }
 

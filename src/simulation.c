@@ -348,6 +348,35 @@ static bool execute_read_only_batch(Preview *p, const Json *batch, const char *j
     return true;
 }
 
+static Json *read_only_sequence(const char *body)
+{
+    if (*body != '{') return nullptr;
+    Json *batch = cJSON_CreateArray();
+    if (!batch) abort();
+    for (int i = 0; i < SIM_TOOL_LIMIT; i++) {
+        const char *end;
+        Json *item = cJSON_ParseWithOpts(body, &end, false);
+        if (!cJSON_IsObject(item) || !read_only_tool(js(item, "neutrino_tool"))) {
+            cJSON_Delete(item);
+            break;
+        }
+        if (!cJSON_AddItemToArray(batch, item)) abort();
+        bool newline = false;
+        while (isspace((unsigned char)*end)) {
+            if (*end == '\n') newline = true;
+            end++;
+        }
+        if (!*end && i > 0) return batch;
+        if (*end == ',') end++;
+        else if (!newline) break;
+        while (isspace((unsigned char)*end)) end++;
+        if (*end != '{') break;
+        body = end;
+    }
+    cJSON_Delete(batch);
+    return nullptr;
+}
+
 SimulationReply simulation_tool_reply(Preview *p, const char *body)
 {
     if (!simulation_enabled(p->story)) return SIM_NARRATIVE;
@@ -373,6 +402,7 @@ SimulationReply simulation_tool_reply(Preview *p, const char *body)
     }
     if (length <= 4000) append_n(&json, body, length);
     Json *op = cJSON_ParseWithOpts(str(&json), nullptr, true);
+    if (!op) op = read_only_sequence(str(&json));
     if (execute_read_only_batch(p, op, str(&json))) {
         release(&json);
         cJSON_Delete(op);
