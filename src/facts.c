@@ -785,6 +785,31 @@ static void add_signal(Json *facts, const char *name, const Text *sentence)
     cJSON_AddItemToArray(facts, fact);
 }
 
+static bool flare_motion(const char *line)
+{
+    static const char *const motions[] = {"ripples", "rippled", "rippling", "rises", "rose",
+        "floats", "floated", "drifts", "drifted", "streaks", "streaked", "streaking",
+        "burns", "burned", "burning", "glows", "glowed", "glowing", "flares", "flared",
+        "ignites", "ignited", "erupts", "erupted", "bursts", "bursting"};
+    static const char *const stops[] = {"and", "but", "before", "when", "until", "while",
+        "might", "could", "should", "would", "will", "can", "may"};
+    for (const char *flare = word(line, "flare"); flare; flare = word(flare + 5, "flare")) {
+        const char *next = flare + 5;
+        for (int i = 0; i < 6 && *next; i++) {
+            next++;
+            const size_t len = strcspn(next, " ");
+            bool stop = false;
+            for (size_t j = 0; j < sizeof stops / sizeof *stops; j++)
+                if (strlen(stops[j]) == len && !memcmp(next, stops[j], len)) { stop = true; break; }
+            if (stop) break;
+            for (size_t j = 0; j < sizeof motions / sizeof *motions; j++)
+                if (strlen(motions[j]) == len && !memcmp(next, motions[j], len)) return true;
+            next += len;
+        }
+    }
+    return false;
+}
+
 Json *compendium_signal_evidence(const char *reply)
 {
     Json *facts = cJSON_CreateArray();
@@ -816,14 +841,7 @@ Json *compendium_signal_evidence(const char *reply)
         if (label) add_signal(facts, label, &sentence);
         if (!word(line, "await") && !word(line, "awaits") && !word(line, "awaiting") &&
                  !word(line, "expects") && !word(line, "expecting") &&
-                 (word(line, "flare rises") || word(line, "flare rose") || word(line, "flare floats") ||
-                  word(line, "flare drifts") || word(line, "flare erupts") || word(line, "flare burns") ||
-                  word(line, "flare flares") || word(line, "flare flared") ||
-                  word(line, "flare ignites") || word(line, "flare ignited") ||
-                  word(line, "flare glows") || word(line, "flare glowed") ||
-                  word(line, "flare is burning") || word(line, "flare burning") ||
-                  word(line, "flare still burning") || word(line, "flare lights up") ||
-                  word(line, "flare bursts") || word(line, "flare streaks") || word(line, "flare glowing") ||
+                 (flare_motion(line) || word(line, "flare lights up") ||
                   word(line, "watches the flare") || word(line, "sees the flare") || (word(line, "flare") &&
                    (word(line, "now floats") || word(line, "descends toward"))))) add_signal(facts, "flare", &sentence);
     }

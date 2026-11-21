@@ -266,6 +266,20 @@ int main(void)
         rc = 1;
     }
     cJSON_Delete(signals);
+    signals = compendium_signal_evidence("A faint, shimmering flare of orange sparks ripples across the water surface.");
+    if (cJSON_GetArraySize(signals) != 1 ||
+        strcmp(js(cJSON_GetArrayItem(signals, 0), "name"), "flare")) {
+        fputs("Intervening descriptive words must not hide a witnessed flare.\n", stderr);
+        rc = 1;
+    }
+    cJSON_Delete(signals);
+    signals = compendium_signal_evidence("Iona calls for the flare and rings the brass bell.");
+    if (cJSON_GetArraySize(signals) != 1 ||
+        strcmp(js(cJSON_GetArrayItem(signals, 0), "name"), "brass bell")) {
+        fputs("A completed bell action must not turn a requested flare into evidence.\n", stderr);
+        rc = 1;
+    }
+    cJSON_Delete(signals);
     cJSON_Delete(batch);
     cJSON_Delete(known);
     return rc;
