@@ -211,6 +211,13 @@ int main(void)
         rc = 1;
     }
     cJSON_Delete(signals);
+    signals = compendium_signal_evidence("Iona's hands moved swiftly as she reached the brass bell, striking it once to summon "
+        "the signal, and striking the bell again to complete the two-ring broadcast before stepping back to await the flare.");
+    if (cJSON_GetArraySize(signals) != 1 || strcmp(js(cJSON_GetArrayItem(signals, 0), "name"), "brass bell")) {
+        fputs("A witnessed bell strike must file without treating an awaited flare as observed.\n", stderr);
+        rc = 1;
+    }
+    cJSON_Delete(signals);
     signals = compendium_signal_evidence("Iona imagines she rings the bell. Would she ring the bell? She watches the water.");
     if (signals->child) { fputs("Imagined or proposed signals must not become facts.\n", stderr); rc = 1; }
     cJSON_Delete(signals);

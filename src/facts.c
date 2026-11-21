@@ -745,8 +745,13 @@ Json *compendium_signal_evidence(const char *reply)
             if (word(line, uncertain[i])) { explicit = false; break; }
         if (!explicit) continue;
         const char *label = nullptr;
-        if (word(line, "rings the brass bell") || word(line, "rang the brass bell")) label = "brass bell";
+        if (word(line, "rings the brass bell") || word(line, "rang the brass bell") ||
+            word(line, "strikes the brass bell") || word(line, "struck the brass bell") ||
+            word(line, "brass bell striking it") ||
+            (word(line, "brass bell") && word(line, "striking the bell"))) label = "brass bell";
         else if (word(line, "rings the bell") || word(line, "rang the bell") ||
+                 word(line, "strikes the bell") || word(line, "struck the bell") ||
+                 word(line, "bell striking it") || word(line, "striking the bell") ||
                  word(line, "bell tolls") || word(line, "bell tolled")) label = "bell";
         else if (word(line, "flare rises") || word(line, "flare rose") || word(line, "flare floats") ||
                  word(line, "flare drifts") || (word(line, "flare") &&
