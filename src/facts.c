@@ -971,7 +971,10 @@ Json *compendium_scene_evidence(const char *reply)
            an event that has yet to happen. */
         if (*source != '"' && strncmp(source, "“", sizeof "“" - 1) &&
             (!strcmp(lead, "the relay radio crackled") || !strcmp(lead, "the radio crackled") ||
-             !strcmp(lead, "the relay radio crackles") || !strcmp(lead, "the radio crackles"))) {
+             !strcmp(lead, "the relay radio crackles") || !strcmp(lead, "the radio crackles") ||
+             word(lead, "the relay radio comes alive on channel") ||
+             word(lead, "the radio came alive on channel")) &&
+            !word(lead, "not") && !uncertain_observation(lead)) {
             add_observation(facts, "event", "radio", &sentence);
             continue;
         }
@@ -987,7 +990,8 @@ Json *compendium_scene_evidence(const char *reply)
         if (clock_reading) add_observation(facts, "item", "station clock", &sentence);
         if (uncertain_observation(line)) continue;
         if (word(line, "key still hidden in") || word(line, "key remains hidden in") ||
-            (word(line, "key is hidden in") && !word(line, "not"))) {
+            (!word(line, "not") && (word(line, "key is hidden in") ||
+             word(line, "leaving the copper key hidden within") || word(line, "leaving the copper key hidden in")))) {
             add_observation(facts, "item", word(line, "copper key") ? "copper key" : "key", &sentence);
         }
         if (word(line, "not")) continue;

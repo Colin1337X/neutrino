@@ -319,6 +319,14 @@ int main(void)
         fputs("Preserve a witnessed radio sound and its dialogue boundary.\n", stderr); rc = 1;
     }
     cJSON_Delete(scene);
+    scene = compendium_scene_evidence("The tide recedes, leaving the copper key hidden within the shadow of the western railing. "
+        "The relay radio comes alive on channel nine, and Iona's voice cuts through the fog: \"Wait for the second bell.\"");
+    if (cJSON_GetArraySize(scene) != 2 ||
+        strcmp(js(cJSON_GetArrayItem(scene, 0), "name"), "copper key") ||
+        strcmp(js(cJSON_GetArrayItem(scene, 1), "name"), "radio")) {
+        fputs("File narrated key concealment and radio activation from their exact sources.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(scene);
     const char *placement_miss = "Iona's fingers press the silver whistle against the railing, its corked end already lodged "
         "in the steel, as the tide visibly recedes and the rusted latch of the west gate clicks shut behind her. "
         "The copper key, still hidden in the crate, is not visible in the dim light.";
