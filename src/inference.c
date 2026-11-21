@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -13,8 +14,29 @@
 #include <pthread.h>
 #endif
 
+uint64_t monotonic_ms(void)
+{
+#ifdef _WIN32
+    return GetTickCount64();
+#else
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000 + (uint64_t)t.tv_nsec / 1000000;
+#endif
+}
+void pause_ms(unsigned ms)
+{
+#ifdef _WIN32
+    Sleep(ms);
+#else
+    struct timespec t = {(time_t)(ms / 1000), (long)(ms % 1000) * 1000000L};
+    nanosleep(&t, NULL);
+#endif
+}
+
 struct Inference {
     char *url, *key, *body;
+    int timeout_ms;
     Text out, reasoning, error;
     bool cancel, done, started;
 #ifdef _WIN32
@@ -150,7 +172,11 @@ static bool transfer(Inference *j, Response *r, long *status)
     wchar_t *path = wide_slice(parts.lpszUrlPath, parts.dwUrlPathLength);
     HINTERNET session = WinHttpOpen(L"Neutrino/0.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (session) WinHttpSetTimeouts(session, 10000, 10000, 10000, 30000);
+    if (session) {
+        int setup = j->timeout_ms > 0 && j->timeout_ms < 10000 ? j->timeout_ms : 10000;
+        int read = j->timeout_ms > 0 ? j->timeout_ms : 30000;
+        WinHttpSetTimeouts(session, setup, setup, setup, read);
+    }
     HINTERNET conn = session ? WinHttpConnect(session, host, parts.nPort, 0) : NULL;
     HINTERNET req = conn ? WinHttpOpenRequest(conn, L"POST", path, NULL, WINHTTP_NO_REFERER,
                         WINHTTP_DEFAULT_ACCEPT_TYPES, parts.nScheme == INTERNET_SCHEME_HTTPS
@@ -204,6 +230,7 @@ static bool transfer(Inference *j, Response *r, long *status)
     struct curl_slist *headers = NULL;
     headers = curl_slist_append(headers, "Content-Type: application/json");
     headers = curl_slist_append(headers, "Accept: text/event-stream, application/json");
+    headers = curl_slist_append(headers, "Expect:");
     Text auth = {0};
     if (*j->key) {
         format(&auth, "Authorization: Bearer %s", j->key);
@@ -220,7 +247,7 @@ static bool transfer(Inference *j, Response *r, long *status)
     curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 10000L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 300000L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, j->timeout_ms > 0 ? (long)j->timeout_ms : 300000L);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, j->body);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_receive);
@@ -276,7 +303,8 @@ static void *worker(void *arg)
 #endif
 }
 
-Inference *inference_start(const char *endpoint, const char *key, const char *model, const Json *messages)
+Inference *inference_request(const char *endpoint, const char *key, const char *model,
+                             const Json *messages, RequestOptions options)
 {
     if ((strncmp(endpoint, "http://", 7) && strncmp(endpoint, "https://", 8)) ||
         strpbrk(endpoint, "\r\n?#") || strpbrk(key, "\r\n") || !*model) return NULL;
@@ -296,10 +324,16 @@ Inference *inference_start(const char *endpoint, const char *key, const char *mo
         append(&url, suffix);
     j->url = url.data;
     j->key = copy(key);
+    j->timeout_ms = options.timeout_ms;
     Json *body = cJSON_CreateObject();
     set(body, "model", model);
     put(body, "messages", cJSON_Duplicate(messages, true));
     put(body, "stream", cJSON_CreateTrue());
+    if (options.slot >= 0) {
+        integer(body, "id_slot", options.slot);
+        put(body, "cache_prompt", cJSON_CreateTrue());
+    }
+    if (options.max_tokens > 0) integer(body, "max_tokens", options.max_tokens);
     j->body = cJSON_PrintUnformatted(body);
     cJSON_Delete(body);
     if (!j->body) abort();
@@ -314,6 +348,10 @@ Inference *inference_start(const char *endpoint, const char *key, const char *mo
     if (j->started) return j;
     inference_free(j);
     return NULL;
+}
+Inference *inference_start(const char *endpoint, const char *key, const char *model, const Json *messages)
+{
+    return inference_request(endpoint, key, model, messages, (RequestOptions){.slot = -1});
 }
 static void mirror(Text *dst, const Text *src)
 {

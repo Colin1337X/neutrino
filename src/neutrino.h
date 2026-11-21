@@ -3,6 +3,8 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <signal.h>
 #include "cJSON.h"
 
 typedef cJSON Json;
@@ -48,7 +50,7 @@ Json *story_pick(const Json *story, int id);
 int story_push(Workspace *ws, Json *story, int parent, const char *role, const char *content);
 Json *story_path(const Json *story, int head);
 void workspace_demo(Workspace *ws);
-bool collect_context(const Workspace *ws, const Json *scene, const Json *story, int head, Text *out);
+bool collect_context(const Workspace *ws, const Json *scene, const Json *story, int head, Text *out, Text *trace);
 const char *scene_text(const Workspace *ws, const Json *scene);
 
 enum {
@@ -68,10 +70,17 @@ size_t utf_encode(int cp, char bytes[4]);
 int utf_width(const char *s, size_t n);
 
 typedef struct Inference Inference;
+typedef struct { int slot, max_tokens, timeout_ms; } RequestOptions;
 Inference *inference_start(const char *endpoint, const char *key, const char *model,
                            const Json *messages);
+Inference *inference_request(const char *endpoint, const char *key, const char *model,
+                             const Json *messages, RequestOptions options);
 bool inference_read(Inference *job, Text *out, Text *reasoning, Text *error);
 void inference_cancel(Inference *job);
 void inference_free(Inference *job);
+uint64_t monotonic_ms(void);
+void pause_ms(unsigned milliseconds);
+int inference_server(int port, const volatile sig_atomic_t *stop);
+int bench_ttft(const char *server, const char *token, int trials, const volatile sig_atomic_t *stop);
 
 #endif

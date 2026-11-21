@@ -829,27 +829,56 @@ static bool contains_folded(const char *text, const char *needle)
     }
     return false;
 }
-static void collect_lore(const Json *book, const char *recent, Text *out, size_t limit)
+static const char *lore_match(const Json *keys, const char *recent)
+{
+    Json *key;
+    cJSON_ArrayForEach(key, keys)
+        if (cJSON_IsString(key) && contains_folded(recent, key->valuestring)) return key->valuestring;
+    return NULL;
+}
+
+static void collect_lore(const Json *book, const char *label, const char *recent,
+                         Text *out, size_t limit, Text *trace)
 {
     Json *entry;
+    int index = 0;
     cJSON_ArrayForEach(entry, at(book, "entries")) {
-        if (cJSON_IsFalse(at(entry, "enabled")) || cJSON_IsTrue(at(entry, "disable"))) continue;
-        bool matches = cJSON_IsTrue(at(entry, "constant"));
-        Json *keys = at(entry, "keys"), *key;
+        const char *title = js(entry, "title");
+        if (!*title) title = js(entry, "comment");
+        if (!*title) title = "Story reference";
+        index++;
+        if (trace) format(trace, "%s #%d — %s: ", label, index, title);
+        bool enabled = !cJSON_IsFalse(at(entry, "enabled")) && !cJSON_IsTrue(at(entry, "disable"));
+        bool constant = cJSON_IsTrue(at(entry, "constant"));
+        Json *keys = at(entry, "keys");
         if (!keys) keys = at(entry, "key");
-        cJSON_ArrayForEach(key, keys)
-            if (cJSON_IsString(key) && contains_folded(recent, key->valuestring)) matches = true;
-        if (matches) {
-            Text label = {0};
-            const char *title = js(entry, "title");
-            if (!*title) title = js(entry, "comment");
-            format(&label, "Lore: %s", *title ? title : "Story reference");
-            bounded_source(out, str(&label), js(entry, "content"), limit);
-            release(&label);
+        const char *match = lore_match(keys, recent);
+        Json *secondary = at(entry, "secondary_keys");
+        if (!secondary) secondary = at(entry, "secondaryKeys");
+        if (!secondary) secondary = at(entry, "keysecondary");
+        bool needs_secondary = cJSON_IsTrue(at(entry, "selective")) && secondary && secondary->child;
+        const char *second = needs_secondary ? lore_match(secondary, recent) : NULL;
+        if (!enabled) { if (trace) append(trace, "skipped (disabled)\n"); }
+        else if (!constant && !match) { if (trace) append(trace, "skipped (no keyword in the latest four visible messages)\n"); }
+        else if (!constant && needs_secondary && !second) {
+            if (trace) format(trace, "skipped (matched '%s', required secondary keyword absent)\n", match);
+        } else if (!*js(entry, "content")) {
+            if (trace) append(trace, "skipped (empty content)\n");
+        } else {
+            Text heading = {0};
+            format(&heading, "Lore: %s", title);
+            bool included = bounded_source(out, str(&heading), js(entry, "content"), limit);
+            if (trace) {
+                if (!included) append(trace, "skipped (matched, but over source budget)\n");
+                else if (constant) append(trace, "included (constant entry)\n");
+                else if (second) format(trace, "included (matched '%s' and '%s')\n", match, second);
+                else format(trace, "included (matched '%s')\n", match);
+            }
+            release(&heading);
         }
     }
 }
-bool collect_context(const Workspace *ws, const Json *scene, const Json *story, int head, Text *out)
+bool collect_context(const Workspace *ws, const Json *scene, const Json *story, int head, Text *out, Text *trace)
 {
     Json *rec, *field, *bible = at(ws->root, "bible"), *records = at(ws->root, "records");
     const char *path = scene ? js(scene, "path") : js(story, "scene");
@@ -915,10 +944,10 @@ bool collect_context(const Workspace *ws, const Json *scene, const Json *story, 
                 append(&recent, "\n");
             }
             Json *card = at(story, "card");
-            collect_lore(at(card, "character_book"), str(&recent), out, limit);
-            collect_lore(at(card, "book"), str(&recent), out, limit);
-            collect_lore(at(at(story, "persona"), "book"), str(&recent), out, limit);
-            collect_lore(at(story, "lore"), str(&recent), out, limit);
+            collect_lore(at(card, "character_book"), "Card lore", str(&recent), out, limit, trace);
+            collect_lore(at(card, "book"), "Card book", str(&recent), out, limit, trace);
+            collect_lore(at(at(story, "persona"), "book"), "Persona book", str(&recent), out, limit, trace);
+            collect_lore(at(story, "lore"), "Attached lore", str(&recent), out, limit, trace);
             release(&recent);
             cJSON_Delete(active);
         }

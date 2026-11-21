@@ -317,13 +317,13 @@ static void detail(App *a, const Layout *l)
         cell(a, x, y + 5, w, RAIL MINT, stat);
     }
     cell(a, x, y + 8, w, RAIL QUIET, "MODEL");
-    cell(a, x, y + 9, w, RAIL TXT, *ui_model(a) ? ui_model(a) : "Not configured");
+    cell(a, x, y + 9, w, RAIL TXT, ui_model(a));
     if (l->height > 16) {
         int n = cJSON_GetArraySize(at(a->ws.root, "bible"));
         snprintf(stat, sizeof stat, "F10  Story Bible · %d", n);
-        cell(a, x, y + 12, w, RAIL TXT, stat);
-        cell(a, x, y + 13, w, RAIL TXT, "F6   Context sources");
-        cell(a, x, y + 14, w, RAIL TXT, a->roleplay ? "/branch   History" : "/revisions   History");
+        cell(a, x, y + 12, w, RAIL TXT, a->roleplay ? "/memory  Compendium" : stat);
+        cell(a, x, y + 13, w, RAIL TXT, a->roleplay ? "/trace   Prompt trace" : "F6   Context sources");
+        cell(a, x, y + 14, w, RAIL TXT, a->roleplay ? "/branch  History" : "/revisions   History");
     }
 }
 static void breadcrumbs(App *a, const Layout *l, int x)
@@ -434,7 +434,8 @@ static void roleplay_rows(App *a, Text *body)
     }
     Preview *p = &a->preview;
     if (p->job && p->story && p->story == a->story) {
-        format(body, "◆  %s  ·  responding\n", *character ? character : "Narrator");
+        format(body, "◆  %s  ·  %s\n", *character ? character : "Narrator",
+               p->recalling ? "recalling memory" : "responding");
         append(body, str(&p->candidates[0].body));
     }
     cJSON_Delete(path);
@@ -588,8 +589,7 @@ static void frame(App *a)
         cell(a, title_x, a->rows - 7, l.main - 6, ROOT QUIET NORMAL, hint);
     }
     composer(a, &l, &cx, &cy);
-    const char *state = a->status.len ? str(&a->status) :
-        *ui_model(a) ? "Ready" : "No model configured · /model <id>";
+    const char *state = a->status.len ? str(&a->status) : "Ready · /server shows the inference address";
     int sw = l.width >= 102 ? l.width - 41 : l.width - 4;
     cell(a, l.left + 2, a->rows - 2, sw, a->preview.job ? ROOT GOLD : ROOT DIM, state);
     if (l.width >= 102)

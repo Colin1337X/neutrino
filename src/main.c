@@ -33,6 +33,8 @@ const Command commands[] = {
     {"story", " title", "Start a roleplay story"},
     {"play", " [title]", "Start a roleplay linked to this scene"},
     {"branch", " [message ID]", "Inspect or switch the active path"},
+    {"memory", " [mode|new|edit|status]", "Open or manage branch-aware story memory"},
+    {"trace", " [file]", "Inspect or export the exact last prompt and lore decisions"},
     {"swipe", "", "Generate an alternate reply"},
     {"previous", "", "Select the previous reply variant"},
     {"next", "", "Select the next reply variant"},
@@ -78,8 +80,8 @@ const Command commands[] = {
     {"import", " file", "Import a workspace, chat journal, or character card"},
     {"export", " file", "Write a new workspace backup"},
     {"save", "", "Save the workspace"},
-    {"model", " model-id", "Set the active model"},
-    {"endpoint", " http://localhost:11434/v1", "Set the OpenAI-compatible endpoint"},
+    {"model", " [MODEL|recall CONN:MODEL]", "Select a server-configured narrator or recall model"},
+    {"server", " [URL]", "Set the Neutrino inference server"},
     {"focus", "", "Toggle the side panes"},
     {"quit", "", "Save and exit"}
 };
@@ -93,12 +95,23 @@ static void on_signal(int sig) { (void)sig; interrupted = 1; }
 
 const char *ui_model(const App *a)
 {
-    return env("NEUTRINO_MODEL", js(at(a->ws.root, "config"), "model"));
+    const char *selected = js(a->ws.root, "serverNarrator");
+    return *selected ? selected : "Server default";
 }
 const char *ui_endpoint(const App *a)
 {
-    const char *saved = js(at(a->ws.root, "config"), "endpoint");
-    return env("NEUTRINO_ENDPOINT", *saved ? saved : "http://127.0.0.1:11434/v1");
+    if (a->server_override) return a->server_override;
+    return env("NEUTRINO_SERVER", a->server_address.len ? str(&a->server_address) : "http://127.0.0.1:4783/v1");
+}
+Inference *app_inference(const App *a, const char *role, const Json *messages)
+{
+    Text route = {0};
+    append(&route, role);
+    const char *model = js(a->ws.root, "serverNarrator");
+    if (!strcmp(role, "narrator") && *model) format(&route, "/%s", model);
+    Inference *job = inference_start(ui_endpoint(a), env("NEUTRINO_SERVER_TOKEN", ""), str(&route), messages);
+    release(&route);
+    return job;
 }
 const char *ui_scene_name(const App *a) { return a->scene ? js(a->scene, "name") : "Scratchpad"; }
 const char *ui_story_name(const App *a) { return a->story ? js(a->story, "title") : "New roleplay"; }
@@ -108,6 +121,7 @@ static const char *trim_left(const char *s)
     return s;
 }
 static void status(App *a, const char *s) { clear(&a->status); append(&a->status, s); }
+void app_status(App *a, const char *s) { status(a, s); }
 static void save(App *a)
 {
     if (!workspace_save(&a->ws)) status(a, "Save failed. Your changes are in memory; /export can write a backup.");
@@ -153,6 +167,7 @@ static void show_info(App *a, const char *title)
     a->panel_scroll = 0;
     a->focus = PANEL;
 }
+void app_info(App *a, const char *title) { show_info(a, title); }
 static void show_preview(App *a)
 {
     a->view_panel = true;
@@ -318,9 +333,13 @@ static void messages_for_story(App *a, Json *messages)
         if (*content && !cJSON_IsFalse(at(prompt, "enabled")) && !cJSON_IsTrue(at(prompt, "marker")))
             format(&system, "\n\n%s", content);
     }
+    memory_inject(p->story, p->parent, p->memory_picks, &system, &p->memory_trace);
+    Json *path = story_path(p->story, p->parent), *node;
+    int covered = 0;
+    const char *recap = memory_enabled(p->story) ? memory_recap(path, &covered) : "";
+    if (*recap) format(&system, "\n\nRecap of older story messages:\n%s", recap);
     messages_add(messages, "system", str(&system));
     release(&system);
-    Json *path = story_path(p->story, p->parent), *node;
     size_t bytes = 0;
     int total = cJSON_GetArraySize(path), first = total;
     node = path->child ? path->child->prev : NULL;
@@ -331,6 +350,9 @@ static void messages_for_story(App *a, Json *messages)
         first--;
         node = node->prev;
     }
+    if (first < covered) first = covered;
+    if (first > covered) format(&p->memory_trace, "%d older messages omitted by the history size limit.\n", first - covered);
+    if (covered) format(&p->memory_trace, "Recap covers the first %d visible messages.\n", covered);
     int i = 0;
     const char *last_role = "";
     cJSON_ArrayForEach(node, path) {
@@ -397,6 +419,12 @@ static void release_preview(Preview *p)
     release(&p->source);
     release(&p->messages_context);
     release(&p->objective);
+    release(&p->lore_trace);
+    release(&p->memory_trace);
+    release(&p->recall_output);
+    release(&p->recall_thinking);
+    release(&p->recall_error);
+    cJSON_Delete(p->memory_picks);
     *p = (Preview){0};
 }
 static void next_candidate(App *a)
@@ -404,26 +432,67 @@ static void next_candidate(App *a)
     Preview *p = &a->preview;
     Candidate *c = &p->candidates[p->running];
     Json *messages = request_messages(a, c->label);
-    const char *key = env("NEUTRINO_API_KEY", js(at(a->ws.root, "config"), "apiKey"));
-    p->job = inference_start(ui_endpoint(a), key, ui_model(a), messages);
+    clear(&a->trace);
+    format(&a->trace, "%s · %s · %s\n", operation_names[p->op], c->label, ui_model(a));
+    if (p->story) format(&a->trace, "Story: %s · parent #%d\n\nLore decisions\n%s\nCompendium\n%s",
+        js(p->story, "title"), p->parent, p->lore_trace.len ? str(&p->lore_trace) : "No lore entries attached.\n",
+        str(&p->memory_trace));
+    append(&a->trace, "\nMessages sent to the server (JSON, in order)\n\n");
+    char *wire = cJSON_Print(messages);
+    if (!wire) abort();
+    append(&a->trace, wire);
+    cJSON_free(wire);
+    p->job = app_inference(a, "narrator", messages);
     cJSON_Delete(messages);
     if (!p->job) {
-        append(&c->error, "Could not start inference. Check the model, endpoint and API key.");
+        append(&c->error, "Could not start inference. Check /server and the server process.");
         status(a, str(&c->error));
         p->complete = true;
     }
 }
-static bool configured(App *a)
+static bool begin_recall(App *a)
 {
-    if (*ui_model(a)) return true;
-    status(a, "Set /model <id> to connect. Default endpoint is Ollama on port 11434.");
+    Preview *p = &a->preview;
+    if (!memory_enabled(p->story)) return false;
+    const char *mode = memory_mode(p->story);
+    const Json *head = story_pick(p->story, p->head);
+    if (p->op == SWIPE && !p->objective.len && strcmp(mode, "lexical") && strcmp(mode, "off") &&
+        cJSON_IsArray(at(head, "memoryRecallPicks"))) {
+        p->memory_picks = cJSON_Duplicate(at(head, "memoryRecallPicks"), true);
+        append(&p->memory_trace, "Recall reused from the previous swipe.\n");
+        return false;
+    }
+    if (!strcmp(mode, "prefetch") || !strcmp(mode, "auto")) {
+        MemoryLane *lane = &a->memory;
+        int previous = !strcmp(js(story_pick(p->story, p->parent), "role"), "user") ?
+            number(story_pick(p->story, p->parent), "parent") : p->parent;
+        if (lane->cached_story == p->story &&
+            (lane->cached_head == p->parent || lane->cached_head == previous) &&
+            lane->cached_picks && !p->objective.len) {
+            p->memory_picks = cJSON_Duplicate(lane->cached_picks, true);
+            append(&p->memory_trace, "Used prefetched model recall and current lexical matches.\n");
+        } else append(&p->memory_trace, "No matching prefetch. Used lexical recall.\n");
+        return false;
+    }
+    if (!strcmp(mode, "sync")) {
+        Json *messages = memory_recall_prompt(p->story, p->parent, str(&p->objective));
+        if (messages) {
+            p->job = memory_start_recall(a, p->story, messages);
+            cJSON_Delete(messages);
+        }
+        if (p->job) {
+            p->recalling = true;
+            status(a, "Recalling story memory · Esc cancels");
+            return true;
+        }
+        append(&p->memory_trace, "No model recall available. Used lexical recall.\n");
+    } else format(&p->memory_trace, "Recall mode: %s (no model call).\n", mode);
     return false;
 }
 static void begin(App *a, Operation op, const char *objective, int parent)
 {
     Preview *p = &a->preview;
     if (p->job) { status(a, "A generation is already running. Esc cancels."); return; }
-    if (!configured(a)) return;
     if (op < NARRATE && a->roleplay) { status(a, "F2 switches to Manuscript for writing tools."); return; }
     if (op >= NARRATE && (!a->roleplay || !a->story)) { status(a, "Open a roleplay story first."); return; }
     release_preview(p);
@@ -451,7 +520,8 @@ static void begin(App *a, Operation op, const char *objective, int parent)
             return;
         }
     }
-    if (!collect_context(&a->ws, p->story ? NULL : p->scene, p->story, p->parent, &p->messages_context)) {
+    if (!collect_context(&a->ws, p->story ? NULL : p->scene, p->story, p->parent,
+                         &p->messages_context, &p->lore_trace)) {
         status(a, "Required context exceeds the budget. Raise /budget or unpin a source.");
         return;
     }
@@ -476,6 +546,8 @@ static void begin(App *a, Operation op, const char *objective, int parent)
     }
     p->open = true;
     if (!p->story) show_preview(a);
+    memory_pause(a);
+    if (p->story && begin_recall(a)) return;
     status(a, "Generating · Esc cancels");
     next_candidate(a);
 }
@@ -485,6 +557,24 @@ static bool update_generation(App *a)
     Preview *p = &a->preview;
     if (!p->job) return false;
     Candidate *c = &p->candidates[p->running];
+    if (p->recalling) {
+        if (!inference_read(p->job, &p->recall_output, &p->recall_thinking, &p->recall_error)) return false;
+        inference_free(p->job);
+        p->job = NULL;
+        p->recalling = false;
+        if (p->stopped || p->head != number(p->story, "head")) {
+            p->open = false;
+            p->complete = true;
+            status(a, p->stopped ? "Generation cancelled" : "The active branch moved during recall");
+            return true;
+        }
+        if (!p->recall_error.len) p->memory_picks = memory_parse_picks(&p->recall_output);
+        append(&p->memory_trace, p->memory_picks ? "Used synchronous model recall and lexical matches.\n" :
+            "Model recall failed or returned invalid IDs. Used lexical recall.\n");
+        status(a, "Generating · Esc cancels");
+        next_candidate(a);
+        return true;
+    }
     size_t before = c->body.len + c->thinking.len + c->error.len;
     if (!inference_read(p->job, &c->body, &c->thinking, &c->error))
         return before != c->body.len + c->thinking.len + c->error.len;
@@ -498,7 +588,10 @@ static bool update_generation(App *a)
     } else if (p->story) {
         if (p->head == number(p->story, "head")) {
             int id = story_push(&a->ws, p->story, p->parent, "assistant", str(&c->body));
-            if (c->thinking.len) set(story_pick(p->story, id), "reasoning", str(&c->thinking));
+            Json *reply = story_pick(p->story, id);
+            if (c->thinking.len) set(reply, "reasoning", str(&c->thinking));
+            if (p->memory_picks) put(reply, "memoryRecallPicks", cJSON_Duplicate(p->memory_picks, true));
+            memory_schedule(a, p->story, id);
             p->open = false;
             if (a->roleplay && a->story == p->story) a->scroll = INT_MAX;
             status(a, p->op == SWIPE ? "Alternate reply saved · /previous or /branch" : "Reply saved");
@@ -562,7 +655,7 @@ static void view_context(App *a)
     show_info(a, "Context inspector");
     Json *story = a->roleplay ? a->story : NULL;
     bool fits = collect_context(&a->ws, a->roleplay ? NULL : a->scene, story,
-                                number(story, "head"), &a->info);
+                                number(story, "head"), &a->info, NULL);
     if (!fits) append(&a->info, "Required or pinned sources exceed the budget.\n\n");
     if (!a->info.len) append(&a->info, "No supplemental sources. Add a premise, creative controls or Story Bible entry.\n\n");
     else format(&a->info, "Source estimate: %zu tokens\n\n", (a->info.len + 3) / 4);
@@ -847,6 +940,16 @@ static void slash_command(App *a, char *line)
     else if (!strcmp(line, "quit")) quit(a);
     else if (!strcmp(line, "save")) { status(a, "Workspace saved"); save(a); }
     else if (!strcmp(line, "focus")) a->compact = !a->compact;
+    else if (!strcmp(line, "memory")) memory_command(a, arg);
+    else if (!strcmp(line, "trace")) {
+        if (!a->trace.len) status(a, "No model prompt has been prepared in this session.");
+        else if (*arg) status(a, write_file(arg, str(&a->trace), false) ? "Prompt trace exported" :
+                           "Trace export failed. Supply a new filename.");
+        else {
+            show_info(a, "Prompt trace");
+            append(&a->info, str(&a->trace));
+        }
+    }
     else if (!strcmp(line, "scene")) {
         Json *scene = scene_add(&a->ws, arg);
         if (!scene) status(a, "Use /scene /folder/book/chapter/scene.");
@@ -1013,19 +1116,31 @@ static void slash_command(App *a, char *line)
     else if (!strcmp(line, "export")) {
         status(a, *arg && workspace_export(&a->ws, arg) ? "Workspace backup exported" :
             "Export failed. Use the path to a new file.");
-    } else if (!strcmp(line, "model") || !strcmp(line, "endpoint")) {
-        bool endpoint = !strcmp(line, "endpoint");
-        if (!*arg) status(a, endpoint ? ui_endpoint(a) : *ui_model(a) ? ui_model(a) : "No model configured");
-        else if (a->preview.job) status(a, "Finish or cancel generation before changing providers.");
-        else if (endpoint && strncmp(arg, "http://", 7) && strncmp(arg, "https://", 8))
-            status(a, "The endpoint must start with http:// or https://.");
-        else if (*env(endpoint ? "NEUTRINO_ENDPOINT" : "NEUTRINO_MODEL", ""))
-            status(a, "The environment variable overrides this setting. Restart without it to configure here.");
+    } else if (!strcmp(line, "model")) {
+        if (!strncmp(arg, "recall", 6) && (!arg[6] || isspace((unsigned char)arg[6])))
+            memory_binding(a, trim_left(arg + 6));
+        else if (!*arg) status(a, ui_model(a));
+        else if (a->preview.job) status(a, "Finish or cancel generation before changing models.");
+        else if (strlen(arg) > 160 || strpbrk(arg, " \t\r\n")) status(a, "Enter one server-configured model ID or default.");
         else {
-            set(at(a->ws.root, "config"), line, arg);
+            set(a->ws.root, "serverNarrator", !strcmp(arg, "default") ? "" : arg);
             a->ws.dirty = true;
-            status(a, endpoint ? "Endpoint saved" : "Model saved");
+            status(a, "Narrator model selection saved");
         }
+    } else if (!strcmp(line, "server")) {
+        if (!*arg) status(a, ui_endpoint(a));
+        else if (a->preview.job || a->memory.job) status(a, "Wait for active requests before changing servers.");
+        else if (a->server_override || *env("NEUTRINO_SERVER", ""))
+            status(a, "Restart without --server or NEUTRINO_SERVER to change the address here.");
+        else if ((strncmp(arg, "http://", 7) && strncmp(arg, "https://", 8)) || strpbrk(arg, " \t\r\n?#@"))
+            status(a, "Use the Neutrino server URL, such as http://127.0.0.1:4783/v1.");
+        else {
+            clear(&a->server_address);
+            append(&a->server_address, arg);
+            status(a, "Inference server set for this session");
+        }
+    } else if (!strcmp(line, "endpoint")) {
+        status(a, "Set the provider endpoint in the server process. /server sets this client's address.");
     } else status(a, "Unknown command · Ctrl+P opens the palette");
 }
 
@@ -1043,8 +1158,8 @@ static void submit(App *a)
 {
     if (!*trim_left(str(&a->prompt))) return;
     char *data = copy(trim_left(str(&a->prompt)));
-    if (*data != '/' && a->roleplay && (a->preview.job || !configured(a))) {
-        if (a->preview.job) status(a, "A generation is already running. Esc cancels.");
+    if (*data != '/' && a->roleplay && a->preview.job) {
+        status(a, "A generation is already running. Esc cancels.");
         free(data);
         return;
     }
@@ -1261,21 +1376,44 @@ static int run(int argc, char **argv)
 {
     App a = {0};
     const char *path = env("NEUTRINO_WORKSPACE", ".neutrino.json"), *import = NULL;
-    bool dump = false;
+    bool dump = false, serve = false;
+    int port = 4783, bench = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--demo")) a.demo = true;
         else if (!strcmp(argv[i], "--snapshot")) dump = true;
+        else if (!strcmp(argv[i], "--serve")) serve = true;
+        else if (!strcmp(argv[i], "--port") && i + 1 < argc) {
+            port = parse_number(argv[++i], 1, 65535);
+            if (port < 0) { fputs("Invalid port.\n", stderr); return 2; }
+        }
+        else if (!strcmp(argv[i], "--server") && i + 1 < argc) a.server_override = argv[++i];
+        else if (!strcmp(argv[i], "--bench-ttft") || (!strcmp(argv[i], "bench") &&
+                 i + 1 < argc && !strcmp(argv[i + 1], "ttft"))) {
+            if (!strcmp(argv[i], "bench")) i++;
+            bench = 3;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                bench = parse_number(argv[++i], 1, 20);
+                if (bench < 0) { fputs("Enter a benchmark round count from 1 to 20.\n", stderr); return 2; }
+            }
+        }
         else if (!strcmp(argv[i], "--workspace") && i + 1 < argc) path = argv[++i];
         else if (!strcmp(argv[i], "--import") && i + 1 < argc) import = argv[++i];
-        else if (!strcmp(argv[i], "--version")) { puts("Neutrino 0.1.0"); return 0; }
+        else if (!strcmp(argv[i], "--version")) { puts("Neutrino 0.2.0"); return 0; }
         else {
             bool help = !strcmp(argv[i], "--help") || !strcmp(argv[i], "-h");
             FILE *out = help ? stdout : stderr;
             if (!help) fprintf(out, "Unexpected argument: %s\n", argv[i]);
-            fprintf(out, "Usage: neutrino [--workspace FILE] [--import FILE] [--demo] [--snapshot]\n");
+            fputs("Usage: neutrino [--workspace FILE] [--import FILE] [--demo] [--snapshot] [--server URL]\n"
+                  "       neutrino --serve [--port PORT]\n"
+                  "       neutrino bench ttft [ROUNDS] [--server URL]\n", out);
             return help ? 0 : 2;
         }
     }
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+    if (serve && bench) { fputs("Start the server and benchmark in separate processes.\n", stderr); return 2; }
+    if (serve) return inference_server(port, &interrupted);
+    if (bench) return bench_ttft(ui_endpoint(&a), env("NEUTRINO_SERVER_TOKEN", ""), bench, &interrupted);
     if (!workspace_open(&a.ws, a.demo ? NULL : path, !dump || import != NULL)) {
         fprintf(stderr, "Could not open workspace: %s (locked, inaccessible, or invalid JSON)\n", path);
         return 1;
@@ -1301,8 +1439,6 @@ static int run(int argc, char **argv)
             return 1;
         }
         atexit(restore_terminal);
-        signal(SIGINT, on_signal);
-        signal(SIGTERM, on_signal);
         const char start[] = "\x1b[?1049h\x1b[?25l";
         terminal_write(start, sizeof start - 1);
         bool redraw = true;
@@ -1315,6 +1451,10 @@ static int run(int argc, char **argv)
                 redraw = true;
             }
             if (update_generation(&a)) redraw = true;
+            if (memory_tick(&a)) {
+                save(&a);
+                redraw = true;
+            }
             if (redraw) ui_draw(&a);
             int key = terminal_key(50);
             redraw = key >= 0;
@@ -1333,6 +1473,7 @@ static int run(int argc, char **argv)
         inference_cancel(a.preview.job);
         inference_free(a.preview.job);
     }
+    memory_close(&a);
     release_preview(&a.preview);
     for (int i = 0; i < a.history_count; i++) free(a.history[i]);
     release(&a.screen);
@@ -1340,6 +1481,8 @@ static int run(int argc, char **argv)
     release(&a.edit);
     release(&a.status);
     release(&a.info);
+    release(&a.trace);
+    release(&a.server_address);
     workspace_close(&a.ws);
     return 0;
 }

@@ -1,6 +1,6 @@
 # Neutrino
 
-A native C terminal workspace for writing fiction and playing it out. Manuscript and Roleplay share one library, one Story Bible, and one model connection. The interface takes cues from Claude Code and Codex CLI's keyboard-first workflows and uses its own layout, palette, and typography.
+A native C terminal workspace for writing fiction and playing it out. Manuscript and Roleplay share one library, one Story Bible, and one inference server. Each roleplay story also has its own branch-aware Compendium. The interface takes cues from Claude Code and Codex CLI's keyboard-first workflows and uses its own layout, palette, and typography.
 
 ## Build and open
 
@@ -43,11 +43,59 @@ In Manuscript, plain input supplies a direction for Continue. The writing palett
 
 Use `/play` from a scene to start a linked roleplay. The narrator receives the linked manuscript and shared story sources. Use `/story TITLE` to start independently, or `/import FILE` to start from a character card. A roleplay turn saves the player message, then streams the reply. `/swipe` generates a sibling reply. `/previous`, `/next`, and `/branch ID` navigate the tree. Use `/persona NAME | DESCRIPTION` for a player persona, `/lore FILE` for keyword-triggered sources, and `/preset FILE` for enabled prompt text. `/transcript /Folder/Book/Chapter/Scene` copies the active branch into a new manuscript scene.
 
-## Connect a model
+## Connect the inference server
 
-Set `/model MODEL_ID`. The default endpoint is Ollama's OpenAI-compatible API at `http://127.0.0.1:11434/v1`. Set `/endpoint URL` for another OpenAI-compatible chat-completions server. The environment variables `NEUTRINO_ENDPOINT` and `NEUTRINO_MODEL` override saved settings. If authentication is required, supply `NEUTRINO_API_KEY` in the process environment. Workspace saves and exports omit known API-key fields.
+Start Neutrino's server in a terminal on the machine that can reach the provider. For example, in PowerShell with Ollama running locally:
 
-Foreground generation uses streaming chat completions, with support for regular JSON responses and separate provider reasoning. **Esc** requests cancellation and keeps partial text available for export. Windows may wait for an outstanding WinHTTP read to return.
+```powershell
+$env:NEUTRINO_MODEL = 'your-installed-model-id'
+.\build\Release\neutrino.exe --serve
+```
+
+Open the TUI in a second terminal. Its default server address is `http://127.0.0.1:4783/v1`. The TUI sends prompts to Neutrino's server, which opens the upstream provider connection and streams the reply back.
+
+```powershell
+.\build\Release\neutrino.exe --demo
+```
+
+| Server setting | Purpose |
+| --- | --- |
+| `NEUTRINO_ENDPOINT` | OpenAI-compatible provider base URL. Defaults to `http://127.0.0.1:11434/v1`. |
+| `NEUTRINO_MODEL` | Narrator and manuscript model ID. Required. |
+| `NEUTRINO_API_KEY` | Upstream bearer credential, when required. Keep it in the server process. |
+| `NEUTRINO_AGENT_MODEL` | Filing and historian model. Defaults to the narrator model. |
+| `NEUTRINO_RECALL_MODEL` | Recall model. Defaults to the agent model. |
+| `NEUTRINO_RECALL_ENDPOINT`, `NEUTRINO_RECALL_API_KEY` | Optional dedicated recall provider and its bearer credential. |
+| `NEUTRINO_SERVER_TOKEN` | Optional credential between the TUI and Neutrino's server. Set it in both processes when enabled. |
+
+The server listens on loopback. To use a server on another machine, forward the port over SSH, for example `ssh -N -L 4783:127.0.0.1:4783 user@server`. The TUI still needs a connection to Neutrino's server. It has no provider credentials or provider endpoint to configure. Use `--serve --port PORT` to change the listener and `--server URL`, `NEUTRINO_SERVER`, or `/server URL` to change the client address. The slash command applies to the current TUI session. A reverse proxy must pass HTTP/1.1 with a loopback Host header and stream responses without buffering.
+
+**Esc** requests cancellation and keeps partial foreground text available for export. Windows may wait for an outstanding WinHTTP read to return. The TUI owns the workspace and its memory queue. Closing it cancels active requests; unfinished filing picks up when the workspace reopens.
+
+## Compendium and prompt trace
+
+Each completed narrator reply queues filing. The filing agent writes typed facts such as characters, places, items, events, and notes onto the reply that established them. The historian compacts older turns into a cumulative recap. Recall combines relevant active entries with recent dialogue, the recap, and other story sources. Switching or swiping a branch changes the reply history and the memory entries visible to the narrator.
+
+| Command | Action |
+| --- | --- |
+| `/memory` | List active entries and their IDs. |
+| `/memory new TYPE \| NAME \| DESCRIPTION` | Add an entry on this branch. |
+| `/memory edit ID \| DESCRIPTION` and `/memory delete ID` | Edit or hide an entry from this point on the branch. |
+| `/memory mode [MODE]` | Show or set recall to `auto`, `prefetch`, `sync`, `lexical`, or `off`. |
+| `/model recall recall:MODEL` | Use the configured recall model and connection. `default:MODEL` selects the server's narrator model for recall. `default` clears the override. |
+| `/memory status`, `/memory retry`, `/memory refile ID`, `/memory undo ID` | Inspect, retry, redo, or remove background output. |
+| `/memory off` and `/memory on` | Pause or resume the story's Compendium. |
+| `/trace [FILE]` | Inspect or export the last foreground prompt from this TUI session. |
+
+`auto` and `prefetch` use a completed recall result from the active path when available, with lexical matching as a fallback. `sync` waits for model recall on the current turn. `lexical` and recall mode `off` use keyword matching without a recall model call. Model recall failures fall back to keyword matching.
+
+`/trace` includes the complete ordered messages as JSON, the chosen memory entries and recap coverage, and the reason each lore entry was included or skipped. Lore matching covers constant entries, primary keywords, selective secondary keywords, and the source budget. Exported traces contain story text.
+
+### llama.cpp cache isolation
+
+Start llama.cpp with at least two separate cache slots (`-np 2 --no-kv-unified`) and set `NEUTRINO_LLAMA_SLOTS=1` in Neutrino's server environment. Narration uses slot 0. Filing, history, and same-provider recall use slot 1. A separately configured recall provider manages its own cache. Enable this setting only for a llama.cpp instance configured with separate slots. [rp-core guide on local server caching](https://github.com/LeviTheWeasel/rp-core/blob/main/docs/USER-GUIDE.md#local-servers-speed-and-caching)
+
+Run `neutrino bench ttft [ROUNDS]` against the running Neutrino server to compare cold, warm, and post-agent time to first token using synthetic prompts. The reported ratio and verdict use timing. Compendium prompts and the benchmark are based on the [rp-core Compendium workflow](https://github.com/LeviTheWeasel/rp-core/blob/main/docs/USER-GUIDE.md#the-compendium).
 
 ## Import and export
 
@@ -62,7 +110,7 @@ Use `/import FILE` or `--import FILE` to bring data into a Neutrino workspace.
 
 Imports leave the input file intact. Workspace imports with colliding paths or IDs are rejected. `/export FILE` creates a fresh JSON backup. Use the backup on another machine or reimport it into an empty workspace.
 
-Neutrino is a C reimplementation of the combined core workflows. Upstream features outside this port include rp-core's automated Director and Compendium agents, native Anthropic and Gemini dialects, RoleCall ZIP import, and Xenon's persistent job runner, recursive batch generation, and browser appearance features. Roleplay presets use their prompt text, with no upstream slot or sampler emulation.
+Neutrino is a C reimplementation of the combined core workflows. Upstream features outside this port include rp-core's automated Director, native Anthropic and Gemini dialects, RoleCall ZIP import, and Xenon's persistent job runner, recursive batch generation, and browser appearance features. Roleplay presets use their enabled prompt text.
 
 ## Upstream references
 
