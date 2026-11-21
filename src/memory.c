@@ -386,7 +386,8 @@ static Json *filing_prompt(const Json *story, int id)
         "copied verbatim from the latest reply. Previously filed entries are only for deduplication. "
         "Use one object per entity and choose the most specific type. Allowed types: "
         "character, place, item, event, note, faction, rule, relationship, plot, quest, creature. "
-        "Use character for named people. Keep the entity named in the description aligned with the entry name. "
+        "Use character for people and item for physical objects, even when described figuratively. "
+        "Keep the entity named in the description aligned with the entry name. "
         "An object being hidden and the container or place hiding it are separate entities. "
         "Reuse existing names for updates. Skip facts already in the supplied ledger, including under another type. "
         "If nothing changed, return [].", &input);
@@ -408,7 +409,8 @@ static bool file_candidates(Json *result, const Json *known, const Json *answer,
         (*index)++;
         Text corrected = {0}, evidence = {0}, novel = {0};
         if (!compendium_filing_evidence(prose, description, &evidence)) continue;
-        type = compendium_filing_identity(type, name, description, prose, &corrected);
+        type = compendium_filing_identity(type, name,
+            !strcmp(type, "character") ? str(&evidence) : description, prose, &corrected);
         if (corrected.len) name = str(&corrected);
         if (compendium_filing_label(name, str(&evidence))) {
             bool ambiguous = compendium_novel_claims(known, result, type, name, str(&evidence), &novel);

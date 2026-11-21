@@ -180,6 +180,17 @@ int main(void)
     type = compendium_filing_identity("creature", "Captain Ember", "Captain Ember watches the bay.",
                                       "Captain Ember, a dragon, watches the bay.", &label);
     if (strcmp(type, "creature") || label.len) { fputs("Preserve explicit species evidence.\n", stderr); rc = 1; }
+    const char *tucked = "The copper key remains tucked beneath the red box, a silent guardian of the station's history.";
+    type = compendium_filing_identity("character", "Copper Key", tucked, tucked, &label);
+    if (strcmp(type, "item") || label.len) { fputs("A figuratively described physical key must file as an item.\n", stderr); rc = 1; }
+    const char *hidden = "Iona hides the copper key beneath her coat.";
+    type = compendium_filing_identity("character", "Copper Key", hidden, hidden, &label);
+    if (strcmp(type, "item")) { fputs("A labeled object handled by a character must file as an item.\n", stderr); rc = 1; }
+    const char *person = "Copper Key stepped onto the pier and told Mara his story.";
+    type = compendium_filing_identity("character", "Copper Key", person, person, &label);
+    if (strcmp(type, "character")) { fputs("An object-like name alone must not change a character's type.\n", stderr); rc = 1; }
+    type = compendium_filing_identity("character", "Copper Key", tucked, "Iona stares at the water.", &label);
+    if (strcmp(type, "character")) { fputs("Do not use an ungrounded object's description to reclassify it.\n", stderr); rc = 1; }
     release(&label);
     Text quote = {0};
     const char *narration = "Iona considers hiding the copper key, but leaves it on the console. She ties the silver whistle to the railing.";
@@ -225,6 +236,18 @@ int main(void)
     cJSON_Delete(signals);
     signals = compendium_signal_evidence("Iona imagines she rings the bell. Would she ring the bell? She watches the water.");
     if (signals->child) { fputs("Imagined or proposed signals must not become facts.\n", stderr); rc = 1; }
+    cJSON_Delete(signals);
+    const char *bright = "The flare flares bright, illuminating the white line on the water.";
+    signals = compendium_signal_evidence(bright);
+    const Json *flare = cJSON_GetArrayItem(signals, 0);
+    if (cJSON_GetArraySize(signals) != 1 || strcmp(js(flare, "name"), "flare") ||
+        strcmp(js(flare, "description"), bright)) {
+        fputs("Recover the exact observed flare sentence from the missed live filing.\n", stderr);
+        rc = 1;
+    }
+    cJSON_Delete(signals);
+    signals = compendium_signal_evidence("Iona waits for the signal. She expects the flare ignites near the pier.");
+    if (signals->child) { fputs("An expected flare must not become a witnessed event.\n", stderr); rc = 1; }
     cJSON_Delete(signals);
     cJSON_Delete(batch);
     cJSON_Delete(known);

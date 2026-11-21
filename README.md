@@ -154,7 +154,7 @@ Each completed narrator reply queues filing. The filing agent writes typed facts
 
 The filing agent receives the latest narrator reply and relevant entries for deduplication. Each proposed filing must quote the latest reply and name an entity that appears in the supporting text. Short quotations expand to their source sentences so qualifications remain visible. If no opening filings pass the check, Neutrino looks for explicit object placements, stranded characters, and opening-time rules in the narrator's prose. On later turns, direct evidence can also file a new placement or attachment of an item the narrator already mentioned. Neutrino checks the last observed placement on the active branch and keeps the original sentence as `reply-evidence`.
 
-Before accepting a filing, Neutrino can correct an item name when the narrator explicitly identifies a different concealed object. It files a named, titled person as a character if the reply supplies no explicit creature identity. Use `/memory refile ID` to run the current filing rules on an earlier reply.
+Before accepting a filing, Neutrino can correct an item name when the narrator explicitly identifies a different concealed object. Handling or placement in the supporting prose can also correct a physical item mislabeled as a character. It files a named, titled person as a character if the reply supplies no explicit creature identity. Source sentences that show an observed flare can be filed directly if the agent misses them. Use `/memory refile ID` to run the current filing rules on an earlier reply.
 
 | Command | Action |
 | --- | --- |

@@ -442,18 +442,67 @@ static bool explicitly_nonhuman(const char *text, const char *name)
     return false;
 }
 
+/* Identify a concrete object from what happens to it, not from its label
+   alone. For example, a named character can also be called Copper Key. */
+static bool placed_item(const char *text, const char *name)
+{
+    static const char *const objects[] = {"key", "box", "whistle", "bell", "lamp", "lantern", "radio"};
+    static const char *const placements[] = {
+        " remains tucked ", " is tucked ", " was tucked ", " lies ", " lay ", " rests ",
+        " rests securely ", " is resting ", " is hidden ", " was hidden ", " is concealed ",
+        " was concealed ", " is stored ", " was stored ", " is nestled ", " was nestled ",
+        " is ", " was ", " remains "
+    };
+    static const char *const actions[] = {
+        "holds the ", "held the ", "places the ", "placed the ", "hides the ", "hid the ",
+        "stores the ", "stored the ", "ties the ", "tied the ", "clamps the ", "clamped the ",
+        "retrieves the ", "retrieved the "
+    };
+    const char *noun = strrchr(name, ' ');
+    noun = noun ? noun + 1 : name;
+    bool object = false;
+    for (size_t i = 0; i < sizeof objects / sizeof *objects; i++)
+        if (!strcmp(noun, objects[i])) { object = true; break; }
+    if (!object) return false;
+    Text definite = {0};
+    format(&definite, "the %s", name);
+    const size_t length = definite.len;
+    bool grounded = false;
+    for (const char *p = word(text, str(&definite)); p && !grounded; p = word(p + length, str(&definite))) {
+        for (size_t i = 0; i < sizeof placements / sizeof *placements && !grounded; i++) {
+            const char *where = p + length;
+            if (!prefix(&where, placements[i])) continue;
+            const char *place = nullptr, *relation = nullptr;
+            grounded = location_at(where, &place, &relation, "located") == where;
+        }
+        /* For a direct object, the verb precedes its definite article. */
+        for (size_t i = 0; i < sizeof actions / sizeof *actions && !grounded; i++) {
+            size_t stem = strlen(actions[i]) - sizeof "the " + 1;
+            if ((size_t)(p - text) < stem) continue;
+            const char *verb = p - stem;
+            grounded = (verb == text || verb[-1] == ' ') && !memcmp(verb, actions[i], stem);
+        }
+    }
+    release(&definite);
+    return grounded;
+}
+
 /* Repair a supplied identity only when the narrator independently names it.
    A location or another noun mentioned in the description cannot rename it. */
 const char *compendium_filing_identity(const char *type, const char *name, const char *description,
                                        const char *reply, Text *corrected_name)
 {
-    if (strcmp(type, "item") && strcmp(type, "creature")) return type;
+    if (strcmp(type, "item") && strcmp(type, "creature") && strcmp(type, "character")) return type;
     Text label = {0}, prose = {0}, detail = {0};
     normalize_words(&label, name);
     normalize_words(&prose, reply);
     normalize_words(&detail, description);
     if (!label.len) goto finish;
-    if (!strcmp(type, "creature")) {
+    if (!strcmp(type, "character")) {
+        const char *subject = str(&label);
+        prefix(&subject, "the ");
+        if (placed_item(str(&detail), subject) && word(str(&prose), subject)) type = "item";
+    } else if (!strcmp(type, "creature")) {
         static const char *const titles[] = {"captain ", "doctor ", "professor ", "officer ",
             "sergeant ", "lieutenant ", "commander ", "king ", "queen ", "princess ", "prince ", "lady ", "lord "};
         for (size_t i = 0; i < sizeof titles / sizeof *titles; i++) {
@@ -754,10 +803,16 @@ Json *compendium_signal_evidence(const char *reply)
                  word(line, "strikes the bell") || word(line, "struck the bell") ||
                  word(line, "bell striking it") || word(line, "striking the bell") ||
                  word(line, "bell tolls") || word(line, "bell tolled")) label = "bell";
-        else if (word(line, "flare rises") || word(line, "flare rose") || word(line, "flare floats") ||
-                 word(line, "flare drifts") || word(line, "flare erupts") || word(line, "flare burns") ||
-                 word(line, "watches the flare") || word(line, "sees the flare") || (word(line, "flare") &&
-                  (word(line, "now floats") || word(line, "descends toward")))) label = "flare";
+        else if (!word(line, "await") && !word(line, "awaits") && !word(line, "awaiting") &&
+                 !word(line, "expects") && !word(line, "expecting") &&
+                 (word(line, "flare rises") || word(line, "flare rose") || word(line, "flare floats") ||
+                  word(line, "flare drifts") || word(line, "flare erupts") || word(line, "flare burns") ||
+                  word(line, "flare flares") || word(line, "flare flared") ||
+                  word(line, "flare ignites") || word(line, "flare ignited") ||
+                  word(line, "flare glows") || word(line, "flare glowed") ||
+                  word(line, "flare is burning") || word(line, "flare lights up") ||
+                  word(line, "watches the flare") || word(line, "sees the flare") || (word(line, "flare") &&
+                   (word(line, "now floats") || word(line, "descends toward"))))) label = "flare";
         if (!label) continue;
         Json *fact = cJSON_CreateObject();
         set(fact, "type", "event");
