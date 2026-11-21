@@ -407,6 +407,12 @@ int main(void)
         fputs("Only an observed actor action can survive the final fallback.\n", stderr); rc = 1;
     }
     cJSON_Delete(actors);
+    scene = compendium_scene_evidence("The tide has risen, and Iona has taken the silver whistle from the railing "
+        "to signal the approaching water to the west gate.");
+    if (cJSON_GetArraySize(scene) != 1 || strcmp(js(cJSON_GetArrayItem(scene, 0), "name"), "silver whistle")) {
+        fputs("A completed removal remains witnessed in the perfect tense.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(scene);
     if (!compendium_placement_evidence(nullptr, nullptr,
         "She places the key into the red box, the metal clinking softly against the solid wood.",
         &pressed_name, &pressed_evidence) || strcmp(str(&pressed_name), "key")) {
