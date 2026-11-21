@@ -1,5 +1,6 @@
 #include "app.h"
 
+#include <float.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -57,6 +58,13 @@ int main(int argc, char **argv)
     if (!physics_tune(settings, reflection) || !physics_run("acoustic", acoustic_args, settings, &result) ||
         !strstr(str(&result), "Direct ") || strstr(str(&result), "echo")) {
         fputs("A perfectly absorbing room must suppress the reflected paths.\n", stderr);
+        failures++;
+    }
+    clear(&result);
+    put(reflection, "value", cJSON_CreateNumber(DBL_TRUE_MIN));
+    if (!physics_tune(settings, reflection) || !physics_run("acoustic", acoustic_args, settings, &result) ||
+        !strstr(str(&result), "echo") || strstr(str(&result), "inf") || strstr(str(&result), "nan")) {
+        fputs("Nonzero reflection levels must remain finite even when the linear amplitude underflows.\n", stderr);
         failures++;
     }
     cJSON_Delete(acoustic_args);

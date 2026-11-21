@@ -234,7 +234,7 @@ static bool acoustic(const Json *args, const Json *settings, Text *out)
         if (path && reflection == 0) break;
         if (blocked[path]) format(out, "\n%s blocked.", paths[path]);
         else format(out, "\n%s %.4g ms · %+.3g dB", paths[path], 1000 * distances[path] / speed,
-                    20 * log10((path ? reflection : 1) / distances[path]));
+                    20 * ((path ? log10(reflection) : 0) - log10(distances[path])));
     }
     return true;
 }
