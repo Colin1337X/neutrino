@@ -86,17 +86,28 @@ static bool contains_word(const char *value, const char *pattern, size_t len)
 }
 static Json *find_entry(const Json *entries, const char *id)
 {
-    Json *item;
-    cJSON_ArrayForEach(item, entries)
+    Json *item, *alternate;
+    cJSON_ArrayForEach(item, entries) {
         if (!strcmp(js(item, "id"), id)) return item;
+        cJSON_ArrayForEach(alternate, at(item, "alternateIds"))
+            if (cJSON_IsString(alternate) && !strcmp(alternate->valuestring, id)) return item;
+    }
     return NULL;
 }
 static Json *find_entity(const Json *entries, const char *type, const char *name)
 {
-    Json *item;
-    cJSON_ArrayForEach(item, entries)
-        if (!strcmp(js(item, "type"), type) && same_words(js(item, "name"), name)) return item;
-    return NULL;
+    Json *item, *alias = nullptr;
+    bool ambiguous = false;
+    cJSON_ArrayForEach(item, entries) {
+        if (strcmp(js(item, "type"), type)) continue;
+        const char *stored = js(item, "name");
+        if (same_words(stored, name)) return item;
+        if (!strcmp(type, "character") && compendium_character_alias(stored, name)) {
+            if (alias) ambiguous = true;
+            alias = item;
+        }
+    }
+    return ambiguous ? nullptr : alias;
 }
 
 /* Short labels can legitimately be shared by unrelated people or objects. */
@@ -137,6 +148,9 @@ static void merge_entry(Json *entries, const Json *source, const char *id)
     const char *type = js(source, "type"), *name = js(source, "name");
     const char *description = js(source, "description");
     Json *matched = id ? find_entry(entries, id) : find_entity(entries, type, name);
+    const char *stored_name = js(matched, "name");
+    bool alias = !id && matched && !strcmp(type, "character") && compendium_character_alias(stored_name, name);
+    if (alias && compendium_titled_character(stored_name)) name = stored_name;
     if (cJSON_IsTrue(at(source, "deleted"))) {
         if (matched) cJSON_Delete(cJSON_DetachItemViaPointer(entries, matched));
         return;
@@ -148,7 +162,7 @@ static void merge_entry(Json *entries, const Json *source, const char *id)
             release(&novel);
             return;
         }
-        bool partial = strcmp(description, str(&novel)) || cJSON_IsTrue(at(source, "memoryAppend"));
+        bool partial = alias || strcmp(description, str(&novel)) || cJSON_IsTrue(at(source, "memoryAppend"));
         description = str(&novel);
         if (matched && partial) {
             format(&combined, "%s\n%s", description, js(matched, "description"));
@@ -157,6 +171,12 @@ static void merge_entry(Json *entries, const Json *source, const char *id)
     }
     Json *copy = entry(matched ? js(matched, "id") : id ? id : js(source, "id"),
                        type, name, description);
+    Json *alternate_ids = cJSON_Duplicate(at(matched, "alternateIds"), true);
+    if (alias && *js(source, "id") && strcmp(js(source, "id"), js(matched, "id"))) {
+        if (!alternate_ids) alternate_ids = cJSON_CreateArray();
+        cJSON_AddItemToArray(alternate_ids, cJSON_CreateString(js(source, "id")));
+    }
+    if (alternate_ids) put(copy, "alternateIds", alternate_ids);
     if (matched) cJSON_ReplaceItemViaPointer(entries, matched, copy);
     else cJSON_AddItemToArray(entries, copy);
     release(&novel);
@@ -366,15 +386,15 @@ static bool opening_reply(const Json *story, const Json *reply)
     return opening;
 }
 
-static Json *filing_prompt(const Json *story, int id)
+static Json *filing_prompt(const Json *story, int id, bool retry)
 {
     Json *reply = story_pick(story, id);
     Text input = {0};
     Json *existing = collect_entries(story, number(reply, "parent")), *record;
-    if (existing->child) append(&input, "\n\nRelevant facts already filed:");
+    if (!retry && existing->child) append(&input, "\n\nRelevant facts already filed:");
     int shown = 0;
     cJSON_ArrayForEach(record, existing) {
-        if (shown >= 30) break;
+        if (retry || shown >= 30) break;
         if (!relevance(record, js(reply, "content"))) continue;
         format(&input, "\n%s | %s | ", js(record, "type"), js(record, "name"));
         excerpt(&input, js(record, "description"), 400);
@@ -382,6 +402,16 @@ static Json *filing_prompt(const Json *story, int id)
     }
     format(&input, "\n\nLatest assistant reply (#%d), the evidence to file:\n", id);
     compendium_filing_index(js(reply, "content"), nullptr, &input);
+    if (retry) {
+        Json *prompt = request("File durable facts. Pick the strongest concrete observation in the numbered narration. "
+            "Choose a named person, object or event and cite the label of the sentence where it is depicted. "
+            "Return a JSON array with one object using type (character, item, place or event), name "
+            "(words from the cited sentence) and description (the sentence label). "
+            "If there is no physical action or definite state, return [].", &input);
+        cJSON_Delete(existing);
+        release(&input);
+        return prompt;
+    }
     append(&input, "\nFor each new fact, put the name of the entity in name and the evidence label (S1, S2, etc.) in description. "
         "Find completed actions, changed locations, object states, and witnessed signals, including inside descriptive sentences. "
         "An instruction or expectation is not evidence that its event happened.");
@@ -400,7 +430,7 @@ static Json *filing_prompt(const Json *story, int id)
     release(&input);
     return messages;
 }
-static bool file_candidates(Json *result, const Json *known, const Json *answer, const Json *reply,
+static void file_candidates(Json *result, const Json *known, const Json *answer, const Json *reply,
                             bool fallback, int *index)
 {
     const int anchor = number(reply, "id");
@@ -410,7 +440,7 @@ static bool file_candidates(Json *result, const Json *known, const Json *answer,
         if (cJSON_GetArraySize(result) >= 6) break;
         const char *type = js(item, "type"), *name = js(item, "name"), *description = js(item, "description");
         if (!valid_kind(type) || !*name || strlen(name) > 160 || !*description || strlen(description) > 2400)
-            return false;
+            continue;
         (*index)++;
         Text corrected = {0}, evidence = {0}, novel = {0};
         bool indexed = !fallback && compendium_filing_index(prose, description, &evidence);
@@ -419,6 +449,10 @@ static bool file_candidates(Json *result, const Json *known, const Json *answer,
             indexed || !strcmp(type, "character") ? str(&evidence) : description, prose, &corrected);
         if (corrected.len) name = str(&corrected);
         if (compendium_filing_label(name, str(&evidence))) {
+            Json *prior = find_entity(known, type, name);
+            bool alias = prior && !strcmp(type, "character") &&
+                         compendium_character_alias(js(prior, "name"), name);
+            if (alias && compendium_titled_character(js(prior, "name"))) name = js(prior, "name");
             bool ambiguous = compendium_novel_claims(known, result, type, name, str(&evidence), &novel);
             bool partial = strcmp(str(&evidence), str(&novel)) != 0;
             description = str(&novel);
@@ -431,6 +465,8 @@ static bool file_candidates(Json *result, const Json *known, const Json *answer,
                 Json *entity = find_entity(result, type, name);
                 if (entity) {
                     const char *previous = js(entity, "description");
+                    if (!strcmp(type, "character") && compendium_titled_character(name))
+                        set(entity, "name", name);
                     if (strlen(previous) + strlen(description) + 1 <= 2400) {
                         Text combined = {0};
                         format(&combined, "%s\n%s", previous, description);
@@ -444,7 +480,7 @@ static bool file_candidates(Json *result, const Json *known, const Json *answer,
                     if (fallback) set(entity, "memorySource", "reply-evidence");
                     cJSON_AddItemToArray(result, entity);
                 }
-                if (partial) put(entity, "memoryAppend", cJSON_CreateTrue());
+                if (partial || alias) put(entity, "memoryAppend", cJSON_CreateTrue());
             }
             release(&exact);
         }
@@ -452,28 +488,27 @@ static bool file_candidates(Json *result, const Json *known, const Json *answer,
         release(&evidence);
         release(&corrected);
     }
-    return true;
 }
 static Json *parse_filing(const Text *output, const Json *story, const Json *reply)
 {
     Json *answer = json_answer(output);
-    if (!cJSON_IsArray(answer) || cJSON_GetArraySize(answer) > 6) { cJSON_Delete(answer); return NULL; }
+    bool valid = cJSON_IsArray(answer) && cJSON_GetArraySize(answer) <= 6;
     Json *result = cJSON_CreateArray();
     Json *known = collect_entries(story, number(reply, "parent"));
     int index = 0;
-    bool valid = file_candidates(result, known, answer, reply, false, &index);
+    if (valid) file_candidates(result, known, answer, reply, false, &index);
     cJSON_Delete(answer);
-    if (valid && !result->child && opening_reply(story, reply)) {
+    if (!result->child && opening_reply(story, reply)) {
         Json *fallback = compendium_opening_evidence(js(reply, "content"));
-        valid = file_candidates(result, known, fallback, reply, true, &index);
+        file_candidates(result, known, fallback, reply, true, &index);
         cJSON_Delete(fallback);
     }
-    if (valid && cJSON_GetArraySize(result) < 6) {
+    if (cJSON_GetArraySize(result) < 6) {
         Json *signals = compendium_signal_evidence(js(reply, "content"));
-        valid = file_candidates(result, known, signals, reply, true, &index);
+        file_candidates(result, known, signals, reply, true, &index);
         cJSON_Delete(signals);
     }
-    if (valid && cJSON_GetArraySize(result) < 6) {
+    if (cJSON_GetArraySize(result) < 6) {
         Json *history = story_path(story, number(reply, "parent"));
         Text name = {0}, evidence = {0};
         bool found = compendium_placement_evidence(known, history, js(reply, "content"), &name, &evidence);
@@ -491,13 +526,13 @@ static Json *parse_filing(const Text *output, const Json *story, const Json *rep
         release(&evidence);
         cJSON_Delete(history);
     }
-    if (valid && cJSON_GetArraySize(result) < 6) {
+    if (cJSON_GetArraySize(result) < 6) {
         Json *scene = compendium_scene_evidence(js(reply, "content"));
-        valid = file_candidates(result, known, scene, reply, true, &index);
+        file_candidates(result, known, scene, reply, true, &index);
         cJSON_Delete(scene);
     }
     cJSON_Delete(known);
-    if (!valid) { cJSON_Delete(result); return nullptr; }
+    if (!valid && !result->child) { cJSON_Delete(result); return nullptr; }
     return result;
 }
 
@@ -557,6 +592,18 @@ static void finish_task(App *app)
     switch (lane->task) {
         case MEMORY_FILE: {
             Json *facts = lane->error.len ? NULL : parse_filing(&lane->output, lane->story, node);
+            if ((!facts || !facts->child) && !lane->error.len && !lane->filing_retry) {
+                lane->filing_retry = true;
+                Json *prompt = filing_prompt(lane->story, lane->anchor, true);
+                lane->job = app_inference(app, "file", prompt);
+                cJSON_Delete(prompt);
+                if (lane->job) {
+                    cJSON_Delete(facts);
+                    clear(&lane->output);
+                    clear(&lane->reasoning);
+                    return;
+                }
+            }
             if (facts) put(node, "memoryFile", facts);
             set(node, "memoryFileState", facts ? "done" : "error");
             if (facts) clear_cache(lane);
@@ -587,6 +634,7 @@ static bool start_task(App *app, Json *story, int anchor, MemoryTask task, Json 
     lane->story = story;
     lane->anchor = anchor;
     lane->preempted = false;
+    lane->filing_retry = false;
     clear(&lane->output);
     clear(&lane->reasoning);
     clear(&lane->error);
@@ -611,7 +659,7 @@ bool memory_tick(App *app)
         inference_free(lane->job);
         lane->job = NULL;
         finish_task(app);
-        lane->task = MEMORY_IDLE;
+        if (!lane->job) lane->task = MEMORY_IDLE;
         return true;
     }
     if (preview_busy(&app->preview) || monotonic_ms() < lane->after) return false;
@@ -623,7 +671,7 @@ bool memory_tick(App *app)
             if (strcmp(js(node, "memoryFileState"), "pending") ||
                 strcmp(js(node, "role"), "assistant")) continue;
             int anchor = number(node, "id");
-            return start_task(app, story, anchor, MEMORY_FILE, filing_prompt(story, anchor));
+            return start_task(app, story, anchor, MEMORY_FILE, filing_prompt(story, anchor, false));
         }
     }
     story = app->story;

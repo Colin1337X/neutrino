@@ -378,6 +378,22 @@ int main(void)
         fputs("Uncertainty about the echo must preserve a witnessed bell.\n", stderr); rc = 1;
     }
     cJSON_Delete(signals);
+    if (!compendium_character_alias("Mara", "Captain Mara") ||
+        !compendium_character_alias("Capt. Mara", "MARA") ||
+        compendium_character_alias("Captain Mara", "Doctor Mara") ||
+        compendium_character_alias("Mara Vale", "Mara")) {
+        fputs("Only a title on the same complete name should resolve as an alias.\n", stderr); rc = 1;
+    }
+    scene = compendium_scene_evidence("Iona shifts her posture, the red box gleaming as she carefully conceals "
+        "the copper key beneath the hem of her coat. Captain Mara steps forward, holding the silver whistle "
+        "firmly against the railing. \"Ring twice! The radio crackled on channel nine.\" "
+        "He imagined she conceals the copper key beneath her coat.");
+    if (cJSON_GetArraySize(scene) != 2 ||
+        strcmp(js(cJSON_GetArrayItem(scene, 0), "name"), "copper key") ||
+        strcmp(js(cJSON_GetArrayItem(scene, 1), "name"), "silver whistle")) {
+        fputs("Recover confirmed concealment and handling while keeping quoted cues out.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(scene);
     cJSON_Delete(batch);
     cJSON_Delete(known);
     return rc;

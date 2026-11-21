@@ -12,7 +12,7 @@ typedef struct {
     Json *story, *cached_story;
     int anchor, cached_head;
     uint64_t after;
-    bool preempted;
+    bool preempted, filing_retry;
     Text output, reasoning, error;
     Json *cached_picks;
 } MemoryLane;

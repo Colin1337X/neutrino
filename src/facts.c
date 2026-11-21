@@ -451,6 +451,40 @@ bool compendium_filing_label(const char *name, const char *evidence)
     return grounded;
 }
 
+static const char *character_title(const char *name)
+{
+    static const char *const titles[] = {"captain ", "capt ", "commander ", "lieutenant ",
+        "sergeant ", "doctor ", "dr ", "professor ", "mister ", "mr ", "mrs ", "ms ",
+        "sir ", "lady ", "lord ", "queen ", "king ", "princess ", "prince "};
+    for (size_t i = 0; i < sizeof titles / sizeof *titles; i++) {
+        const char *bare = name;
+        if (prefix(&bare, titles[i]) && *bare) return bare;
+    }
+    return nullptr;
+}
+
+bool compendium_titled_character(const char *name)
+{
+    Text words = {0};
+    normalize_words(&words, name);
+    bool titled = character_title(str(&words)) != nullptr;
+    release(&words);
+    return titled;
+}
+
+bool compendium_character_alias(const char *left, const char *right)
+{
+    Text a = {0}, b = {0};
+    normalize_words(&a, left);
+    normalize_words(&b, right);
+    const char *bare_a = character_title(str(&a)), *bare_b = character_title(str(&b));
+    bool alias = (bare_a && !bare_b && !strcmp(bare_a, str(&b))) ||
+                 (bare_b && !bare_a && !strcmp(str(&a), bare_b));
+    release(&a);
+    release(&b);
+    return alias;
+}
+
 static bool explicitly_nonhuman(const char *text, const char *name)
 {
     static const char *const species[] = {
@@ -579,7 +613,8 @@ static bool placement_object(const char *sentence, Text *name, Text *target)
     static const char *const verbs[] = {"places", "puts", "sets", "slides", "ties", "fastens", "secures",
         "clamps", "clips", "attaches", "hooks", "hangs", "pins", "straps", "lashes",
         "placed", "tied", "fastened", "secured", "clamped", "clipped", "attached",
-        "press", "presses", "pressed", "drops", "dropped", "tosses", "tossed"};
+        "press", "presses", "pressed", "drops", "dropped", "tosses", "tossed",
+        "moves", "moved", "pulls", "pulled", "pushes", "pushed"};
     static const struct { const char *word, *relation; } prepositions[] = {
         {"inside", "in"}, {"within", "in"}, {"into", "in"}, {"in", "in"},
         {"onto", "on"}, {"on", "on"}, {"to", "to"}, {"against", "against"},
@@ -870,6 +905,21 @@ static bool uncertain_observation(const char *line)
     return false;
 }
 
+static bool handles_prop(const char *line, const char *name)
+{
+    static const char *const verbs[] = {"holds", "held", "holding", "grips", "gripped",
+        "gripping", "clutches", "clutched", "clutching", "takes", "took", "picks up", "picked up"};
+    Text action = {0};
+    bool handled = false;
+    for (size_t i = 0; i < sizeof verbs / sizeof *verbs && !handled; i++) {
+        clear(&action);
+        format(&action, "%s the %s", verbs[i], name);
+        handled = word(line, str(&action)) != nullptr;
+    }
+    release(&action);
+    return handled;
+}
+
 static void leading_words(Text *out, const char *source)
 {
     const char *comma = strchr(source, ',');
@@ -878,6 +928,27 @@ static void leading_words(Text *out, const char *source)
     clear(out);
     normalize_words(out, comma ? str(&clause) : source);
     release(&clause);
+}
+
+static void narrative_words(Text *out, const char *source)
+{
+    Text prose = {0};
+    bool dialogue = false;
+    for (const char *p = source; *p;) {
+        size_t quote = *p == '"' ? 1 : !strncmp(p, "“", sizeof "“" - 1) ||
+            !strncmp(p, "”", sizeof "”" - 1) ? sizeof "“" - 1 : 0;
+        if (quote) {
+            if (!dialogue) append(&prose, " quoted speech ");
+            dialogue = !dialogue;
+            p += quote;
+        } else {
+            if (!dialogue) append_n(&prose, p, 1);
+            p++;
+        }
+    }
+    clear(out);
+    normalize_words(out, str(&prose));
+    release(&prose);
 }
 
 static bool flare_motion(const char *line)
@@ -913,9 +984,8 @@ Json *compendium_signal_evidence(const char *reply)
         const char *end = sentence_end(s);
         copy_sentence(&sentence, s, end);
         s = end;
-        if (sentence.len > 700 || strpbrk(str(&sentence), "?\"") || strstr(str(&sentence), "“")) continue;
-        clear(&tokens);
-        normalize_words(&tokens, str(&sentence));
+        if (sentence.len > 700 || strchr(str(&sentence), '?')) continue;
+        narrative_words(&tokens, str(&sentence));
         const char *line = str(&tokens);
         if (word(line, "not") || uncertain_observation(line)) {
             leading_words(&leading, str(&sentence));
@@ -929,23 +999,26 @@ Json *compendium_signal_evidence(const char *reply)
         if (word(line, "rings the brass bell") || word(line, "rang the brass bell") ||
             word(line, "strikes the brass bell") || word(line, "struck the brass bell") ||
             word(line, "brass bell striking it") || word(line, "the brass bell rings") ||
-            word(line, "the brass bell rang") ||
+            word(line, "the brass bell rang") || word(line, "brass bell jingled") ||
+            word(line, "brass bell clangs") ||
             (word(line, "brass bell") && (word(line, "striking the bell") ||
              word(line, "strikes the heavy brass") || word(line, "repeating the strike") ||
              word(line, "bell began to toll") || word(line, "brass bell tolls") ||
-             word(line, "resonates loudly") ||
+             word(line, "resonates loudly") || word(line, "rings out") ||
              (word(line, "repeats") && word(line, "clinking of the brass bell")) ||
              (word(line, "striking mechanism against") && word(line, "clinks")))))
             label = "brass bell";
         else if (word(line, "rings the bell") || word(line, "rang the bell") ||
                  word(line, "strikes the bell") || word(line, "struck the bell") ||
                  word(line, "bell striking it") || word(line, "striking the bell") ||
-                 word(line, "bell tolls") || word(line, "bell tolled")) label = "bell";
+                 word(line, "bell tolls") || word(line, "bell tolled") || word(line, "bell rings out") ||
+                 (word(line, "bell") && (word(line, "brass clanging") || word(line, "brass tolling")))) label = "bell";
         if (label) add_observation(facts, "event", label, &sentence);
         if (!word(line, "await") && !word(line, "awaits") && !word(line, "awaiting") &&
                  !word(line, "expects") && !word(line, "expecting") &&
                  (flare_motion(line) || word(line, "flare lights up") ||
                   word(line, "watches the flare") || word(line, "sees the flare") ||
+                  word(line, "holding the flare") || word(line, "holds the flare") ||
                   (word(line, "tide recedes") && word(line, "reveal the white rescue flare")) || (word(line, "flare") &&
                    (word(line, "now floats") || word(line, "descends toward")))))
             add_observation(facts, "event", "flare", &sentence);
@@ -979,34 +1052,47 @@ Json *compendium_scene_evidence(const char *reply)
             add_observation(facts, "event", "radio", &sentence);
             continue;
         }
-        if (strpbrk(source, "?\"") || strstr(source, "“")) continue;
-        clear(&tokens);
-        normalize_words(&tokens, source);
+        if (strchr(source, '?')) continue;
+        narrative_words(&tokens, source);
         const char *line = str(&tokens);
         /* A qualification about who can verify a clock does not negate a
            stated offset in the main clause. */
-        bool clock_reading = word(lead, "station clock") &&
+        bool clock_reading = word(lead, "station clock") && !strchr(source, '"') && !strstr(source, "“") &&
             (word(lead, "minutes behind") || word(lead, "minutes fast") || word(lead, "minutes slow")) &&
             !word(lead, "not") && !uncertain_observation(lead);
         if (clock_reading) add_observation(facts, "item", "station clock", &sentence);
         if (uncertain_observation(line)) continue;
         if (word(line, "key still hidden in") || word(line, "key remains hidden in") ||
             (!word(line, "not") && (word(line, "key is hidden in") ||
-             word(line, "leaving the copper key hidden within") || word(line, "leaving the copper key hidden in")))) {
+             word(line, "leaving the copper key hidden within") || word(line, "leaving the copper key hidden in") ||
+             word(line, "conceals the copper key beneath") || word(line, "concealed the copper key beneath") ||
+             word(line, "conceals the copper key inside") || word(line, "hid the copper key beneath")))) {
             add_observation(facts, "item", word(line, "copper key") ? "copper key" : "key", &sentence);
         }
         if (word(line, "not")) continue;
+        if (word(line, "copper key gleaming") && (word(line, "in her pocket") || word(line, "in his pocket")))
+            add_observation(facts, "item", "copper key", &sentence);
         if (word(line, "door creaks open") || word(line, "door creaked open") || word(line, "door swings open"))
             add_observation(facts, "event", "door", &sentence);
         if (!clock_reading && word(line, "station clock") &&
             (word(line, "minutes behind") || word(line, "minutes fast") || word(line, "minutes slow")))
             add_observation(facts, "item", "station clock", &sentence);
         if (word(line, "gate clicks shut") || word(line, "gate clicked shut") ||
-            word(line, "gate swings shut"))
+            word(line, "gate swings shut") || word(line, "gate closed for the night") ||
+            word(line, "tide lifts the west gate") || word(line, "tide finally lifts the west gate"))
             add_observation(facts, "event", "gate", &sentence);
-        if (word(line, "silver whistle clacks against") || word(line, "silver whistle clacked against"))
+        if (word(line, "silver whistle clacks against") || word(line, "silver whistle clacked against") ||
+            word(line, "holding the silver whistle firmly against") ||
+            word(line, "holding the silver whistle against") || word(line, "holds the silver whistle against") ||
+            handles_prop(line, "silver whistle"))
             add_observation(facts, "item", "silver whistle", &sentence);
-        if (word(line, "radio crackles on channel") || word(line, "radio crackled on channel"))
+        if (word(line, "red box rests") || word(line, "red box lay hidden"))
+            add_observation(facts, "item", "red box", &sentence);
+        if (word(line, "key fitting into") || word(line, "key fits into"))
+            add_observation(facts, "item", word(line, "copper key") ? "copper key" : "key", &sentence);
+        if (word(line, "radio crackles on channel") || word(line, "radio crackled on channel") ||
+            word(line, "radio crackling on channel") || word(line, "radio crackled to life") ||
+            (word(line, "from the radio") && word(line, "voice cut through the static")))
             add_observation(facts, "event", "radio", &sentence);
     }
     release(&sentence);

@@ -13,7 +13,7 @@
 
 typedef cJSON Json;
 typedef struct { char *data; size_t len, cap; } Text;
-#define NEUTRINO_VERSION "0.13.0"
+#define NEUTRINO_VERSION "0.14.0"
 #define FILE_LIMIT (32u * 1024u * 1024u)
 #define EDIT_LIMIT (2u * 1024u * 1024u)
 
@@ -34,6 +34,8 @@ Json *compendium_scene_evidence(const char *reply);
 bool compendium_filing_index(const char *reply, const char *tag, Text *out);
 bool compendium_filing_evidence(const char *reply, const char *quote, Text *evidence);
 bool compendium_filing_label(const char *name, const char *evidence);
+bool compendium_character_alias(const char *left, const char *right);
+bool compendium_titled_character(const char *name);
 const char *compendium_filing_identity(const char *type, const char *name, const char *description,
                                        const char *reply, Text *corrected_name);
 char *copy(const char *value);
@@ -66,6 +68,8 @@ bool scene_edit(Workspace *ws, Json *scene, const char *value, const char *reaso
 Json *story_add(Workspace *ws, const char *title, Json *card);
 Json *story_pick(const Json *story, int id);
 int story_push(Workspace *ws, Json *story, int parent, const char *role, const char *content);
+bool story_lorebook(const Json *input);
+void story_expand_names(const Json *story, const char *source, Text *out);
 Json *story_path(const Json *story, int head);
 void workspace_demo(Workspace *ws);
 bool collect_context(const Workspace *ws, const Json *scene, const Json *story, int head, Text *out, Text *trace);
