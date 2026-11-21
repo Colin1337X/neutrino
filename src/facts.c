@@ -908,7 +908,9 @@ static bool uncertain_observation(const char *line)
 static bool handles_prop(const char *line, const char *name)
 {
     static const char *const verbs[] = {"holds", "held", "holding", "grips", "gripped",
-        "gripping", "clutches", "clutched", "clutching", "takes", "took", "picks up", "picked up"};
+        "gripping", "clutches", "clutched", "clutching", "takes", "took", "picks up", "picked up",
+        "pulls", "pulled", "pulling", "tugs", "tugged", "tugging",
+        "presses", "pressed", "pressing", "fastens", "fastened", "fastening"};
     Text action = {0};
     bool handled = false;
     for (size_t i = 0; i < sizeof verbs / sizeof *verbs && !handled; i++) {

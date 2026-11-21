@@ -394,6 +394,12 @@ int main(void)
         fputs("Recover confirmed concealment and handling while keeping quoted cues out.\n", stderr); rc = 1;
     }
     cJSON_Delete(scene);
+    scene = compendium_scene_evidence("Iona looks at the rusted railing, pulling the silver whistle taut against "
+        "her chest as the water lurches close. \"Mara fastens the silver whistle to the gate.\"");
+    if (cJSON_GetArraySize(scene) != 1 || !strstr(js(cJSON_GetArrayItem(scene, 0), "description"), "taut against")) {
+        fputs("Preserve the observed motion without filing a line of dialogue as a second action.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(scene);
     cJSON_Delete(batch);
     cJSON_Delete(known);
     return rc;
