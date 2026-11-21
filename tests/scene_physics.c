@@ -87,6 +87,24 @@ static bool measurement_protocol(void)
          physics_prose_matches(p.readings, p.reading_count, str(&prose));
     release(&prose);
     free_protocol(&p);
+    p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    ok = ok && simulation_tool_reply(&p,
+        "{\"neutrino_tool\":\"fluid\",\"height\":1,\"tank_area\":2,\"outlet_area\":0.003,\"seconds\":10}") == SIM_REGENERATE &&
+        simulation_tool_reply(&p,
+        "{\"neutrino_tool\":\"acoustic\",\"min\":[0,0,0],\"max\":[10,8,4],\"source\":[2,2,2],\"listener\":[5,2,2],"
+        "\"blockers\":[{\"min\":[3,1,1],\"max\":[4,3,3]}]}") == SIM_REGENERATE &&
+        p.reading_count == 2 && strstr(str(&p.tool_results), "Direct blocked.") &&
+        physics_prose_matches(p.readings, p.reading_count,
+            "Over ten seconds the tank drained 81.525 liters, and the first echo arrived at 14.57 milliseconds.") &&
+        physics_prose_matches(p.readings, p.reading_count,
+            "The drain ran for ten seconds, and the first echo arrived after 0.01457 seconds.") &&
+        !physics_prose_matches(p.readings, p.reading_count,
+            "The tank drained 18 liters over ten seconds, and the first echo arrived at 14.57 milliseconds.") &&
+        !physics_prose_matches(p.readings, p.reading_count,
+            "The tank drained 81.525 liters over eight seconds, and the first echo arrived at 14.57 milliseconds.") &&
+        !physics_prose_matches(p.readings, p.reading_count,
+            "The drain ran for ten seconds, and the direct sound reached Iona.");
+    free_protocol(&p);
     return ok;
 }
 

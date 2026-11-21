@@ -138,6 +138,37 @@ static bool remaining_volume(const char *start, const char *number, const char *
     return remaining || token(after, "left") || token(after, "remaining");
 }
 
+typedef enum { NO_TOPIC, DRAIN_TOPIC, SOUND_TOPIC } MeasurementTopic;
+
+static MeasurementTopic topic_at(const char *p)
+{
+    if (token(p, "tank") || token(p, "drain") || token(p, "drained") ||
+        token(p, "drainage") || token(p, "outlet") || token(p, "flow") || token(p, "water"))
+        return DRAIN_TOPIC;
+    if (token(p, "direct") || token(p, "echo") || token(p, "echoes") ||
+        token(p, "reflection") || token(p, "acoustic") || token(p, "sound"))
+        return SOUND_TOPIC;
+    return NO_TOPIC;
+}
+
+static MeasurementTopic seconds_topic(const char *sentence, const char *number, const char *end)
+{
+    MeasurementTopic topic = NO_TOPIC;
+    for (const char *p = sentence; p < number; ++p) {
+        if (p != sentence && isalnum((unsigned char)p[-1])) continue;
+        MeasurementTopic found = topic_at(p);
+        if (found != NO_TOPIC) topic = found;
+    }
+    if (topic != NO_TOPIC) return topic;
+    /* In "over ten seconds the tank drained", the subject follows the reading. */
+    for (const char *p = end; *p; ++p) {
+        if (isalnum((unsigned char)p[-1])) continue;
+        topic = topic_at(p);
+        if (topic != NO_TOPIC) break;
+    }
+    return topic;
+}
+
 static bool sentence_matches(const PhysicsReading *readings, int count, const char *sentence)
 {
     bool has_fluid = false, has_acoustic = false;
@@ -167,7 +198,8 @@ static bool sentence_matches(const PhysicsReading *readings, int count, const ch
         strstr(sentence, "direct sound is blocked") || strstr(sentence, "direct path is blocked") ||
         strstr(sentence, "direct path blocked") || strstr(sentence, "direct sound never reached");
     const bool direct_clear = strstr(sentence, "direct path was clear") || strstr(sentence, "direct path is clear") ||
-        strstr(sentence, "direct sound reached") || strstr(sentence, "direct sound arrives") ||
+        strstr(sentence, "direct sound reached") || strstr(sentence, "direct sound reaches") ||
+        strstr(sentence, "direct sound was audible") || strstr(sentence, "direct sound arrives") ||
         strstr(sentence, "direct sound arrived") || strstr(sentence, "direct sound is unobstructed") ||
         strstr(sentence, "direct path is not blocked") || strstr(sentence, "direct sound is not blocked");
     if (direct_blocked || direct_clear) {
@@ -187,21 +219,27 @@ static bool sentence_matches(const PhysicsReading *readings, int count, const ch
         const char *number = p;
         p = end - 1;
         Unit unit = measurement_unit(end);
+        MeasurementTopic seconds = NO_TOPIC;
+        if (unit == SECONDS) {
+            if (fluid && (direct || echo)) seconds = seconds_topic(sentence, number, end);
+            else if (fluid) seconds = DRAIN_TOPIC;
+            else if (direct || echo) seconds = SOUND_TOPIC;
+        }
         /* Do not pass a measurement copied from the other simulator off as
            the current result. A reference explicitly set in the past can
            still appear as part of the story. */
         bool prior = strstr(sentence, "earlier") || strstr(sentence, "previous");
         if (!prior && has_acoustic && !has_fluid &&
             (unit == LITERS || unit == CUBIC_METERS || unit == LITERS_PER_SECOND ||
-             (unit == SECONDS && fluid && !(direct || echo)))) return false;
+             seconds == DRAIN_TOPIC)) return false;
         if (!prior && has_fluid && !has_acoustic && (direct || echo) &&
             (unit == MILLISECONDS || unit == DECIBELS)) return false;
         bool have_reading = false, matches = false;
         for (int i = 0; i < count; ++i) {
             const PhysicsReading *r = readings + i;
-            if (r->kind == READING_FLUID && fluid && !(direct || echo)) {
+            if (r->kind == READING_FLUID && fluid) {
                 double expected;
-                if (unit == SECONDS) expected = r->seconds;
+                if (unit == SECONDS && seconds == DRAIN_TOPIC) expected = r->seconds;
                 else if (unit == LITERS || unit == CUBIC_METERS) {
                     expected = remaining_volume(sentence, number, end) ? r->remaining_l : r->drained_l;
                     if (unit == CUBIC_METERS) expected /= 1000;
@@ -217,7 +255,7 @@ static bool sentence_matches(const PhysicsReading *readings, int count, const ch
                 have_reading = true;
                 matches |= close_reading(value, expected, rounding);
             } else if (r->kind == READING_ACOUSTIC &&
-                       (unit == MILLISECONDS || unit == DECIBELS || (unit == SECONDS && (direct || echo)))) {
+                       (unit == MILLISECONDS || unit == DECIBELS || seconds == SOUND_TOPIC)) {
                 have_reading = true;
                 ArrivalReference reference = arrival_reference(sentence, number, direct, echo);
                 int first = reference == WALL_ECHO ? 1 : 0;
