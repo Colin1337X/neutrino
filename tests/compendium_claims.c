@@ -469,6 +469,15 @@ int main(void)
         fputs("File a visible prop at its narrated location, even when reaching for it is the main action.\n", stderr); rc = 1;
     }
     cJSON_Delete(placements);
+    placements = compendium_placement_entries(nullptr, nullptr,
+        "The brass lantern, heavy and warm, settles carefully on the bench. "
+        "As she glides forward, the red seed tin on the bench catches the light.");
+    if (cJSON_GetArraySize(placements) != 2 ||
+        strcmp(js(cJSON_GetArrayItem(placements, 0), "name"), "brass lantern") ||
+        strcmp(js(cJSON_GetArrayItem(placements, 1), "name"), "red seed tin")) {
+        fputs("Retain explicit item locations in descriptions of visible props.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(placements);
     scene = compendium_scene_evidence("Sera grips the brass lantern and lifts the blue satchel. "
         "She supposes the wax seal might have broken.");
     if (cJSON_GetArraySize(scene) != 2 ||
