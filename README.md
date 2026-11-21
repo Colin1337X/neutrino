@@ -74,7 +74,9 @@ The server listens on loopback. To use a server on another machine, forward the 
 
 ## Compendium and prompt trace
 
-Each completed narrator reply queues filing. The filing agent writes typed facts such as characters, places, items, events, and notes onto the reply that established them. Neutrino filters duplicate facts within a filing pass and against the current branch, including longer verbatim facts returned under a different label. The historian compacts older turns into a cumulative recap. Recall combines relevant active entries with recent dialogue, the recap, and other story sources. Switching or swiping a branch changes the reply history and the memory entries visible to the narrator.
+Each completed narrator reply queues filing. The filing agent writes typed facts such as characters, places, items, events, and notes onto the reply that established them. Neutrino checks entries across types for verbatim repetitions and equivalent location, stranding, and concealment claims. It keeps unrecognized wording, conflicting state, and novel sentences alongside established facts. The historian compacts older turns into a cumulative recap. Recall combines relevant active entries with recent dialogue, the recap, and other story sources. Switching or swiping a branch changes the reply history and the memory entries visible to the narrator.
+
+When a filing pass yields no new entries, Neutrino can capture an explicitly placed, previously unseen object directly from the narrator's sentence. These item records keep the original sentence as evidence and are marked `reply-evidence` in the workspace.
 
 | Command | Action |
 | --- | --- |

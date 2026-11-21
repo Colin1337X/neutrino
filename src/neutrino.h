@@ -19,6 +19,10 @@ void clear(Text *text);
 void release(Text *text);
 const char *str(const Text *text);
 void normalize_words(Text *text, const char *value);
+bool compendium_novel_claims(const Json *known, const Json *batch, const char *type,
+                             const char *name, const char *description, Text *out);
+bool compendium_placement_evidence(const Json *known, const Json *history, const char *reply,
+                                   Text *name, Text *evidence);
 char *copy(const char *value);
 const char *js(const Json *obj, const char *key);
 Json *at(const Json *obj, const char *key);

@@ -30,8 +30,8 @@ static const char filing_schema[] =
     "{\"type\":\"array\",\"maxItems\":6,\"items\":{\"type\":\"object\","
     "\"properties\":{\"type\":{\"enum\":[\"character\",\"place\",\"item\",\"event\",\"note\",\"faction\","
     "\"rule\",\"relationship\",\"plot\",\"quest\",\"creature\"]},"
-    "\"name\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":160},"
-    "\"description\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":2400}},"
+    "\"name\":{\"type\":\"string\"},"
+    "\"description\":{\"type\":\"string\"}},"
     "\"required\":[\"type\",\"name\",\"description\"],\"additionalProperties\":false}}";
 typedef struct {
     const char *endpoint, *key, *model;

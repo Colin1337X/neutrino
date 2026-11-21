@@ -336,8 +336,12 @@ Inference *inference_request(const char *endpoint, const char *key, const char *
     if (options.max_tokens > 0) integer(body, "max_tokens", options.max_tokens);
     if (options.json_schema) {
         Json *format = cJSON_CreateObject();
+        Json *wrapper = cJSON_CreateObject();
         set(format, "type", "json_schema");
-        put(format, "schema", cJSON_ParseWithOpts(options.json_schema, NULL, 1));
+        set(wrapper, "name", "compendium_filing");
+        put(wrapper, "strict", cJSON_CreateTrue());
+        put(wrapper, "schema", cJSON_ParseWithOpts(options.json_schema, NULL, 1));
+        put(format, "json_schema", wrapper);
         put(body, "response_format", format);
     }
     j->body = cJSON_PrintUnformatted(body);

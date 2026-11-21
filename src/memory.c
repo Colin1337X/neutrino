@@ -132,11 +132,26 @@ static void merge_entry(Json *entries, const Json *source, const char *id)
         if (matched) cJSON_Delete(cJSON_DetachItemViaPointer(entries, matched));
         return;
     }
-    if (!id && !matched && duplicates_fact(entries, type, name, description)) return;
+    Text novel = {0}, combined = {0};
+    if (!id) {
+        bool ambiguous = compendium_novel_claims(entries, NULL, type, name, description, &novel);
+        if (!novel.len || (!ambiguous && duplicates_fact(entries, type, name, str(&novel)))) {
+            release(&novel);
+            return;
+        }
+        bool partial = strcmp(description, str(&novel)) || cJSON_IsTrue(at(source, "memoryAppend"));
+        description = str(&novel);
+        if (matched && partial) {
+            format(&combined, "%s\n%s", description, js(matched, "description"));
+            description = str(&combined);
+        }
+    }
     Json *copy = entry(matched ? js(matched, "id") : id ? id : js(source, "id"),
                        type, name, description);
     if (matched) cJSON_ReplaceItemViaPointer(entries, matched, copy);
     else cJSON_AddItemToArray(entries, copy);
+    release(&novel);
+    release(&combined);
 }
 
 static Json *collect_entries(const Json *story, int head)
@@ -335,11 +350,13 @@ Inference *memory_start_recall(const App *app, const Json *story, const Json *me
 
 static Json *filing_prompt(const Json *story, int id)
 {
-    Json *path = story_path(story, id), *reply = story_pick(story, id);
+    Json *reply = story_pick(story, id), *parent = story_pick(story, number(reply, "parent"));
     Text input = {0};
-    append(&input, "Most recent exchange (last assistant message is the new evidence):");
-    recent_turns(&input, path, 4);
-    if (reply) format(&input, "\n\nSource reply: #%d", id);
+    if (!strcmp(js(parent, "role"), "user")) {
+        append(&input, "Player context for resolving references only:\n");
+        excerpt(&input, js(parent, "content"), 1000);
+        append(&input, "\n\n");
+    }
     Json *existing = collect_entries(story, number(reply, "parent")), *record;
     if (existing->child) append(&input, "\n\nRelevant facts already filed:");
     int shown = 0;
@@ -350,8 +367,10 @@ static Json *filing_prompt(const Json *story, int id)
         excerpt(&input, js(record, "description"), 400);
         shown++;
     }
-    append(&input, "\n\nFile only facts that changed or were established for the first time in the final "
-        "assistant reply. A restatement of a fact already filed is unchanged. If there is no new fact, output [].");
+    format(&input, "\n\nLatest assistant reply (#%d), the evidence to file:\n", id);
+    excerpt(&input, js(reply, "content"), 2400);
+    append(&input, "\n\nFile a new entity or action described above, even if the reply also repeats old facts. "
+        "A restatement alone is unchanged. If the latest reply established no new facts, output [].");
     Json *messages = request("File durable facts newly established by the final assistant message. "
         "Ignore speculation. Preserve uncertainty when the story only suggests a fact. "
         "Return only a JSON array of up to six objects with type, name and description. "
@@ -359,7 +378,6 @@ static Json *filing_prompt(const Json *story, int id)
         "character, place, item, event, note, faction, rule, relationship, plot, quest, creature. "
         "Reuse existing names for updates. Skip facts already in the supplied ledger, including under another type. "
         "If nothing changed, return [].", &input);
-    cJSON_Delete(path);
     cJSON_Delete(existing);
     release(&input);
     return messages;
@@ -380,8 +398,16 @@ static Json *parse_filing(const Text *output, const Json *story, const Json *rep
             return NULL;
         }
         index++;
-        if (duplicates_fact(known, type, name, description) ||
-            duplicates_fact(result, type, name, description)) continue;
+        if (duplicates_fact(result, type, name, description)) continue;
+        Text novel = {0};
+        bool ambiguous = compendium_novel_claims(known, result, type, name, description, &novel);
+        bool partial = strcmp(description, str(&novel)) != 0;
+        description = str(&novel);
+        if (!novel.len || (!ambiguous && duplicates_fact(known, type, name, description)) ||
+            duplicates_fact(result, type, name, description)) {
+            release(&novel);
+            continue;
+        }
         Json *entity = find_entity(result, type, name);
         if (entity) {
             const char *previous = js(entity, "description");
@@ -391,13 +417,32 @@ static Json *parse_filing(const Text *output, const Json *story, const Json *rep
                 set(entity, "description", str(&combined));
                 release(&combined);
             }
+            if (partial) put(entity, "memoryAppend", cJSON_CreateTrue());
+            release(&novel);
             continue;
         }
         char id[40];
         snprintf(id, sizeof id, "A%d.%d", anchor, index);
-        cJSON_AddItemToArray(result, entry(id, type, name, description));
+        Json *fact = entry(id, type, name, description);
+        if (partial) put(fact, "memoryAppend", cJSON_CreateTrue());
+        cJSON_AddItemToArray(result, fact);
+        release(&novel);
     }
     cJSON_Delete(answer);
+    if (!result->child) {
+        Json *history = story_path(story, number(reply, "parent"));
+        Text name = {0}, evidence = {0};
+        if (compendium_placement_evidence(known, history, js(reply, "content"), &name, &evidence)) {
+            char id[40];
+            snprintf(id, sizeof id, "A%d.%d", anchor, ++index);
+            Json *fact = entry(id, "item", str(&name), str(&evidence));
+            set(fact, "memorySource", "reply-evidence");
+            cJSON_AddItemToArray(result, fact);
+        }
+        release(&name);
+        release(&evidence);
+        cJSON_Delete(history);
+    }
     cJSON_Delete(known);
     return result;
 }

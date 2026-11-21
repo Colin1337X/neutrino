@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.18)
 project(neutrino VERSION 0.2.0 LANGUAGES C)
 
-add_executable(neutrino src/main.c src/workspace.c src/terminal.c src/inference.c src/gateway.c src/memory.c src/ui.c
+add_executable(neutrino src/main.c src/workspace.c src/terminal.c src/inference.c src/gateway.c src/memory.c src/facts.c src/ui.c
     third_party/cjson/cJSON.c)
 target_include_directories(neutrino PRIVATE third_party/cjson)
 set_target_properties(neutrino PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
@@ -23,3 +23,19 @@ else()
     target_link_libraries(neutrino PRIVATE CURL::libcurl Threads::Threads m)
 endif()
 install(TARGETS neutrino)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(compendium_claims_test tests/compendium_claims.c src/facts.c src/workspace.c
+        third_party/cjson/cJSON.c)
+    target_include_directories(compendium_claims_test PRIVATE src third_party/cjson)
+    set_target_properties(compendium_claims_test PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+    if(MSVC)
+        target_compile_definitions(compendium_claims_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+        target_compile_options(compendium_claims_test PRIVATE /utf-8)
+    elseif(NOT WIN32)
+        target_compile_definitions(compendium_claims_test PRIVATE _POSIX_C_SOURCE=200809L _XOPEN_SOURCE=700)
+        target_link_libraries(compendium_claims_test PRIVATE m)
+    endif()
+    add_test(NAME compendium_claims COMMAND compendium_claims_test)
+endif()
