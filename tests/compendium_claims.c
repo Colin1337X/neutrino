@@ -104,6 +104,7 @@ int main(void)
     clear(&prop);
     clear(&evidence);
     if (compendium_placement_evidence(known, NULL, "Iona places the copper key inside the red box.", &prop, &evidence) ||
+        compendium_placement_evidence(known, NULL, "Iona steps back to place the silver whistle against the metal beam.", &prop, &evidence) ||
         compendium_placement_evidence(known, NULL, "Iona imagines she places the silver whistle on the railing.", &prop, &evidence) ||
         compendium_placement_evidence(known, NULL, "Iona places the silver whistle on the railing, or imagines it.", &prop, &evidence)) {
         fputs("Known, imagined or ambiguous placements must stay out of evidence filing.\n", stderr);
@@ -456,6 +457,26 @@ int main(void)
         fputs("A stationary prop condition belongs with the item, while an action remains an event.\n", stderr); rc = 1;
     }
     release(&corrected_prop);
+    placements = compendium_placement_entries(nullptr, nullptr,
+        "The brass compass, gleaming in the dim light, is already resting perfectly upright in the oak drawer.");
+    if (cJSON_GetArraySize(placements) != 1 || strcmp(js(cJSON_GetArrayItem(placements, 0), "name"), "brass compass")) {
+        fputs("Retain the prop named before a parenthetical description in a witnessed location.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(placements);
+    placements = compendium_placement_entries(nullptr, nullptr,
+        "She reaches for the blue satchel resting on the edge of the desk, her other hand holding a book.");
+    if (cJSON_GetArraySize(placements) != 1 || strcmp(js(cJSON_GetArrayItem(placements, 0), "name"), "blue satchel")) {
+        fputs("File a visible prop at its narrated location, even when reaching for it is the main action.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(placements);
+    scene = compendium_scene_evidence("Sera grips the brass lantern and lifts the blue satchel. "
+        "She supposes the wax seal might have broken.");
+    if (cJSON_GetArraySize(scene) != 2 ||
+        strcmp(js(cJSON_GetArrayItem(scene, 0), "name"), "brass lantern") ||
+        strcmp(js(cJSON_GetArrayItem(scene, 1), "name"), "blue satchel")) {
+        fputs("Keep all independently witnessed props in a sentence.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(scene);
     cJSON_Delete(batch);
     cJSON_Delete(known);
     return rc;

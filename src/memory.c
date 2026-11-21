@@ -117,12 +117,17 @@ static int signal_kind(const char *type, const char *name)
     if (same_words(name, "bell") || same_words(name, "brass bell")) return 1;
     return same_words(name, "flare") ? 2 : 0;
 }
-static bool duplicates_fact(const Json *entries, const char *type, const char *name, const char *fact)
+enum { MAX_FILED_OBSERVATIONS = 16 };
+static bool duplicates_fact(const Json *entries, const char *type, const char *name, const char *fact,
+                            bool item_observation)
 {
     const int signal = signal_kind(type, name);
     Json *item;
     cJSON_ArrayForEach(item, entries) {
         bool same_entity = !strcmp(js(item, "type"), type) && same_words(js(item, "name"), name);
+        const char *other_name = js(item, "name");
+        if (item_observation && !same_entity && !strcmp(js(item, "type"), "item") &&
+            !compendium_filing_label(name, other_name) && !compendium_filing_label(other_name, name)) continue;
         /* Distinct witnessed signals may cite the very same sentence. */
         if (signal && !same_entity && signal != signal_kind(js(item, "type"), js(item, "name"))) continue;
         if (!same_entity && strlen(fact) < 32) continue;
@@ -147,6 +152,7 @@ static void merge_entry(Json *entries, const Json *source, const char *id)
 {
     const char *type = js(source, "type"), *name = js(source, "name");
     const char *description = js(source, "description");
+    bool item_observation = cJSON_IsTrue(at(source, "itemObservation"));
     Json *matched = id ? find_entry(entries, id) : find_entity(entries, type, name);
     const char *stored_name = js(matched, "name");
     bool alias = !id && matched && !strcmp(type, "character") && compendium_character_alias(stored_name, name);
@@ -158,7 +164,7 @@ static void merge_entry(Json *entries, const Json *source, const char *id)
     Text novel = {0}, combined = {0};
     if (!id) {
         bool ambiguous = compendium_novel_claims(entries, NULL, type, name, description, &novel);
-        if (!novel.len || (!ambiguous && duplicates_fact(entries, type, name, str(&novel)))) {
+        if (!novel.len || (!ambiguous && duplicates_fact(entries, type, name, str(&novel), item_observation))) {
             release(&novel);
             return;
         }
@@ -171,6 +177,7 @@ static void merge_entry(Json *entries, const Json *source, const char *id)
     }
     Json *copy = entry(matched ? js(matched, "id") : id ? id : js(source, "id"),
                        type, name, description);
+    if (item_observation) put(copy, "itemObservation", cJSON_CreateTrue());
     Json *alternate_ids = cJSON_Duplicate(at(matched, "alternateIds"), true);
     if (alias && *js(source, "id") && strcmp(js(source, "id"), js(matched, "id"))) {
         if (!alternate_ids) alternate_ids = cJSON_CreateArray();
@@ -437,7 +444,7 @@ static void file_candidates(Json *result, const Json *known, const Json *answer,
     const char *prose = js(reply, "content");
     Json *item;
     cJSON_ArrayForEach(item, answer) {
-        if (cJSON_GetArraySize(result) >= 6) break;
+        if (cJSON_GetArraySize(result) >= MAX_FILED_OBSERVATIONS) break;
         const char *type = js(item, "type"), *name = js(item, "name"), *description = js(item, "description");
         if (!valid_kind(type) || !*name || strlen(name) > 160 || !*description || strlen(description) > 2400)
             continue;
@@ -449,6 +456,7 @@ static void file_candidates(Json *result, const Json *known, const Json *answer,
             indexed || !strcmp(type, "character") ? str(&evidence) : description, prose, &corrected);
         if (corrected.len) name = str(&corrected);
         if (compendium_filing_label(name, str(&evidence))) {
+            bool item_observation = fallback && cJSON_IsTrue(at(item, "itemObservation"));
             Json *prior = find_entity(known, type, name);
             bool alias = prior && !strcmp(type, "character") &&
                          compendium_character_alias(js(prior, "name"), name);
@@ -460,8 +468,8 @@ static void file_candidates(Json *result, const Json *known, const Json *answer,
             if (novel.len && partial && !compendium_filing_evidence(prose, description, &exact))
                 description = str(&evidence);
             if (novel.len &&
-                (ambiguous || !duplicates_fact(known, type, name, description)) &&
-                !duplicates_fact(result, type, name, description)) {
+                (ambiguous || !duplicates_fact(known, type, name, description, item_observation)) &&
+                !duplicates_fact(result, type, name, description, item_observation)) {
                 Json *entity = find_entity(result, type, name);
                 if (entity) {
                     const char *previous = js(entity, "description");
@@ -480,6 +488,7 @@ static void file_candidates(Json *result, const Json *known, const Json *answer,
                     if (fallback) set(entity, "memorySource", "reply-evidence");
                     cJSON_AddItemToArray(result, entity);
                 }
+                if (item_observation) put(entity, "itemObservation", cJSON_CreateTrue());
                 if (partial || alias) put(entity, "memoryAppend", cJSON_CreateTrue());
             }
             release(&exact);
@@ -503,17 +512,17 @@ static Json *parse_filing(const Text *output, const Json *story, const Json *rep
     cJSON_Delete(history);
     if (valid) file_candidates(result, known, answer, reply, false, &index);
     cJSON_Delete(answer);
-    if (cJSON_GetArraySize(result) < 6 && opening_reply(story, reply)) {
+    if (cJSON_GetArraySize(result) < MAX_FILED_OBSERVATIONS && opening_reply(story, reply)) {
         Json *fallback = compendium_opening_evidence(js(reply, "content"));
         file_candidates(result, known, fallback, reply, true, &index);
         cJSON_Delete(fallback);
     }
-    if (cJSON_GetArraySize(result) < 6) {
+    if (cJSON_GetArraySize(result) < MAX_FILED_OBSERVATIONS) {
         Json *signals = compendium_signal_evidence(js(reply, "content"));
         file_candidates(result, known, signals, reply, true, &index);
         cJSON_Delete(signals);
     }
-    if (cJSON_GetArraySize(result) < 6) {
+    if (cJSON_GetArraySize(result) < MAX_FILED_OBSERVATIONS) {
         Json *scene = compendium_scene_evidence(js(reply, "content"));
         file_candidates(result, known, scene, reply, true, &index);
         cJSON_Delete(scene);
@@ -725,22 +734,25 @@ void memory_binding(App *a, const char *binding)
     app_status(a, "Recall model binding saved");
 }
 
-static void list_entries(App *a)
+static void list_entries(App *a, bool items)
 {
-    app_info(a, "Compendium");
+    app_info(a, items ? "Tracked story items" : "Compendium");
     int head = number(a->story, "head");
     format(&a->info, "Branch #%d  ·  memory %s  ·  recall %s\n\n", head,
         memory_enabled(a->story) ? "on" : "off", memory_mode(a->story));
     Json *entries = collect_entries(a->story, head), *item;
+    int shown = 0;
     cJSON_ArrayForEach(item, entries) {
+        if (items && strcmp(js(item, "type"), "item")) continue;
+        shown++;
         format(&a->info, "%s  %s  ·  %s\n%s\n\n", js(item, "id"), js(item, "type"),
                js(item, "name"), js(item, "description"));
     }
-    if (!entries->child) append(&a->info, "No entries on this branch yet.\n\n");
+    if (!shown) append(&a->info, items ? "No items filed on this branch yet.\n\n" : "No entries on this branch yet.\n\n");
     append(&a->info, "/memory new TYPE | NAME | DESCRIPTION\n"
                      "/memory edit ID | DESCRIPTION\n"
                      "/memory delete ID\n"
-                     "/memory show ID   /memory status   /memory mode");
+                     "/memory items   /memory show ID   /memory status   /memory mode");
     cJSON_Delete(entries);
 }
 static void show_entry(App *a, const char *id)
@@ -784,7 +796,7 @@ static void manual(App *a, const char *verb, char *args)
     cJSON_AddItemToArray(events, change);
     cJSON_Delete(active);
     invalidate(a);
-    list_entries(a);
+    list_entries(a, false);
     app_status(a, "Compendium updated");
 }
 
@@ -817,7 +829,8 @@ void memory_command(App *a, char *args)
     char *rest = args, *verb = piece(&rest, ' ');
     if (!rest) rest = "";
     while (isspace((unsigned char)*rest)) rest++;
-    if (!*verb || !strcmp(verb, "list")) list_entries(a);
+    if (!*verb || !strcmp(verb, "list")) list_entries(a, false);
+    else if (!strcmp(verb, "items")) list_entries(a, true);
     else if (!strcmp(verb, "show")) show_entry(a, rest);
     else if (!strcmp(verb, "status")) memory_status(a);
     else if (!strcmp(verb, "new") || !strcmp(verb, "edit") || !strcmp(verb, "delete")) manual(a, verb, rest);

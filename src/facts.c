@@ -628,7 +628,8 @@ static bool uncertain_observation(const char *line);
 static bool placement_object(const char *sentence, Text *name, Text *target)
 {
     /* A complete leading action is required. Keep the full sentence as evidence. */
-    static const char *const verbs[] = {"places", "puts", "sets", "slides", "ties", "fastens", "secures",
+    static const char *const verbs[] = {"place", "put", "set", "tie", "clip", "attach", "fasten", "secure",
+        "places", "puts", "sets", "slides", "ties", "fastens", "secures",
         "clamps", "clips", "attaches", "hooks", "hangs", "pins", "straps", "lashes",
         "placed", "tied", "fastened", "secured", "clamped", "clipped", "attached",
         "strapped", "hooked", "pinned",
@@ -656,6 +657,8 @@ static bool placement_object(const char *sentence, Text *name, Text *target)
     for (size_t i = 0; i < sizeof verbs / sizeof *verbs; i++) {
         const char *at = word(s, verbs[i]);
         if (!at || at == s || !at[strlen(verbs[i])]) continue;
+        if ((at - s >= 3 && !memcmp(at - 3, "to ", 3) && (at - s == 3 || at[-4] == ' ')) ||
+            (at - s >= 4 && !memcmp(at - 4, "can ", 4) && (at - s == 4 || at[-5] == ' '))) continue;
         const char *object = at + strlen(verbs[i]) + 1;
         if (!begin || object < begin) {
             begin = object;
@@ -694,11 +697,12 @@ end:
 
 static bool attached_placement(const char *sentence, Text *name, Text *target)
 {
-    static const char *const states[] = {"is", "remains", "was"};
+    static const char *const states[] = {"is", "remains", "was", "resting"};
     static const char *const verbs[] = {"clipped", "tied", "fastened", "secured",
-        "attached", "clamped", "strapped", "hooked", "pinned"};
+        "attached", "clamped", "strapped", "hooked", "pinned", "resting", "buried"};
+    static const char *const qualifiers[] = {"securely ", "firmly ", "perfectly ", "upright ", "flat ", "deep "};
     if (strpbrk(sentence, "?\"") || strstr(sentence, "“")) return false;
-    Text clause = {0}, words = {0}, active = {0};
+    Text clause = {0}, words = {0}, active = {0}, leading_subject = {0}, subject = {0};
     for (const char *start = sentence; *start && !name->len;) {
         const char *end = strchr(start, ',');
         if (!end) end = start + strlen(start);
@@ -707,23 +711,42 @@ static bool attached_placement(const char *sentence, Text *name, Text *target)
         normalize_words(&words, str(&clause));
         const char *line = str(&words);
         if (uncertain_observation(line) || word(line, "not") || word(line, "or")) break;
+        const char *leading = line;
+        if (start == sentence && *end && prefix(&leading, "the ") && words.len < 70 &&
+            physical_object(leading) && simple(leading) && !word(leading, "is") &&
+            !word(leading, "was") && !word(leading, "rests")) append(&leading_subject, line);
         for (size_t i = 0; i < sizeof states / sizeof *states && !name->len; i++) {
             const char *state = word(line, states[i]);
-            if (!state || state == line || state[strlen(states[i])] != ' ') continue;
+            if (!state || state[strlen(states[i])] != ' ') continue;
             const char *article = word(line, "the");
-            if (!article || article >= state) continue;
-            for (const char *next = word(article + 3, "the"); next && next < state; next = word(next + 3, "the"))
-                article = next;
+            if (article && article < state)
+                for (const char *next = word(article + 3, "the"); next && next < state; next = word(next + 3, "the"))
+                    article = next;
+            else if (state == line && leading_subject.len) article = nullptr;
+            else continue;
             const char *action = state + strlen(states[i]) + 1;
-            if (!prefix(&action, "now ")) prefix(&action, "still ");
+            if (!strcmp(states[i], "resting")) {
+                if (!article) continue;
+                clear(&subject);
+                phrase(&subject, article, state);
+                if (!physical_object(str(&subject))) continue;
+                action = state;
+            } else if (!prefix(&action, "now ") && !prefix(&action, "still ")) prefix(&action, "already ");
             for (size_t j = 0; j < sizeof verbs / sizeof *verbs; j++) {
                 if (word(action, verbs[j]) != action || action[strlen(verbs[j])] != ' ') continue;
                 const char *location = action + strlen(verbs[j]) + 1;
-                if (!prefix(&location, "securely ")) prefix(&location, "firmly ");
+                for (size_t skipped = 0; skipped < 3; ++skipped) {
+                    const char *before = location;
+                    for (size_t k = 0; k < sizeof qualifiers / sizeof *qualifiers; ++k)
+                        if (prefix(&location, qualifiers[k])) break;
+                    if (before == location) break;
+                }
                 if (!*location) break;
                 clear(&active);
-                format(&active, "Someone %s ", verbs[j]);
-                append_n(&active, article, (size_t)(state - article));
+                const char *verb = !strcmp(verbs[j], "resting") || !strcmp(verbs[j], "buried") ? "placed" : verbs[j];
+                format(&active, "Someone %s ", verb);
+                if (article) append_n(&active, article, (size_t)(state - article));
+                else format(&active, "%s ", str(&leading_subject));
                 append(&active, location);
                 placement_object(str(&active), name, target);
                 break;
@@ -734,6 +757,8 @@ static bool attached_placement(const char *sentence, Text *name, Text *target)
     release(&clause);
     release(&words);
     release(&active);
+    release(&leading_subject);
+    release(&subject);
     return name->len != 0;
 }
 
@@ -834,6 +859,7 @@ Json *compendium_placement_entries(const Json *known, const Json *history, const
         set(entry, "type", "item");
         set(entry, "name", str(&name));
         set(entry, "description", str(&evidence));
+        put(entry, "itemObservation", cJSON_CreateTrue());
         cJSON_AddItemToArray(entries, entry);
         clear(&name);
         clear(&evidence);
@@ -984,11 +1010,12 @@ Json *compendium_opening_evidence(const char *reply)
 
 static void add_observation(Json *facts, const char *type, const char *name, const Text *sentence)
 {
-    if (cJSON_GetArraySize(facts) >= 6) return;
+    if (cJSON_GetArraySize(facts) >= 16) return;
     Json *fact = cJSON_CreateObject();
     set(fact, "type", type);
     set(fact, "name", name);
     set(fact, "description", str(sentence));
+    if (!strcmp(type, "item")) put(fact, "itemObservation", cJSON_CreateTrue());
     cJSON_AddItemToArray(facts, fact);
 }
 
@@ -1002,21 +1029,23 @@ static bool uncertain_observation(const char *line)
     return false;
 }
 
-static bool handled_object(const char *line, Text *name)
+static void handled_objects(Json *facts, const char *line, const Text *sentence)
 {
     static const char *const verbs[] = {"hold", "holds", "held", "holding", "grip", "grips", "gripped",
         "gripping", "clutches", "clutched", "clutching", "take", "takes", "took", "taken", "picks up", "picked up",
-        "pull", "pulls", "pulled", "pulling", "tugs", "tugged", "tugging",
-        "presses", "pressed", "pressing", "fastens", "fastened", "fastening", "lift", "lifts", "lifted", "lifting"};
+        "pull", "pulls", "pulled", "pulling", "tugs", "tugged", "tugging", "rips", "ripped",
+        "presses", "pressed", "pressing", "fastens", "fastened", "fastening", "secures", "secured",
+        "lift", "lifts", "lifted", "lifting"};
     static const char *const boundaries[] = {"the", "his", "her", "to", "from", "of", "in", "into", "on",
         "over", "against", "under", "beneath", "at", "with", "as", "when", "while"};
-    Text word_text = {0};
-    for (size_t i = 0; i < sizeof verbs / sizeof *verbs && !name->len; i++) {
-        const char *actor = word(line, verbs[i]);
-        if (!actor || actor == line) continue;
-        const char *object = actor + strlen(verbs[i]);
+    Text word_text = {0}, name = {0};
+    for (size_t i = 0; i < sizeof verbs / sizeof *verbs; i++) {
+      for (const char *action = word(line, verbs[i]); action; action = word(action + strlen(verbs[i]), verbs[i])) {
+        if (action == line) continue;
+        const char *object = action + strlen(verbs[i]);
         if (!prefix(&object, " the ") && !prefix(&object, " a ") && !prefix(&object, " an ")) continue;
-        for (const char *part = object; *part && !name->len;) {
+        clear(&name);
+        for (const char *part = object; *part && !name.len;) {
             const char *end = part + strcspn(part, " ");
             if (end - object > 70) break;
             clear(&word_text);
@@ -1026,12 +1055,21 @@ static bool handled_object(const char *line, Text *name)
             for (size_t j = 0; j < sizeof boundaries / sizeof *boundaries && !boundary; j++)
                 boundary = !strcmp(token, boundaries[j]);
             if (boundary) break;
-            if (physical_object(token)) phrase(name, object, end);
+            if (physical_object(token)) phrase(&name, object, end);
             part = *end ? end + 1 : end;
         }
+        if (!name.len) continue;
+        Json *prior;
+        bool duplicate = false;
+        cJSON_ArrayForEach(prior, facts) {
+            if (!strcmp(js(prior, "name"), str(&name)) &&
+                !strcmp(js(prior, "description"), str(sentence))) { duplicate = true; break; }
+        }
+        if (!duplicate) add_observation(facts, "item", str(&name), sentence);
+      }
     }
     release(&word_text);
-    return name->len != 0;
+    release(&name);
 }
 
 static void leading_words(Text *out, const char *source)
@@ -1131,6 +1169,7 @@ Json *compendium_signal_evidence(const char *reply)
         if (!word(line, "await") && !word(line, "awaits") && !word(line, "awaiting") &&
                  !word(line, "expects") && !word(line, "expecting") &&
                  (flare_motion(line) || word(line, "flare lights up") ||
+                  (word(line, "flare now bright") && word(line, "illuminates")) ||
                   word(line, "watches the flare") || word(line, "sees the flare") ||
                   word(line, "holding the flare") || word(line, "holds the flare") ||
                   (word(line, "tide recedes") && word(line, "reveal the white rescue flare")) || (word(line, "flare") &&
@@ -1146,8 +1185,8 @@ Json *compendium_signal_evidence(const char *reply)
 Json *compendium_scene_evidence(const char *reply)
 {
     Json *facts = cJSON_CreateArray();
-    Text sentence = {0}, tokens = {0}, leading = {0}, prop = {0};
-    for (const char *s = reply; *s && cJSON_GetArraySize(facts) < 6;) {
+    Text sentence = {0}, tokens = {0}, leading = {0};
+    for (const char *s = reply; *s && cJSON_GetArraySize(facts) < 16;) {
         const char *end = sentence_end(s);
         copy_sentence(&sentence, s, end);
         s = end;
@@ -1200,8 +1239,7 @@ Json *compendium_scene_evidence(const char *reply)
             word(line, "holding the silver whistle firmly against") ||
             word(line, "holding the silver whistle against") || word(line, "holds the silver whistle against"))
             add_observation(facts, "item", "silver whistle", &sentence);
-        else if (handled_object(line, &prop)) add_observation(facts, "item", str(&prop), &sentence);
-        clear(&prop);
+        handled_objects(facts, line, &sentence);
         if (word(line, "red box rests") || word(line, "red box lay hidden"))
             add_observation(facts, "item", "red box", &sentence);
         if (word(line, "key fitting into") || word(line, "key fits into"))
@@ -1214,7 +1252,6 @@ Json *compendium_scene_evidence(const char *reply)
     release(&sentence);
     release(&tokens);
     release(&leading);
-    release(&prop);
     return facts;
 }
 
