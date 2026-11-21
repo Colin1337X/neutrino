@@ -5,7 +5,7 @@
 #include <string.h>
 
 typedef struct {
-    Text subject, object, place;
+    Text subject, object, place, role;
     const char *action, *relation;
     bool past;
     size_t role_end;
@@ -51,6 +51,13 @@ static bool title_is(const char *title, const char *left, const char *right)
     bool same = !strcmp(title, str(&name));
     release(&name);
     return same;
+}
+static void noun_phrase(Text *out, const char *start, const char *end)
+{
+    while (start < end && *start == ' ') start++;
+    if (end - start > 2 && !memcmp(start, "a ", 2)) start += 2;
+    else if (end - start > 3 && !memcmp(start, "an ", 3)) start += 3;
+    phrase(out, start, end);
 }
 
 static const char *action_at(const char *s, const char **verb, const char **action)
@@ -134,17 +141,22 @@ static void claim_release(Claim *c)
     release(&c->subject);
     release(&c->object);
     release(&c->place);
+    release(&c->role);
 }
 
 /* Interpret a narrow set of explicit state and location frames. Unknown words
    remain part of the claim; a near match never licenses deleting a fact. */
-static bool parse_claim(Claim *c, const char *type, const char *name, const char *text)
+static bool parse_claim(Claim *c, const char *type, const char *name, const char *text, bool ledger)
 {
     Text words = {0}, title = {0};
     normalize_words(&words, text);
     normalize_words(&title, name);
     const char *s = str(&words), *normalized_title = str(&title);
     bool ok = false;
+    /* An explicit purpose in an existing filing can entail the unqualified
+       concealment. Keep purpose clauses intact in newly proposed filings. */
+    char *purpose = ledger && words.data ? strstr(words.data, " to prevent ") : NULL;
+    if (purpose) *purpose = 0;
     if (!simple(s) || words.len > 350) goto finish;
     const char *clause = s, *implicit_place = NULL, *place_end = NULL;
     const char *where = word(s, "where");
@@ -180,6 +192,7 @@ static bool parse_claim(Claim *c, const char *type, const char *name, const char
                  !strcmp(role_suffix, " officer") || !strcmp(role_suffix, " captain"))) {
                 while (end_subject > clause && end_subject[-1] == ' ') end_subject--;
                 c->role_end = (size_t)(end_subject - s);
+                noun_phrase(&c->role, clause, end_subject);
                 clear(&c->subject);
                 append(&c->subject, normalized_title);
             }
@@ -196,14 +209,15 @@ static bool parse_claim(Claim *c, const char *type, const char *name, const char
         location = explicit_place;
         place_end = explicit_place + strlen(explicit_place);
         relation = explicit_relation;
-        phrase(&c->object, suffix, prep);
+        noun_phrase(&c->object, suffix, prep);
     } else if (implicit_place) {
-        phrase(&c->object, suffix, suffix + strlen(suffix));
+        noun_phrase(&c->object, suffix, suffix + strlen(suffix));
     } else goto finish;
-    phrase(&c->place, location, place_end);
+    noun_phrase(&c->place, location, place_end);
     if (!c->place.len) goto finish;
     if ((!strcmp(action, "stranded") || !strcmp(action, "located") || !strcmp(action, "concealed")) && c->object.len) goto finish;
     if ((!strcmp(action, "hidden") || !strcmp(action, "stored")) && !c->object.len) goto finish;
+    if (purpose && strcmp(action, "hidden") && strcmp(action, "concealed")) goto finish;
     c->action = action;
     c->relation = relation;
     c->past = past || !strcmp(verb, "was") || !strcmp(verb, "were");
@@ -262,7 +276,8 @@ static void copy_sentence(Text *out, const char *start, const char *end)
     append_n(out, start, (size_t)(end - start));
 }
 
-static void compare_ledger(const Json *entries, const Claim *candidate, bool *matched, bool *conflict)
+static void compare_ledger(const Json *entries, const Claim *candidate, bool *matched, bool *conflict,
+                           bool *known_role)
 {
     Json *item;
     Text sentence = {0};
@@ -273,7 +288,10 @@ static void compare_ledger(const Json *entries, const Claim *candidate, bool *ma
             const char *end = sentence_end(s);
             copy_sentence(&sentence, s, end);
             Claim known = {0};
-            if (parse_claim(&known, js(item, "type"), js(item, "name"), str(&sentence))) {
+            if (parse_claim(&known, js(item, "type"), js(item, "name"), str(&sentence), true)) {
+                if (candidate->role.len && !strcmp(str(&candidate->role), str(&known.role)) &&
+                    !strcmp(str(&candidate->subject), str(&known.subject)) && candidate->past == known.past)
+                    *known_role = true;
                 if (covered_claim(candidate, &known)) *matched = true;
                 /* When the ledger contains different locations for the same subject,
                    a repeated location may describe a return. Keep it. */
@@ -320,13 +338,14 @@ bool compendium_novel_claims(const Json *known, const Json *batch, const char *t
         const char *end = sentence_end(s);
         copy_sentence(&sentence, s, end);
         Claim candidate = {0};
-        bool matched = false, conflict = false;
-        if (parse_claim(&candidate, type, name, str(&sentence))) {
-            compare_ledger(known, &candidate, &matched, &conflict);
-            compare_ledger(batch, &candidate, &matched, &conflict);
+        bool matched = false, conflict = false, known_role = false;
+        if (parse_claim(&candidate, type, name, str(&sentence), false)) {
+            compare_ledger(known, &candidate, &matched, &conflict, &known_role);
+            compare_ledger(batch, &candidate, &matched, &conflict, &known_role);
         }
         if (conflict) ambiguous = true;
-        if (matched && !conflict && (!candidate.role_end || keep_role(out, str(&sentence), candidate.role_end))) {
+        if (matched && !conflict && (!candidate.role_end || known_role ||
+            keep_role(out, str(&sentence), candidate.role_end))) {
             changed = true;
         } else if (sentence.len) {
             if (out->len) append(out, "\n");

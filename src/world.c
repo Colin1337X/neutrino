@@ -248,6 +248,29 @@ static void world_panel(App *a, bool log)
     cJSON_Delete(state);
 }
 
+static void inspect_world(App *a, const char *name)
+{
+    const Json *world = at(a->story, "world");
+    Json *state = world_state(a->story, number(a->story, "head"));
+    const char *room = js(state, "room");
+    if (!*room) { app_status(a, "Create a starting room with /room first."); cJSON_Delete(state); return; }
+    const Json *place = !*name || equal_name(name, room) ? named(at(world, "rooms"), room) : nullptr;
+    const Json *item = named(at(state, "item"), name);
+    const Json *character = named(at(state, "npc"), name);
+    const bool carried = cJSON_IsTrue(at(item, "carried"));
+    const bool item_visible = item && (carried || equal_name(room, js(item, "room")));
+    const bool character_visible = character && equal_name(room, js(character, "room"));
+    if (place || item_visible || character_visible) {
+        app_info(a, "Inspect world");
+        if (place) format(&a->info, "Room  %s\n%s\n\n", room, js(place, "text"));
+        if (item_visible) format(&a->info, "%s  %s\n%s\n\n", carried ? "Carried" : "Nearby item",
+                                 js(item, "name"), js(item, "text"));
+        if (character_visible) format(&a->info, "Present character  %s\n%s\n", js(character, "name"),
+                                      js(character, "text"));
+    } else app_status(a, "Nothing with that name is here or carried.");
+    cJSON_Delete(state);
+}
+
 static int map_index(const char *const rooms[], int count, const char *name)
 {
     for (int i = 0; i < count; i++)
@@ -342,6 +365,7 @@ void world_command(App *a, const char *verb, char *argument)
     if (!a->roleplay || !a->story) { app_status(a, "Open a roleplay story to use its world."); return; }
     if (!strcmp(verb, "world")) { world_panel(a, !strcmp(argument, "log")); return; }
     if (!strcmp(verb, "map")) { world_map(a, trim(argument)); return; }
+    if (!strcmp(verb, "inspect")) { inspect_world(a, trim(argument)); return; }
     if (preview_busy(&a->preview)) { app_status(a, "Finish the active reply before changing the world."); return; }
 
     bool room_cmd = !strcmp(verb, "room"), link_cmd = !strcmp(verb, "connect");

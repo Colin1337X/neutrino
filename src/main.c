@@ -34,9 +34,11 @@ const Command commands[] = {
     {"play", " [title]", "Start a roleplay linked to this scene"},
     {"branch", " [message ID]", "Inspect or switch the active path"},
     {"rewind", " [ancestor ID]", "Rewind one exchange or return to an earlier message"},
+    {"search", " text", "Find literal text on the active roleplay path"},
     {"memory", " [mode|new|edit|status]", "Open or manage branch-aware story memory"},
     {"world", " [log]", "Inspect this branch's room, inventory, or activity"},
     {"map", " [destination]", "Show world links or the shortest route from this room"},
+    {"inspect", " [name]", "Read details about the room, a nearby character, or an item"},
     {"room", " NAME | DESCRIPTION", "Define a room"},
     {"connect", " ROOM | ROOM", "Link two rooms"},
     {"go", " ROOM", "Move through an exit"},
@@ -77,6 +79,7 @@ const Command commands[] = {
     {"senses", " sight,sound,smell,touch,taste,metaphor", "Set Describe senses or use all"},
     {"select", " all | clear | START END", "Select a UTF-8 byte range for writing tools"},
     {"find", " text", "Find literal text across the manuscript"},
+    {"replace", " OLD | NEW", "Replace literal text in the current scene and save a revision"},
     {"revisions", "", "Inspect saved drafts"},
     {"restore", " number", "Restore a prior draft and keep the current version"},
     {"bible", "", "Inspect canon and draft entries"},
@@ -1050,6 +1053,35 @@ static void rewind_story(App *a, const char *arg)
     if (!target) change_branch(a, 0);
     else status(a, "Choose an earlier message on this branch.");
 }
+static void search_story(App *a, const char *query)
+{
+    if (!a->roleplay || !a->story) { status(a, "Open a roleplay story first."); return; }
+    if (!*query) { status(a, "Use /search TEXT."); return; }
+    show_info(a, "Search this branch");
+    Json *path = story_path(a->story, number(a->story, "head"));
+    int matches = 0;
+    for (Json *node = path->child ? path->child->prev : nullptr; node;
+         node = node == path->child ? nullptr : node->prev) {
+        const char *content = js(node, "content");
+        const char *hit = strstr(content, query);
+        if (!hit) continue;
+        if (++matches > 40) {
+            append(&a->info, "More matches omitted. Narrow your search.\n");
+            break;
+        }
+        const size_t len = strlen(content), offset = (size_t)(hit - content);
+        size_t start = offset > 55 ? offset - 55 : 0;
+        while (start < offset && ((unsigned char)content[start] & 0xc0) == 0x80) start++;
+        size_t end = len > start + 220 ? start + 220 : len;
+        while (end > start && ((unsigned char)content[end] & 0xc0) == 0x80) end--;
+        format(&a->info, "#%d  %s\n%s", number(node, "id"), js(node, "role"), start ? "…" : "");
+        append_n(&a->info, content + start, end - start);
+        append(&a->info, end < len ? "…\n\n" : "\n\n");
+    }
+    if (!matches) append(&a->info, "No matching messages on the active path.");
+    else append(&a->info, "/branch ID opens a matching message.");
+    cJSON_Delete(path);
+}
 static void sibling(App *a, bool next)
 {
     int head = number(a->story, "head");
@@ -1079,6 +1111,42 @@ static void view_revisions(App *a)
     }
     if (!i) append(&a->info, "No earlier versions. Saved edits and accepted candidates create revisions.");
     else append(&a->info, "/restore <number> restores a prior draft.");
+}
+static void replace_scene_text(App *a, char *arg)
+{
+    if (!a->scene || a->roleplay) { status(a, "Open a manuscript scene first."); return; }
+    char *replacement = arg, *needle = split_piece(&replacement, '|');
+    if (!replacement || !*needle) { status(a, "Use /replace OLD | NEW. Leave NEW empty to remove OLD."); return; }
+    replacement = trim_piece(replacement);
+    if (!strcmp(needle, replacement)) { status(a, "The replacement is identical."); return; }
+    const size_t old_len = strlen(needle), new_len = strlen(replacement);
+    const char *start = scene_text(&a->ws, a->scene);
+    Text edited = {0};
+    size_t count = 0;
+    const char *match;
+    while ((match = strstr(start, needle))) {
+        const size_t span = (size_t)(match - start);
+        if (span + new_len > EDIT_LIMIT - edited.len) break;
+        append_n(&edited, start, span);
+        append_n(&edited, replacement, new_len);
+        start = match + old_len;
+        count++;
+    }
+    if (match || strlen(start) > EDIT_LIMIT - edited.len) status(a, "The replacement exceeds the manuscript limit.");
+    else if (!count) status(a, "No matching text in this scene.");
+    else {
+        append(&edited, start);
+        if (scene_edit(&a->ws, a->scene, str(&edited), "replace")) {
+            a->selected = false;
+            a->scroll = 0;
+            close_panel(a);
+            char message[80];
+            snprintf(message, sizeof message, "Replaced %zu %s · /revisions to review", count,
+                     count == 1 ? "match" : "matches");
+            status(a, message);
+        }
+    }
+    release(&edited);
 }
 
 static void configure_senses(App *a, const char *arg)
@@ -1230,7 +1298,7 @@ static void slash_command(App *a, char *line)
         return;
     }
     const char *const world_commands[] = {"world", "room", "connect", "go", "item",
-        "take", "drop", "npc", "weather", "say", "map"};
+        "take", "drop", "npc", "weather", "say", "map", "inspect"};
     for (size_t i = 0; i < sizeof world_commands / sizeof *world_commands; i++) {
         if (!strcmp(line, world_commands[i])) { world_command(a, line, arg); return; }
     }
@@ -1244,6 +1312,8 @@ static void slash_command(App *a, char *line)
     else if (!strcmp(line, "edit")) edit_start(a);
     else if (!strcmp(line, "rewrite-preset")) rewrite_preset(a, arg);
     else if (!strcmp(line, "rewind")) rewind_story(a, arg);
+    else if (!strcmp(line, "search")) search_story(a, arg);
+    else if (!strcmp(line, "replace")) replace_scene_text(a, arg);
     else if (!strcmp(line, "quit")) quit(a);
     else if (!strcmp(line, "save")) { status(a, "Workspace saved"); save(a); }
     else if (!strcmp(line, "focus")) a->compact = !a->compact;

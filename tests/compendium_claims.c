@@ -63,6 +63,37 @@ int main(void)
     }
     release(&container);
     cJSON_Delete(role);
+    Json *relay = cJSON_Parse(
+        "[{\"type\":\"character\",\"name\":\"Iona\",\"description\":"
+        "\"Station keeper hiding the copper key in a red box to prevent access before the tide recedes.\"},"
+        "{\"type\":\"event\",\"name\":\"Copper Key Location\",\"description\":"
+        "\"Iona secures the copper key within the red box.\"}]");
+    const struct Example relay_cases[] = {
+        {"character", "Iona", "Station keeper hiding the copper key in a red box.", ""},
+        {"item", "Copper key", "The copper key is hidden within the red box.", ""},
+        {"character", "Iona", "Station keeper hiding the copper key in the red box. She ties a silver whistle to the railing.",
+         "She ties a silver whistle to the railing."},
+        {"character", "Iona", "Station keeper hiding the copper key in the red box until sunrise.",
+         "Station keeper hiding the copper key in the red box until sunrise."},
+        {"character", "Iona", "Station keeper hiding the copper key in another red box.",
+         "Station keeper hiding the copper key in another red box."},
+        {"character", "Iona", "Station keeper hiding the copper key in the red box to prevent Mara from using it.",
+         "Station keeper hiding the copper key in the red box to prevent Mara from using it."},
+        {"character", "Iona", "Harbor guard hiding the copper key in the red box.", "Harbor guard."},
+        {"character", "Iona", "Station keeper hiding the copper key in the blue drawer.",
+         "Station keeper hiding the copper key in the blue drawer."},
+    };
+    for (size_t i = 0; i < sizeof relay_cases / sizeof *relay_cases; i++) {
+        const struct Example *example = &relay_cases[i];
+        Text out = {0};
+        compendium_novel_claims(relay, NULL, example->type, example->name, example->input, &out);
+        if (strcmp(example->expected, str(&out))) {
+            fprintf(stderr, "%s\nExpected: [%s]\nReceived: [%s]\n", example->input, example->expected, str(&out));
+            rc = 1;
+        }
+        release(&out);
+    }
+    cJSON_Delete(relay);
     Text prop = {0}, evidence = {0};
     const char *placement = "Iona carefully places the silver whistle on the railing, securing it to the edge of the pier.";
     if (!compendium_placement_evidence(known, NULL, placement, &prop, &evidence) ||
