@@ -382,13 +382,11 @@ static Json *filing_prompt(const Json *story, int id)
     }
     format(&input, "\n\nLatest assistant reply (#%d), the evidence to file:\n", id);
     excerpt(&input, js(reply, "content"), 2400);
-    if (opening_reply(story, reply))
-        append(&input, "\n\nThis is the opening reply. File concrete actions and durable states it actually establishes, "
-            "including actions embedded in descriptive prose. File what the narrator actually depicts even if the player "
-            "asked for something different. Do not file requested events that never happened in the reply.");
-    append(&input, "\n\nCopy the exact supporting sentence or consecutive sentences from this reply into description. "
-        "Do not paraphrase or add punctuation. Use a short entity name that appears in the quotation. "
-        "If no new fact has a verbatim quotation here, output [].");
+    append(&input, "\n\nLook for completed actions, changed locations, object states, and witnessed signals. "
+        "These may be inside descriptive sentences. An instruction or expectation is not evidence that its event happened. "
+        "Copy a short exact passage from this reply containing the entity and what happened into description. "
+        "Do not paraphrase or add punctuation. Name the entity using words from the passage. "
+        "If no new fact has a verbatim passage here, output [].");
     Json *messages = request("File durable facts newly established by the final assistant message. "
         "Ignore speculation. Preserve uncertainty when the story only suggests a fact. "
         "Return only a JSON array of up to six objects with type, name and description, with description "
@@ -493,6 +491,11 @@ static Json *parse_filing(const Text *output, const Json *story, const Json *rep
         release(&name);
         release(&evidence);
         cJSON_Delete(history);
+    }
+    if (valid && cJSON_GetArraySize(result) < 6) {
+        Json *scene = compendium_scene_evidence(js(reply, "content"));
+        valid = file_candidates(result, known, scene, reply, true, &index);
+        cJSON_Delete(scene);
     }
     cJSON_Delete(known);
     if (!valid) { cJSON_Delete(result); return nullptr; }

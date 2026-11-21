@@ -260,12 +260,17 @@ static const char *located_subject(const Claim *c)
    Treat strong sentence boundaries only; an unparsed compound stays intact. */
 static const char *sentence_end(const char *s)
 {
+    bool dialogue = false;
     for (const char *p = s; *p; p++) {
         if (*p == '\n') return p + 1;
+        if (*p == '"') dialogue = !dialogue;
         if ((*p == '.' || *p == '!' || *p == '?') && p[1]) {
+            if (dialogue && p[1] != '"') continue;
             const char *next = p + 1;
+            if (*next == '"') next++;
+            const char *punctuation_end = next;
             while (*next == ' ' || *next == '\t') next++;
-            if (next > p + 1 && isupper((unsigned char)*next) &&
+            if (next > punctuation_end && isupper((unsigned char)*next) &&
                 !(p > s && isupper((unsigned char)p[-1]) &&
                   (p - s == 1 || p[-2] == ' '))) return next;
         }
@@ -546,7 +551,8 @@ static bool placement_object(const char *sentence, Text *name, Text *target)
     /* A complete leading action is required. Keep the full sentence as evidence. */
     static const char *const verbs[] = {"places", "puts", "sets", "slides", "ties", "fastens", "secures",
         "clamps", "clips", "attaches", "hooks", "hangs", "pins", "straps", "lashes",
-        "placed", "tied", "fastened", "secured", "clamped", "clipped", "attached"};
+        "placed", "tied", "fastened", "secured", "clamped", "clipped", "attached",
+        "press", "presses", "pressed"};
     static const struct { const char *word, *relation; } prepositions[] = {
         {"inside", "in"}, {"within", "in"}, {"into", "in"}, {"in", "in"},
         {"onto", "on"}, {"on", "on"}, {"to", "to"}, {"against", "against"},
@@ -560,14 +566,18 @@ static bool placement_object(const char *sentence, Text *name, Text *target)
     if (comma) append_n(&first, sentence, (size_t)(comma - sentence));
     normalize_words(&words, comma ? str(&first) : sentence);
     normalize_words(&full, sentence);
-    const char *s = str(&words), *begin = nullptr, *end = nullptr, *relation = nullptr, *destination = nullptr;
+    const char *s = str(&words), *verb = nullptr, *begin = nullptr, *end = nullptr;
+    const char *relation = nullptr, *destination = nullptr;
     if (strchr(sentence, '?') || words.len > 250 || !simple(s) || word(str(&full), "or") || word(str(&full), "imagines") ||
         word(str(&full), "pretends") || word(str(&full), "perhaps") || word(str(&full), "hypothetically")) goto end;
     for (size_t i = 0; i < sizeof verbs / sizeof *verbs; i++) {
         const char *at = word(s, verbs[i]);
         if (!at || at == s || !at[strlen(verbs[i])]) continue;
         const char *object = at + strlen(verbs[i]) + 1;
-        if (!begin || object < begin) begin = object;
+        if (!begin || object < begin) {
+            begin = object;
+            verb = verbs[i];
+        }
     }
     if (!begin) goto end;
     for (size_t i = 0; i < sizeof prepositions / sizeof *prepositions; i++) {
@@ -580,6 +590,7 @@ static bool placement_object(const char *sentence, Text *name, Text *target)
         }
     }
     if (!end) goto end;
+    if (!strncmp(verb, "press", 5) && strcmp(relation, "against")) goto end;
     if (!prefix(&begin, "the ") && !prefix(&begin, "a ") && !prefix(&begin, "an ")) goto end;
     if (begin >= end) goto end;
     phrase(name, begin, end);
@@ -700,6 +711,40 @@ static bool witnessed_concealment(const char *sentence, Text *name)
     release(&words);
     return name->len > 0;
 }
+static bool physical_object(const char *object)
+{
+    static const char *const objects[] = {"box", "crate", "key", "whistle", "lamp", "bell", "ledger"};
+    const char *noun = strrchr(object, ' ');
+    noun = noun ? noun + 1 : object;
+    for (size_t i = 0; i < sizeof objects / sizeof *objects; i++)
+        if (!strcmp(noun, objects[i])) return true;
+    return false;
+}
+
+static bool opening_object(const char *clause, Text *name)
+{
+    Text words = {0};
+    normalize_words(&words, clause);
+    const char *line = str(&words), *holds = word(line, "holds the");
+    if (simple(line)) {
+        if (holds && holds != line && holds[sizeof "holds the" - 1] == ' ') {
+            const char *object = holds + sizeof "holds the";
+            if (physical_object(object)) append(name, object);
+        } else {
+            const char *hidden = word(line, "lay hidden");
+            const char *place, *relation;
+            if (hidden && hidden != line && hidden[sizeof "lay hidden" - 1] == ' ') {
+                const char *where = hidden + sizeof "lay hidden";
+                if (location_at(where, &place, &relation, "concealed") == where) {
+                    noun_phrase(name, line, hidden);
+                    if (!physical_object(str(name))) clear(name);
+                }
+            }
+        }
+    }
+    release(&words);
+    return name->len != 0;
+}
 static bool opening_rule(const char *sentence, Text *name)
 {
     Text words = {0};
@@ -749,7 +794,9 @@ Json *compendium_opening_evidence(const char *reply)
                 }
             }
             if (!type && (placement_object(str(&sentence), &name, nullptr) ||
-                          witnessed_concealment(str(&sentence), &name))) type = "item";
+                          witnessed_concealment(str(&sentence), &name) ||
+                          (!strpbrk(full, "\"") && !strstr(full, "“") && opening_object(str(&lead), &name))))
+                type = "item";
             if (!type && opening_rule(str(&lead), &name)) type = "rule";
         }
         if (type && name.len <= 160) {
@@ -775,14 +822,34 @@ Json *compendium_opening_evidence(const char *reply)
     return entries;
 }
 
-static void add_signal(Json *facts, const char *name, const Text *sentence)
+static void add_observation(Json *facts, const char *type, const char *name, const Text *sentence)
 {
     if (cJSON_GetArraySize(facts) >= 6) return;
     Json *fact = cJSON_CreateObject();
-    set(fact, "type", "event");
+    set(fact, "type", type);
     set(fact, "name", name);
     set(fact, "description", str(sentence));
     cJSON_AddItemToArray(facts, fact);
+}
+
+static bool uncertain_observation(const char *line)
+{
+    static const char *const uncertain[] = {"never", "if", "might", "would", "could",
+        "may", "should", "perhaps", "imagines", "imagined", "pretends", "dreams",
+        "asks", "orders", "expects", "hopes", "plans", "seems", "maybe"};
+    for (size_t i = 0; i < sizeof uncertain / sizeof *uncertain; i++)
+        if (word(line, uncertain[i])) return true;
+    return false;
+}
+
+static void leading_words(Text *out, const char *source)
+{
+    const char *comma = strchr(source, ',');
+    Text clause = {0};
+    if (comma) append_n(&clause, source, (size_t)(comma - source));
+    clear(out);
+    normalize_words(out, comma ? str(&clause) : source);
+    release(&clause);
 }
 
 static bool flare_motion(const char *line)
@@ -813,39 +880,101 @@ static bool flare_motion(const char *line)
 Json *compendium_signal_evidence(const char *reply)
 {
     Json *facts = cJSON_CreateArray();
-    Text sentence = {0}, tokens = {0};
+    Text sentence = {0}, tokens = {0}, leading = {0};
     for (const char *s = reply; *s && cJSON_GetArraySize(facts) < 6;) {
         const char *end = sentence_end(s);
         copy_sentence(&sentence, s, end);
         s = end;
-        if (sentence.len > 700 || strchr(str(&sentence), '?')) continue;
+        if (sentence.len > 700 || strpbrk(str(&sentence), "?\"") || strstr(str(&sentence), "“")) continue;
         clear(&tokens);
         normalize_words(&tokens, str(&sentence));
         const char *line = str(&tokens);
-        static const char *const uncertain[] = {"not", "never", "if", "might", "would", "could",
-            "may", "should", "perhaps", "imagines", "imagined", "pretends", "dreams", "asks", "orders"};
-        bool explicit = true;
-        for (size_t i = 0; i < sizeof uncertain / sizeof *uncertain; i++)
-            if (word(line, uncertain[i])) { explicit = false; break; }
-        if (!explicit) continue;
+        if (word(line, "not") || uncertain_observation(line)) {
+            leading_words(&leading, str(&sentence));
+            const char *lead = str(&leading);
+            if (!word(lead, "not") && !uncertain_observation(lead) &&
+                (word(lead, "the brass bell rings") || word(lead, "the brass bell rang")))
+                add_observation(facts, "event", "brass bell", &sentence);
+            continue;
+        }
         const char *label = nullptr;
         if (word(line, "rings the brass bell") || word(line, "rang the brass bell") ||
             word(line, "strikes the brass bell") || word(line, "struck the brass bell") ||
-            word(line, "brass bell striking it") ||
+            word(line, "brass bell striking it") || word(line, "the brass bell rings") ||
+            word(line, "the brass bell rang") ||
             (word(line, "brass bell") && (word(line, "striking the bell") ||
-             word(line, "strikes the heavy brass") || word(line, "repeating the strike")))) label = "brass bell";
+             word(line, "strikes the heavy brass") || word(line, "repeating the strike") ||
+             word(line, "bell began to toll") || word(line, "brass bell tolls") ||
+             (word(line, "repeats") && word(line, "clinking of the brass bell")) ||
+             (word(line, "striking mechanism against") && word(line, "clinks")))))
+            label = "brass bell";
         else if (word(line, "rings the bell") || word(line, "rang the bell") ||
                  word(line, "strikes the bell") || word(line, "struck the bell") ||
                  word(line, "bell striking it") || word(line, "striking the bell") ||
                  word(line, "bell tolls") || word(line, "bell tolled")) label = "bell";
-        if (label) add_signal(facts, label, &sentence);
+        if (label) add_observation(facts, "event", label, &sentence);
         if (!word(line, "await") && !word(line, "awaits") && !word(line, "awaiting") &&
                  !word(line, "expects") && !word(line, "expecting") &&
                  (flare_motion(line) || word(line, "flare lights up") ||
                   word(line, "watches the flare") || word(line, "sees the flare") || (word(line, "flare") &&
-                   (word(line, "now floats") || word(line, "descends toward"))))) add_signal(facts, "flare", &sentence);
+                   (word(line, "now floats") || word(line, "descends toward")))))
+            add_observation(facts, "event", "flare", &sentence);
     }
     release(&sentence);
     release(&tokens);
+    release(&leading);
+    return facts;
+}
+
+Json *compendium_scene_evidence(const char *reply)
+{
+    Json *facts = cJSON_CreateArray();
+    Text sentence = {0}, tokens = {0}, leading = {0};
+    for (const char *s = reply; *s && cJSON_GetArraySize(facts) < 6;) {
+        const char *end = sentence_end(s);
+        copy_sentence(&sentence, s, end);
+        s = end;
+        const char *source = str(&sentence);
+        if (sentence.len > 700) continue;
+        leading_words(&leading, source);
+        const char *lead = str(&leading);
+        /* The sound can be observed even if the following dialogue reports
+           an event that has yet to happen. */
+        if (*source != '"' && strncmp(source, "“", sizeof "“" - 1) &&
+            (!strcmp(lead, "the relay radio crackled") || !strcmp(lead, "the radio crackled") ||
+             !strcmp(lead, "the relay radio crackles") || !strcmp(lead, "the radio crackles"))) {
+            add_observation(facts, "event", "radio", &sentence);
+            continue;
+        }
+        if (strpbrk(source, "?\"") || strstr(source, "“")) continue;
+        clear(&tokens);
+        normalize_words(&tokens, source);
+        const char *line = str(&tokens);
+        /* A qualification about who can verify a clock does not negate a
+           stated offset in the main clause. */
+        bool clock_reading = word(lead, "station clock") &&
+            (word(lead, "minutes behind") || word(lead, "minutes fast") || word(lead, "minutes slow")) &&
+            !word(lead, "not") && !uncertain_observation(lead);
+        if (clock_reading) add_observation(facts, "item", "station clock", &sentence);
+        if (uncertain_observation(line)) continue;
+        if (word(line, "key still hidden in") || word(line, "key remains hidden in") ||
+            (word(line, "key is hidden in") && !word(line, "not"))) {
+            add_observation(facts, "item", word(line, "copper key") ? "copper key" : "key", &sentence);
+        }
+        if (word(line, "not")) continue;
+        if (word(line, "door creaks open") || word(line, "door creaked open") || word(line, "door swings open"))
+            add_observation(facts, "event", "door", &sentence);
+        if (!clock_reading && word(line, "station clock") &&
+            (word(line, "minutes behind") || word(line, "minutes fast") || word(line, "minutes slow")))
+            add_observation(facts, "item", "station clock", &sentence);
+        if (word(line, "gate clicks shut") || word(line, "gate clicked shut") ||
+            word(line, "gate swings shut"))
+            add_observation(facts, "event", "gate", &sentence);
+        if (word(line, "radio crackles on channel") || word(line, "radio crackled on channel"))
+            add_observation(facts, "event", "radio", &sentence);
+    }
+    release(&sentence);
+    release(&tokens);
+    release(&leading);
     return facts;
 }

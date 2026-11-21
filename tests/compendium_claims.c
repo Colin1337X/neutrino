@@ -280,6 +280,77 @@ int main(void)
         rc = 1;
     }
     cJSON_Delete(signals);
+    const char *opening_miss = "Iona presses the red lock on the crate, her fingers brushing the metal as the heavy door creaks open. "
+        "Outside, the wind howls through the debris field, and the station clock's second hand is paused mid-twist, "
+        "indicating the clock is currently seven minutes behind the real time.";
+    Json *scene = compendium_scene_evidence(opening_miss);
+    if (cJSON_GetArraySize(scene) != 2 ||
+        strcmp(js(cJSON_GetArrayItem(scene, 0), "name"), "door") ||
+        strcmp(js(cJSON_GetArrayItem(scene, 1), "name"), "station clock")) {
+        fputs("Recover the opened door and quantified clock offset.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(scene);
+    scene = compendium_scene_evidence("The ledger revealed that the station clock runs seven minutes slow, "
+        "a fact only Iona could verify. Iona relayed a command: \"Wait for the bell.\" "
+        "Her voice was quiet and steady as the radio crackled on channel nine.");
+    if (cJSON_GetArraySize(scene) != 2 ||
+        strcmp(js(cJSON_GetArrayItem(scene, 0), "name"), "station clock") ||
+        strcmp(js(cJSON_GetArrayItem(scene, 1), "description"),
+               "Her voice was quiet and steady as the radio crackled on channel nine.")) {
+        fputs("Recover a stated clock offset and a radio observed after dialogue.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(scene);
+    scene = compendium_scene_evidence("The relay radio crackled, the voice clear and urgent, "
+        "\"Wait, wait, wait. The second bell is coming, Captain.\" The station clock ticked.");
+    if (cJSON_GetArraySize(scene) != 1 || strcmp(js(cJSON_GetArrayItem(scene, 0), "name"), "radio") ||
+        !strstr(js(cJSON_GetArrayItem(scene, 0), "description"), "Captain.\"")) {
+        fputs("Preserve a witnessed radio sound and its dialogue boundary.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(scene);
+    const char *placement_miss = "Iona's fingers press the silver whistle against the railing, its corked end already lodged "
+        "in the steel, as the tide visibly recedes and the rusted latch of the west gate clicks shut behind her. "
+        "The copper key, still hidden in the crate, is not visible in the dim light.";
+    scene = compendium_scene_evidence(placement_miss);
+    Text pressed_name = {0}, pressed_evidence = {0};
+    const Json *hidden_key = cJSON_GetArrayItem(scene, 1);
+    if (cJSON_GetArraySize(scene) != 2 || strcmp(js(cJSON_GetArrayItem(scene, 0), "name"), "gate") ||
+        strcmp(js(hidden_key, "name"), "copper key") || strcmp(js(hidden_key, "type"), "item") ||
+        !compendium_placement_evidence(nullptr, nullptr, placement_miss, &pressed_name, &pressed_evidence) ||
+        strcmp(str(&pressed_name), "silver whistle")) {
+        fputs("Recover the pressed whistle, closed gate and hidden key from narration.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(scene);
+    release(&pressed_name);
+    release(&pressed_evidence);
+    signals = compendium_signal_evidence("Iona repeats the rhythmic clinking of the brass bell against the dock, "
+        "her trembling hands still gripping the striking mechanism as the station clock's second hand pauses mid-twist, "
+        "indicating the time has shifted slightly. The red crate is now clear, and Captain Mara's distress signal is now "
+        "clearly audible through the heavy steel railing, signaling she is waiting for the flare.");
+    if (cJSON_GetArraySize(signals) != 1 || strcmp(js(cJSON_GetArrayItem(signals, 0), "name"), "brass bell")) {
+        fputs("Recover the bell action while the flare is still awaited.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(signals);
+    scene = compendium_scene_evidence("Iona imagines the door creaks open. Would the gate click shut? "
+        "The station clock is not seven minutes behind. The copper key is not hidden in the crate. "
+        "Mara says, \"The door creaks open.\"");
+    if (scene->child) { fputs("Unestablished scenery must not become an observation.\n", stderr); rc = 1; }
+    cJSON_Delete(scene);
+    opening = compendium_opening_evidence("The ledger's ink seems to stain the aged pages. "
+        "Iona holds the red box, her fingers hovering over the shallow crescent mark on the copper key's bow.");
+    if (cJSON_GetArraySize(opening) != 1 || strcmp(js(cJSON_GetArrayItem(opening, 0), "name"), "red box")) {
+        fputs("File a directly held prop while preserving its identity.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(opening);
+    opening = compendium_opening_evidence("The red box lay hidden inside my pocket, untouched by my hand this morning.");
+    if (cJSON_GetArraySize(opening) != 1 || strcmp(js(cJSON_GetArrayItem(opening, 0), "name"), "red box")) {
+        fputs("A concealed prop remains grounded without guessing the narrator's identity.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(opening);
+    signals = compendium_signal_evidence("The brass bell rings twice, a rhythmic echo that seems to vibrate the water.");
+    if (cJSON_GetArraySize(signals) != 1 || strcmp(js(cJSON_GetArrayItem(signals, 0), "name"), "brass bell")) {
+        fputs("Uncertainty about the echo must preserve a witnessed bell.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(signals);
     cJSON_Delete(batch);
     cJSON_Delete(known);
     return rc;

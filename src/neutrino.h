@@ -13,7 +13,7 @@
 
 typedef cJSON Json;
 typedef struct { char *data; size_t len, cap; } Text;
-#define NEUTRINO_VERSION "0.12.2"
+#define NEUTRINO_VERSION "0.13.0"
 #define FILE_LIMIT (32u * 1024u * 1024u)
 #define EDIT_LIMIT (2u * 1024u * 1024u)
 
@@ -30,6 +30,7 @@ bool compendium_placement_evidence(const Json *known, const Json *history, const
                                    Text *name, Text *evidence);
 Json *compendium_opening_evidence(const char *reply);
 Json *compendium_signal_evidence(const char *reply);
+Json *compendium_scene_evidence(const char *reply);
 bool compendium_filing_evidence(const char *reply, const char *quote, Text *evidence);
 bool compendium_filing_label(const char *name, const char *evidence);
 const char *compendium_filing_identity(const char *type, const char *name, const char *description,

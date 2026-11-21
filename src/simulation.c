@@ -53,6 +53,7 @@ static bool apply_stat(Json *state, const Json *op)
     const char *tool = js(op, "neutrino_tool"), *actor = js(op, "actor");
     const char *metric = js(op, "metric"), *part = js(op, "part"), *kind = js(op, "kind");
     int value;
+    if (!strcmp(tool, "tune")) return physics_tune(at(state, "physics"), op);
     if (!strcmp(tool, "set_time") || !strcmp(tool, "auto_time") || !strcmp(tool, "advance")) {
         const bool step = !strcmp(tool, "auto_time"), advancing = !strcmp(tool, "advance");
         if (!bounded_int(op, "minutes", 0, step || advancing ? 1440 : CLOCK_LIMIT, &value)) return false;
@@ -119,6 +120,7 @@ static Json *state_at(const Json *story, int head)
     put(state, "cast", cJSON_CreateArray());
     put(state, "bonds", cJSON_CreateArray());
     put(state, "injuries", cJSON_CreateArray());
+    put(state, "physics", cJSON_CreateObject());
     int count = cJSON_GetArraySize(at(story, "nodes"));
     bool *visible = calloc((size_t)count + 1, sizeof *visible);
     if (!visible) abort();
@@ -133,6 +135,12 @@ static Json *state_at(const Json *story, int head)
     }
     free(visible);
     cJSON_Delete(path);
+    return state;
+}
+static Json *preview_state(const Preview *p)
+{
+    Json *state = state_at(p->story, p->parent), *pending;
+    cJSON_ArrayForEach(pending, p->tool_pending) apply_stat(state, pending);
     return state;
 }
 static void log_stat(Json *story, int head, const Json *op)
@@ -156,6 +164,7 @@ static void describe(const Json *story, int head, const Json *state, Text *out, 
     world_room(story, head, &local);
     format(out, "Location: %s\n", local.len ? str(&local) : "unnamed scene");
     clock_text(state, out);
+    physics_describe(at(state, "physics"), out);
     Json *item;
     cJSON_ArrayForEach(item, at(state, "cast")) {
         const char *actor = js(item, "actor"), *location = js(item, "location");
@@ -204,14 +213,16 @@ static const char tool_help[] =
     "injury: actor, part, kind, severity (mild/moderate/severe/critical).\n"
     "treat or heal: actor, part, kind.\n"
     "inventory: action (add/edit/take/drop), name, description for add/edit. Requires a defined room.\n"
+    "tune: setting and numeric value. gravity (0.1–30 m/s²), outlet_coefficient (0.1–1), ambient_kelvin (150–400 K).\n"
     "ray: origin, direction, min, max (three-number arrays in metres, min/max are box corners).\n"
     "fluid: height (m), tank_area (m²), outlet_area (m²), seconds.\n"
-    "gas: moles, volume (m³), kelvin, leak (mol/s), seconds.\n";
+    "gas: moles, volume (m³), leak (mol/s), seconds, optional kelvin (defaults to scene ambient).\n"
+    "prop_load: qualitative scenery load. strength (fragile/ordinary/reinforced), load (light/steady/heavy).\n";
 
 void simulation_prompt(const Preview *p, Text *system)
 {
     if (!simulation_enabled(p->story)) return;
-    Json *state = state_at(p->story, p->parent);
+    Json *state = preview_state(p);
     Text context = {0};
     append(system, "\n\nTracked fiction state. Actor locations here are the tracked locations. "
            "Needs from 0 to 100 show urgency, and mood runs from low to high.\n");
@@ -258,9 +269,11 @@ bool simulation_tool_reply(Preview *p, const char *body)
     if (p->tool_rounds >= TOOL_LIMIT) { release(&json); cJSON_Delete(op); return true; }
     p->tool_rounds++;
     Text result = {0};
-    if (!strcmp(tool, "ray") || !strcmp(tool, "fluid") || !strcmp(tool, "gas")) {
-        /* These tools are read-only even when their arguments fail validation. */
-        if (!physics_run(tool, op, &result)) append(&result, "Physics tool arguments rejected.");
+    if (!strcmp(tool, "ray") || !strcmp(tool, "fluid") || !strcmp(tool, "gas") || !strcmp(tool, "prop_load")) {
+        Json *state = preview_state(p);
+        if (!physics_run(tool, op, at(state, "physics"), &result))
+            append(&result, "Physics tool arguments rejected.");
+        cJSON_Delete(state);
     } else if (*tool) {
         Json *scratch = cJSON_Duplicate(p->story, true);
         Json *state = state_at(scratch, p->parent), *pending;
@@ -371,7 +384,7 @@ void simulation_command(App *a, const char *verb, const char *arg)
     const char *tool = js(op, "neutrino_tool");
     Json *state = state_at(a->story, head);
     Text result = {0};
-    if (*tool && physics_run(tool, op, &result)) {
+    if (*tool && physics_run(tool, op, at(state, "physics"), &result)) {
         app_info(a, "Physics result");
         append(&a->info, str(&result));
     } else if (*tool && apply_tool(a->story, head, state, op, true)) {

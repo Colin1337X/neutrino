@@ -97,7 +97,14 @@ Use `/sim` for the available tool arguments. Player edits work with narrator too
 
 `/stats on` allows the narrator to request one JSON tool at a time, up to three calls before a prose reply. The TUI validates each request and returns its result in the next prompt. State and inventory edits are staged until the reply is accepted and follow that reply's branch. Cancelling or exhausting the tool limit without prose discards staged changes. `/trace` includes requests and results. With tools off, Neutrino omits tracked state from the prompt and pauses automatic clock advancement.
 
-The included calculators are geometric ray–box intersection, a draining tank estimate and an ideal-gas room with a constant leak. They use SI inputs, execute locally, and do not alter scene state. These are bounded scene plausibility tools. The app does not ship a renderer, general fluid solver or medical simulation.
+The included calculators are geometric ray–box intersection, a draining tank estimate and an ideal-gas room with a constant leak. They use SI inputs and execute locally. The narrator can stage a `tune` call to change the scene's gravity, tank outlet coefficient, or default gas temperature. Later calculations in the same reply use the staged settings. Accepted changes follow the reply's branch and show up in `/stats`. Players can use the same tool through `/sim`.
+
+```text
+/sim {"neutrino_tool":"tune","setting":"gravity","value":1.62}
+/sim {"neutrino_tool":"prop_load","strength":"fragile","load":"heavy"}
+```
+
+`prop_load` gives a qualitative result for fictional props and scenery under load. It uses three descriptive levels of strength and load, with outcomes of holds, gives slightly, or breaks.
 
 ## Serve the TUI over SSH
 
