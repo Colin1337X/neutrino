@@ -1081,6 +1081,7 @@ Json *compendium_scene_evidence(const char *reply)
             add_observation(facts, "item", "station clock", &sentence);
         if (word(line, "gate clicks shut") || word(line, "gate clicked shut") ||
             word(line, "gate swings shut") || word(line, "gate closed for the night") ||
+            word(line, "gate is locked") || word(line, "gate is shut") ||
             word(line, "tide lifts the west gate") || word(line, "tide finally lifts the west gate"))
             add_observation(facts, "event", "gate", &sentence);
         if (word(line, "silver whistle clacks against") || word(line, "silver whistle clacked against") ||
@@ -1100,5 +1101,54 @@ Json *compendium_scene_evidence(const char *reply)
     release(&sentence);
     release(&tokens);
     release(&leading);
+    return facts;
+}
+
+Json *compendium_actor_evidence(const char *reply)
+{
+    static const char *const verbs[] = {"steps", "stepped", "walks", "walked", "climbs", "climbed",
+        "crosses", "crossed", "arrives", "arrived", "leaves", "left", "returns", "returned",
+        "takes", "took", "carries", "carried", "grips", "gripped", "holds", "held",
+        "pulls", "pulled", "pushes", "pushed", "turns", "turned", "opens", "opened",
+        "closes", "closed", "locks", "locked", "lifts", "lifted", "looks", "looked"};
+    static const char *const generic[] = {"I", "He", "She", "They", "We", "You", "It",
+        "The", "This", "That", "A", "An", "Someone", "Everybody", "Nobody"};
+    Json *facts = cJSON_CreateArray();
+    Text sentence = {0}, name = {0}, prose = {0};
+    for (const char *s = reply; *s && !facts->child;) {
+        const char *end = sentence_end(s);
+        copy_sentence(&sentence, s, end);
+        s = end;
+        const char *start = str(&sentence), *next = start;
+        if (sentence.len > 700 || strchr(start, '?')) continue;
+        clear(&name);
+        /* Initial proper name followed by a finite verb. A sentence led by
+           dialogue, a pronoun or a hypothetical fails this frame. */
+        for (int words = 0; words < 3 && isupper((unsigned char)*next); words++) {
+            const char *token = next++;
+            while (isalnum((unsigned char)*next) || *next == '-') next++;
+            if (*next != ' ') break;
+            if (name.len) append(&name, " ");
+            append_n(&name, token, (size_t)(next - token));
+            while (*next == ' ') next++;
+        }
+        if (!name.len || !islower((unsigned char)*next)) continue;
+        bool ordinary = false;
+        for (size_t i = 0; i < sizeof generic / sizeof *generic; i++)
+            if (!strcmp(str(&name), generic[i])) { ordinary = true; break; }
+        if (ordinary) continue;
+        narrative_words(&prose, next);
+        const char *line = str(&prose);
+        if (word(line, "not") || uncertain_observation(line)) continue;
+        for (size_t i = 0; i < sizeof verbs / sizeof *verbs; i++) {
+            if (word(line, verbs[i]) == line) {
+                add_observation(facts, "character", str(&name), &sentence);
+                break;
+            }
+        }
+    }
+    release(&sentence);
+    release(&name);
+    release(&prose);
     return facts;
 }

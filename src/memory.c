@@ -489,7 +489,7 @@ static void file_candidates(Json *result, const Json *known, const Json *answer,
         release(&corrected);
     }
 }
-static Json *parse_filing(const Text *output, const Json *story, const Json *reply)
+static Json *parse_filing(const Text *output, const Json *story, const Json *reply, bool recovery)
 {
     Json *answer = json_answer(output);
     bool valid = cJSON_IsArray(answer) && cJSON_GetArraySize(answer) <= 6;
@@ -530,6 +530,11 @@ static Json *parse_filing(const Text *output, const Json *story, const Json *rep
         Json *scene = compendium_scene_evidence(js(reply, "content"));
         file_candidates(result, known, scene, reply, true, &index);
         cJSON_Delete(scene);
+    }
+    if (recovery && !result->child) {
+        Json *actors = compendium_actor_evidence(js(reply, "content"));
+        file_candidates(result, known, actors, reply, true, &index);
+        cJSON_Delete(actors);
     }
     cJSON_Delete(known);
     if (!valid && !result->child) { cJSON_Delete(result); return nullptr; }
@@ -591,7 +596,7 @@ static void finish_task(App *app)
     if (lane->preempted || !node || !memory_enabled(lane->story)) return;
     switch (lane->task) {
         case MEMORY_FILE: {
-            Json *facts = lane->error.len ? NULL : parse_filing(&lane->output, lane->story, node);
+            Json *facts = lane->error.len ? NULL : parse_filing(&lane->output, lane->story, node, lane->filing_retry);
             if ((!facts || !facts->child) && !lane->error.len && !lane->filing_retry) {
                 lane->filing_retry = true;
                 Json *prompt = filing_prompt(lane->story, lane->anchor, true);

@@ -400,6 +400,13 @@ int main(void)
         fputs("Preserve the observed motion without filing a line of dialogue as a second action.\n", stderr); rc = 1;
     }
     cJSON_Delete(scene);
+    Json *actors = compendium_actor_evidence("\"Mara climbs the tower.\" Iona could cross the gate. "
+        "Captain Mara steps out from the storm, her coat dripping with rain.");
+    if (cJSON_GetArraySize(actors) != 1 ||
+        strcmp(js(cJSON_GetArrayItem(actors, 0), "name"), "Captain Mara")) {
+        fputs("Only an observed actor action can survive the final fallback.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(actors);
     cJSON_Delete(batch);
     cJSON_Delete(known);
     return rc;
