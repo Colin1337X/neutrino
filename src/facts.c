@@ -1,6 +1,7 @@
 #include "neutrino.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -283,6 +284,32 @@ static void copy_sentence(Text *out, const char *start, const char *end)
     while (start < end && isspace((unsigned char)*start)) start++;
     while (end > start && isspace((unsigned char)end[-1])) end--;
     append_n(out, start, (size_t)(end - start));
+}
+
+bool compendium_filing_index(const char *reply, const char *tag, Text *out)
+{
+    if (tag && (tag[0] != 'S' || !isdigit((unsigned char)tag[1]))) return false;
+    Text sentence = {0};
+    int index = 0;
+    bool found = false;
+    for (const char *start = reply; *start;) {
+        const char *end = sentence_end(start);
+        if (end - reply > 2400) break;
+        copy_sentence(&sentence, start, end);
+        start = end;
+        if (!sentence.len) continue;
+        char label[24];
+        snprintf(label, sizeof label, "S%d", ++index);
+        if (tag) {
+            if (strcmp(tag, label)) continue;
+            append(out, str(&sentence));
+            found = true;
+            break;
+        }
+        format(out, "%s | %s\n", label, str(&sentence));
+    }
+    release(&sentence);
+    return found;
 }
 
 static bool word_byte(unsigned char c)
@@ -905,6 +932,7 @@ Json *compendium_signal_evidence(const char *reply)
             (word(line, "brass bell") && (word(line, "striking the bell") ||
              word(line, "strikes the heavy brass") || word(line, "repeating the strike") ||
              word(line, "bell began to toll") || word(line, "brass bell tolls") ||
+             word(line, "resonates loudly") ||
              (word(line, "repeats") && word(line, "clinking of the brass bell")) ||
              (word(line, "striking mechanism against") && word(line, "clinks")))))
             label = "brass bell";
@@ -916,7 +944,8 @@ Json *compendium_signal_evidence(const char *reply)
         if (!word(line, "await") && !word(line, "awaits") && !word(line, "awaiting") &&
                  !word(line, "expects") && !word(line, "expecting") &&
                  (flare_motion(line) || word(line, "flare lights up") ||
-                  word(line, "watches the flare") || word(line, "sees the flare") || (word(line, "flare") &&
+                  word(line, "watches the flare") || word(line, "sees the flare") ||
+                  (word(line, "tide recedes") && word(line, "reveal the white rescue flare")) || (word(line, "flare") &&
                    (word(line, "now floats") || word(line, "descends toward")))))
             add_observation(facts, "event", "flare", &sentence);
     }
@@ -970,6 +999,8 @@ Json *compendium_scene_evidence(const char *reply)
         if (word(line, "gate clicks shut") || word(line, "gate clicked shut") ||
             word(line, "gate swings shut"))
             add_observation(facts, "event", "gate", &sentence);
+        if (word(line, "silver whistle clacks against") || word(line, "silver whistle clacked against"))
+            add_observation(facts, "item", "silver whistle", &sentence);
         if (word(line, "radio crackles on channel") || word(line, "radio crackled on channel"))
             add_observation(facts, "event", "radio", &sentence);
     }

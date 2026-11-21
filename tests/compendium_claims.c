@@ -213,6 +213,18 @@ int main(void)
         rc = 1;
     }
     release(&quote);
+    Text listing = {0};
+    const char *tagged = "The tide rises.\n\nIona ties the silver whistle to the railing.";
+    compendium_filing_index(tagged, nullptr, &listing);
+    if (strcmp(str(&listing), "S1 | The tide rises.\nS2 | Iona ties the silver whistle to the railing.\n") ||
+        compendium_filing_index(tagged, "S3", &quote) ||
+        !compendium_filing_index(tagged, "S2", &quote) ||
+        strcmp(str(&quote), "Iona ties the silver whistle to the railing.") ||
+        compendium_filing_label("radio", str(&quote))) {
+        fputs("Evidence labels must resolve to the original numbered narrator sentence.\n", stderr); rc = 1;
+    }
+    release(&listing);
+    release(&quote);
     Json *signals = compendium_signal_evidence("Iona smiles as she rings the brass bell twice, signaling the approaching tide to the west gate. "
         "Captain Mara's distress flare, once held high above the water, now floats gently on the surface as it descends toward the shore.");
     if (cJSON_GetArraySize(signals) != 2 ||

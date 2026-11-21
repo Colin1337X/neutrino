@@ -381,16 +381,14 @@ static Json *filing_prompt(const Json *story, int id)
         shown++;
     }
     format(&input, "\n\nLatest assistant reply (#%d), the evidence to file:\n", id);
-    excerpt(&input, js(reply, "content"), 2400);
-    append(&input, "\n\nLook for completed actions, changed locations, object states, and witnessed signals. "
-        "These may be inside descriptive sentences. An instruction or expectation is not evidence that its event happened. "
-        "Copy a short exact passage from this reply containing the entity and what happened into description. "
-        "Do not paraphrase or add punctuation. Name the entity using words from the passage. "
-        "If no new fact has a verbatim passage here, output [].");
+    compendium_filing_index(js(reply, "content"), nullptr, &input);
+    append(&input, "\nFor each new fact, put the name of the entity in name and the evidence label (S1, S2, etc.) in description. "
+        "Find completed actions, changed locations, object states, and witnessed signals, including inside descriptive sentences. "
+        "An instruction or expectation is not evidence that its event happened.");
     Json *messages = request("File durable facts newly established by the final assistant message. "
         "Ignore speculation. Preserve uncertainty when the story only suggests a fact. "
-        "Return only a JSON array of up to six objects with type, name and description, with description "
-        "copied verbatim from the latest reply. Previously filed entries are only for deduplication. "
+        "Return only a JSON array of up to six objects with type, name and description. "
+        "Copy the source label from the latest reply for description. Previously filed entries are only for deduplication. "
         "Use one object per entity and choose the most specific type. Allowed types: "
         "character, place, item, event, note, faction, rule, relationship, plot, quest, creature. "
         "Use character for people and item for physical objects, even when described figuratively. "
@@ -415,9 +413,10 @@ static bool file_candidates(Json *result, const Json *known, const Json *answer,
             return false;
         (*index)++;
         Text corrected = {0}, evidence = {0}, novel = {0};
-        if (!compendium_filing_evidence(prose, description, &evidence)) continue;
+        bool indexed = !fallback && compendium_filing_index(prose, description, &evidence);
+        if (!indexed && !compendium_filing_evidence(prose, description, &evidence)) continue;
         type = compendium_filing_identity(type, name,
-            !strcmp(type, "character") ? str(&evidence) : description, prose, &corrected);
+            indexed || !strcmp(type, "character") ? str(&evidence) : description, prose, &corrected);
         if (corrected.len) name = str(&corrected);
         if (compendium_filing_label(name, str(&evidence))) {
             bool ambiguous = compendium_novel_claims(known, result, type, name, str(&evidence), &novel);
