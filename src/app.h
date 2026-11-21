@@ -28,13 +28,14 @@ typedef struct {
     Json *scene, *story;
     Text source, messages_context, objective, lore_trace, memory_trace, recall_output, recall_error, recall_thinking;
     Text previous_reply, selection_trace;
-    Text world_context, speaker;
+    Text world_context, speaker, tool_results;
     size_t start, end, insert_at;
     int version, parent, head;
     Candidate candidates[30];
     int count, current, next, active;
     bool open, reasoning, stopped, complete, recalling, repeat_retry;
-    Json *memory_picks;
+    Json *memory_picks, *tool_pending;
+    int tool_rounds;
     Inference *recall_job;
 } Preview;
 
@@ -111,5 +112,13 @@ void world_command(App *app, const char *verb, char *argument);
 void world_context(const Json *story, int head, Text *out);
 const char *world_room(const Json *story, int head, Text *out);
 bool world_address(const Json *story, const char *line, Text *speaker, const char **message);
+const char *world_character_room(const Json *story, int head, const char *name, Text *out);
+bool world_inventory_tool(Json *story, int head, const Json *args);
+bool physics_run(const char *name, const Json *args, Text *out);
+bool simulation_enabled(const Json *story);
+void simulation_command(App *a, const char *verb, const char *arg);
+void simulation_prompt(const Preview *p, Text *system);
+bool simulation_tool_reply(Preview *p, const char *body);
+void simulation_commit(App *a, Preview *p, int id);
 
 #endif

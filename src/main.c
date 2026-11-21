@@ -43,6 +43,9 @@ const Command commands[] = {
     {"inventory", " [held|worn|nearby]", "Browse items you hold, wear, or can reach"},
     {"who", "", "Show characters currently in the room"},
     {"exits", "", "List exits and their destination descriptions"},
+    {"stats", " [on|off]", "Show tracked scene and character state or toggle narrator tools"},
+    {"time", " [set|auto|advance]", "Inspect or adjust the branch clock"},
+    {"sim", " [tool JSON]", "Run a physics calculation or edit tracked state"},
     {"room", " NAME | DESCRIPTION", "Define a room"},
     {"connect", " ROOM | ROOM", "Link two rooms"},
     {"go", " ROOM", "Move through an exit"},
@@ -449,6 +452,7 @@ static void messages_for_story(App *a, Json *messages)
     int covered = 0;
     const char *recap = memory_enabled(p->story) ? memory_recap(path, &covered) : "";
     if (*recap) format(&system, "\n\nRecap of older story messages:\n%s", recap);
+    simulation_prompt(p, &system);
     messages_add(messages, "system", str(&system));
     release(&system);
     size_t bytes = 0;
@@ -563,7 +567,9 @@ static void release_preview(Preview *p)
     release(&p->selection_trace);
     release(&p->world_context);
     release(&p->speaker);
+    release(&p->tool_results);
     cJSON_Delete(p->memory_picks);
+    cJSON_Delete(p->tool_pending);
     *p = (Preview){0};
 }
 static void start_candidate(App *a, int index)
@@ -582,6 +588,7 @@ static void start_candidate(App *a, int index)
             str(&p->memory_trace), str(&p->selection_trace));
         if (p->world_context.len) format(&a->trace, "\nWorld state\n%s", str(&p->world_context));
         if (p->speaker.len) format(&a->trace, "Addressed character: %s\n", str(&p->speaker));
+        if (p->tool_results.len) format(&a->trace, "\nNarrator tools\n%s", str(&p->tool_results));
     }
     append(&a->trace, "\nMessages sent to the server (JSON, in order)\n\n");
     char *wire = cJSON_Print(messages);
@@ -824,6 +831,19 @@ static bool update_generation(App *a)
     if (c->error.len || p->stopped) status(a, c->error.len ? str(&c->error) : "Generation cancelled");
     else {
         if (p->head == number(p->story, "head")) {
+            int previous_rounds = p->tool_rounds;
+            if (simulation_tool_reply(p, str(&c->body))) {
+                clear(&c->body);
+                clear(&c->thinking);
+                if (p->tool_rounds == previous_rounds) {
+                    status(a, "Narrator tool limit reached without a story reply.");
+                    p->complete = true;
+                } else {
+                    status(a, "Tool processed · waiting for narration");
+                    start_candidate(a, 0);
+                }
+                return true;
+            }
             if (repeats_reply(p, &c->body)) {
                 if (!p->repeat_retry) {
                     p->repeat_retry = true;
@@ -838,6 +858,7 @@ static bool update_generation(App *a)
                 return true;
             }
             int id = story_push(&a->ws, p->story, p->parent, "assistant", str(&c->body));
+            simulation_commit(a, p, id);
             record_generation(a, c);
             Json *reply = story_pick(p->story, id);
             if (c->thinking.len) set(reply, "reasoning", str(&c->thinking));
@@ -1486,6 +1507,8 @@ static void slash_command(App *a, char *line)
         if (!strcmp(line, name)) { begin(a, (Operation)i, arg, 0, NULL); return; }
     }
     if (!strcmp(line, "help")) show_help(a);
+    else if (!strcmp(line, "stats") || !strcmp(line, "time") || !strcmp(line, "sim"))
+        simulation_command(a, line, arg);
     else if (!strcmp(line, "edit")) edit_start(a);
     else if (!strcmp(line, "rewrite-preset")) rewrite_preset(a, arg);
     else if (!strcmp(line, "rewind")) rewind_story(a, arg);

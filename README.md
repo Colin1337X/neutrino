@@ -78,6 +78,27 @@ Use `/wear ITEM` for a carried article and `/remove ITEM` to take it off and kee
 
 `/exits` lists the destinations reachable from the current room, their descriptions, and the matching `/go` commands.
 
+## Scene statistics and narrator tools
+
+`/stats` shows the active branch's location, clock, character locations, needs, mood, injuries and directional relationships. Player location follows `/go`. Character location comes from their room entry or an explicit tracked location. This also lets you track characters off-scene. Needs range from 0 to 100 as urgency increases. Mood ranges from 0 to 100 from low to high. Injuries are records by character, body part and condition, with four severity levels and untreated, treated or healed states.
+
+Use `/time set 2 21:30` for a calendar jump, `/time auto 10` to advance ten minutes per accepted reply, `/time auto off` for a manual clock, or `/time advance 30` for elapsed time. Elapsed time raises hunger, thirst, bladder and bowel urgency for tracked characters. Setting the clock leaves needs alone. Actor state and clock edits follow the active branch.
+
+Use `/sim` for the available tool arguments. Player edits work with narrator tools disabled. Examples:
+
+```text
+/sim {"neutrino_tool":"stat","actor":"Iona","metric":"thirst","value":35}
+/sim {"neutrino_tool":"stat","actor":"Mara","metric":"location","location":"West Pier"}
+/sim {"neutrino_tool":"bond","actor":"Iona","other":"Mara","value":40}
+/sim {"neutrino_tool":"injury","actor":"Mara","part":"left hand","kind":"cut","severity":"moderate"}
+/sim {"neutrino_tool":"treat","actor":"Mara","part":"left hand","kind":"cut"}
+/sim {"neutrino_tool":"inventory","action":"edit","name":"signal lamp","description":"Brass lamp with a cracked lens."}
+```
+
+`/stats on` allows the narrator to request one JSON tool at a time, up to three calls before a prose reply. The TUI validates each request and returns its result in the next prompt. State and inventory edits are staged until the reply is accepted and follow that reply's branch. Cancelling or exhausting the tool limit without prose discards staged changes. `/trace` includes requests and results. With tools off, Neutrino omits tracked state from the prompt and pauses automatic clock advancement.
+
+The included calculators are geometric ray–box intersection, a draining tank estimate and an ideal-gas room with a constant leak. They use SI inputs, execute locally, and do not alter scene state. These are bounded scene plausibility tools. The app does not ship a renderer, general fluid solver or medical simulation.
+
 ## Serve the TUI over SSH
 
 Install the C executable on the SSH host and start the inference server there. Configure a separate OpenSSH listener with [the example configuration](docs/sshd_config.example). Replace the account and paths with your deployment values, generate a host key, and install the intended user's public key in the configured authorized-keys file. Restrict those files to the serving account and administrator as appropriate. Configure a non-root account with write access to its workspace directory. To use a gateway token, supply it to the gateway and expose the same value to the forced command through the private OpenSSH service configuration.

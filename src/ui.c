@@ -504,7 +504,10 @@ static void roleplay_rows(App *a, Text *body)
     if (preview_busy(p) && p->story && p->story == a->story) {
         format(body, "◆  %s  ·  %s\n", p->speaker.len ? str(&p->speaker) : *character ? character : "Narrator",
                p->recalling ? "recalling memory" : "responding");
-        append(body, str(&p->candidates[0].body));
+        const char *draft = str(&p->candidates[0].body);
+        while (isspace((unsigned char)*draft)) draft++;
+        if (!simulation_enabled(p->story) || (*draft != '{' && strncmp(draft, "```json", 7)))
+            append(body, str(&p->candidates[0].body));
     }
     cJSON_Delete(path);
     if (!body->len) {

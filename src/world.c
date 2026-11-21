@@ -81,6 +81,9 @@ static void replay(Json *state, const Json *event)
     } else if (!strcmp(type, "wear") || !strcmp(type, "remove")) {
         Json *item = named(at(state, "item"), name);
         if (cJSON_IsTrue(at(item, "carried"))) put(item, "worn", cJSON_CreateBool(!strcmp(type, "wear")));
+    } else if (!strcmp(type, "itemedit")) {
+        Json *item = named(at(state, "item"), name);
+        if (item) set(item, "text", js(event, "text"));
     }
 }
 static const char *item_state(const Json *item, const char *nearby)
@@ -228,6 +231,44 @@ const char *world_room(const Json *story, int head, Text *out)
     }
     append(out, room);
     return str(out);
+}
+const char *world_character_room(const Json *story, int head, const char *name, Text *out)
+{
+    Json *state = world_state(story, head);
+    append(out, js(named(at(state, "npc"), name), "room"));
+    cJSON_Delete(state);
+    return str(out);
+}
+
+bool world_inventory_tool(Json *story, int head, const Json *args)
+{
+    const char *action = js(args, "action"), *name = js(args, "name"), *text = js(args, "description");
+    if (!valid_name(name)) return false;
+    bool add = !strcmp(action, "add"), edit = !strcmp(action, "edit");
+    bool take = !strcmp(action, "take"), drop = !strcmp(action, "drop");
+    if (!(add || edit || take || drop) || ((add || edit) && (!*text || strlen(text) > 600))) return false;
+    Json *state = world_state(story, head);
+    const char *room = js(state, "room");
+    Json *item = named(at(state, "item"), name);
+    bool carried = cJSON_IsTrue(at(item, "carried"));
+    bool nearby = item && *room && equal_name(room, js(item, "room")) && !carried;
+    bool valid = *room && (add ? !item && cJSON_GetArraySize(at(state, "item")) < 128 :
+                          edit ? carried || nearby : take ? nearby : carried);
+    if (valid) {
+        Json *events = array(world_object(story), "events");
+        if (cJSON_GetArraySize(events) >= 8192) valid = false;
+        else {
+            Json *event = cJSON_CreateObject();
+            integer(event, "at", head);
+            set(event, "type", add ? "item" : edit ? "itemedit" : action);
+            set(event, "name", item ? js(item, "name") : name);
+            set(event, "text", add || edit ? text : "");
+            set(event, "room", room);
+            cJSON_AddItemToArray(events, event);
+        }
+    }
+    cJSON_Delete(state);
+    return valid;
 }
 
 bool world_address(const Json *story, const char *line, Text *speaker, const char **message)
