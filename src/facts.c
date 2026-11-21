@@ -492,21 +492,17 @@ finish:
     return type;
 }
 
-static bool known_prop(const Json *known, const Json *history, const char *name)
-{
-    Json *item;
-    cJSON_ArrayForEach(item, known)
-        if (mentions(js(item, "name"), name) || mentions(js(item, "description"), name)) return true;
-    cJSON_ArrayForEach(item, history)
-        if (!strcmp(js(item, "role"), "assistant") && mentions(js(item, "content"), name)) return true;
-    return false;
-}
-
-static bool placement_object(const char *sentence, Text *name)
+static bool placement_object(const char *sentence, Text *name, Text *target)
 {
     /* A complete leading action is required. Keep the full sentence as evidence. */
-    static const char *const verbs[] = {"places", "puts", "sets", "slides", "ties", "fastens", "secures"};
-    static const char *const prepositions[] = {"into", "inside", "within", "onto", "on", "in", "to"};
+    static const char *const verbs[] = {"places", "puts", "sets", "slides", "ties", "fastens", "secures",
+        "clamps", "clips", "attaches", "hooks", "hangs", "pins", "straps", "lashes",
+        "placed", "tied", "fastened", "secured", "clamped", "clipped", "attached"};
+    static const struct { const char *word, *relation; } prepositions[] = {
+        {"inside", "in"}, {"within", "in"}, {"into", "in"}, {"in", "in"},
+        {"onto", "on"}, {"on", "on"}, {"to", "to"}, {"against", "against"},
+        {"beneath", "under"}, {"under", "under"}
+    };
     static const char *const vague[] = {"it", "them", "something", "anything", "everything", "nothing",
         "this", "that", "these", "those", "him", "her", "me", "us", "himself", "herself", "yourself"};
     Text words = {0}, full = {0};
@@ -515,8 +511,8 @@ static bool placement_object(const char *sentence, Text *name)
     if (comma) append_n(&first, sentence, (size_t)(comma - sentence));
     normalize_words(&words, comma ? str(&first) : sentence);
     normalize_words(&full, sentence);
-    const char *s = str(&words), *begin = NULL, *end = NULL;
-    if (words.len > 250 || !simple(s) || word(str(&full), "or") || word(str(&full), "imagines") ||
+    const char *s = str(&words), *begin = nullptr, *end = nullptr, *relation = nullptr, *destination = nullptr;
+    if (strchr(sentence, '?') || words.len > 250 || !simple(s) || word(str(&full), "or") || word(str(&full), "imagines") ||
         word(str(&full), "pretends") || word(str(&full), "perhaps") || word(str(&full), "hypothetically")) goto end;
     for (size_t i = 0; i < sizeof verbs / sizeof *verbs; i++) {
         const char *at = word(s, verbs[i]);
@@ -526,9 +522,13 @@ static bool placement_object(const char *sentence, Text *name)
     }
     if (!begin) goto end;
     for (size_t i = 0; i < sizeof prepositions / sizeof *prepositions; i++) {
-        const char *at = word(begin, prepositions[i]);
-        if (!at || at == begin || !at[strlen(prepositions[i])]) continue;
-        if (!end || at < end) end = at;
+        const char *at = word(begin, prepositions[i].word);
+        if (!at || at == begin || !at[strlen(prepositions[i].word)]) continue;
+        if (!end || at < end) {
+            end = at;
+            relation = prepositions[i].relation;
+            destination = at + strlen(prepositions[i].word) + 1;
+        }
     }
     if (!end) goto end;
     if (!prefix(&begin, "the ") && !prefix(&begin, "a ") && !prefix(&begin, "an ")) goto end;
@@ -537,6 +537,10 @@ static bool placement_object(const char *sentence, Text *name)
     for (size_t i = 0; i < sizeof vague / sizeof *vague; i++)
         if (!strcmp(str(name), vague[i])) clear(name);
     if (name->len > 100 || !strchr(str(name), ' ')) clear(name);
+    if (name->len && target) {
+        format(target, "%s ", relation);
+        noun_phrase(target, destination, destination + strlen(destination));
+    }
 end:
     release(&words);
     release(&full);
@@ -544,23 +548,79 @@ end:
     return name->len != 0;
 }
 
-bool compendium_placement_evidence(const Json *known, const Json *history, const char *reply,
-                                   Text *name, Text *evidence)
+static bool observed_placement(const char *text, const char *type, const char *label,
+                                const char *name, Text *target)
 {
-    Text sentence = {0};
-    for (const char *s = reply; *s;) {
+    Text sentence = {0}, object = {0}, location = {0};
+    bool found = false;
+    for (const char *s = text; *s;) {
         const char *end = sentence_end(s);
         copy_sentence(&sentence, s, end);
-        if (sentence.len <= 700 && placement_object(str(&sentence), name) &&
-            !known_prop(known, history, str(name))) {
-            append(evidence, str(&sentence));
-            release(&sentence);
-            return true;
+        clear(&object);
+        clear(&location);
+        if (sentence.len <= 700 && placement_object(str(&sentence), &object, &location) &&
+            !strcmp(str(&object), name)) {
+            clear(target);
+            append(target, str(&location));
+            found = true;
+        } else if (sentence.len <= 700) {
+            Claim claim = {0};
+            if (parse_claim(&claim, type, label, str(&sentence), false) && !claim.past &&
+                !strcmp(located_subject(&claim), name)) {
+                clear(target);
+                format(target, "%s %s", claim.relation, str(&claim.place));
+                found = true;
+            }
+            claim_release(&claim);
         }
-        clear(name);
         s = end;
     }
     release(&sentence);
+    release(&object);
+    release(&location);
+    return found;
+}
+
+static bool unchanged_placement(const Json *known, const Json *history, const char *name, const char *target)
+{
+    Text previous = {0};
+    Json *item;
+    bool found = false;
+    for (item = history && history->child ? history->child->prev : nullptr; item;
+         item = item == history->child ? nullptr : item->prev) {
+        if (!strcmp(js(item, "role"), "assistant") &&
+            observed_placement(js(item, "content"), "", "", name, &previous)) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) cJSON_ArrayForEach(item, known)
+        observed_placement(js(item, "description"), js(item, "type"), js(item, "name"), name, &previous);
+    const bool same = !strcmp(str(&previous), target);
+    release(&previous);
+    return same;
+}
+
+bool compendium_placement_evidence(const Json *known, const Json *history, const char *reply,
+                                   Text *name, Text *evidence)
+{
+    Text sentence = {0}, target = {0};
+    for (const char *s = reply; *s;) {
+        const char *end = sentence_end(s);
+        copy_sentence(&sentence, s, end);
+        if (sentence.len <= 700 && placement_object(str(&sentence), name, &target) &&
+            !unchanged_placement(known, history, str(name), str(&target))) {
+            append(evidence, str(&sentence));
+            release(&sentence);
+            release(&target);
+            return true;
+        }
+        clear(name);
+        clear(&target);
+        s = end;
+    }
+    release(&sentence);
+    release(&target);
     return false;
 }
 
@@ -639,7 +699,7 @@ Json *compendium_opening_evidence(const char *reply)
                     append(&name, str(&claim.object));
                 }
             }
-            if (!type && (placement_object(str(&sentence), &name) ||
+            if (!type && (placement_object(str(&sentence), &name, nullptr) ||
                           witnessed_concealment(str(&sentence), &name))) type = "item";
             if (!type && opening_rule(str(&lead), &name)) type = "rule";
         }

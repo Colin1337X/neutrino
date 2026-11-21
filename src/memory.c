@@ -459,10 +459,14 @@ static Json *parse_filing(const Text *output, const Json *story, const Json *rep
         valid = file_candidates(result, known, fallback, reply, true, &index);
         cJSON_Delete(fallback);
     }
-    if (valid && !result->child) {
+    if (valid && cJSON_GetArraySize(result) < 6) {
         Json *history = story_path(story, number(reply, "parent"));
         Text name = {0}, evidence = {0};
-        if (compendium_placement_evidence(known, history, js(reply, "content"), &name, &evidence)) {
+        bool found = compendium_placement_evidence(known, history, js(reply, "content"), &name, &evidence);
+        Json *accepted;
+        if (found) cJSON_ArrayForEach(accepted, result)
+            if (strstr(js(accepted, "description"), str(&evidence))) { found = false; break; }
+        if (found) {
             char id[40];
             snprintf(id, sizeof id, "A%d.%d", number(reply, "id"), ++index);
             Json *fact = entry(id, "item", str(&name), str(&evidence));

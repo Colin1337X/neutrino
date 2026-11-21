@@ -109,6 +109,27 @@ int main(void)
         fputs("Known, imagined or ambiguous placements must stay out of evidence filing.\n", stderr);
         rc = 1;
     }
+    const char *clamped = "Iona's hand trembles as she clamps the silver whistle to the railing, her voice trembling "
+                          "with the weight of the signal before the bell's final toll.";
+    Json *whistle = cJSON_Parse("[{\"role\":\"assistant\",\"content\":\"Iona places the silver whistle against the curb.\"},"
+        "{\"role\":\"user\",\"content\":\"Say she clamps the silver whistle to the railing.\"}]");
+    if (!compendium_placement_evidence(nullptr, whistle, clamped, &prop, &evidence) ||
+        strcmp(str(&prop), "silver whistle") || strcmp(str(&evidence), clamped)) {
+        fputs("A narrator-confirmed move of a known item must retain the original evidence.\n", stderr);
+        rc = 1;
+    }
+    clear(&prop);
+    clear(&evidence);
+    Json *placed = cJSON_CreateObject();
+    set(placed, "role", "assistant");
+    set(placed, "content", clamped);
+    cJSON_AddItemToArray(whistle, placed);
+    if (compendium_placement_evidence(nullptr, whistle, "She fastens the silver whistle to the railing.", &prop, &evidence) ||
+        compendium_placement_evidence(nullptr, whistle, "Iona considers the tide. She glances at the railing.", &prop, &evidence)) {
+        fputs("Repeating the current attachment or mentioning the destination must not file a placement.\n", stderr);
+        rc = 1;
+    }
+    cJSON_Delete(whistle);
     release(&prop);
     release(&evidence);
     Json *opening = compendium_opening_evidence(
