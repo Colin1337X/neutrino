@@ -87,7 +87,7 @@ static bool ray(const Json *args, Text *out)
     return true;
 }
 
-enum { RAY_BATCH_MAX = 128, ACOUSTIC_BLOCKERS = 16, ACOUSTIC_PATHS = 7 };
+enum { RAY_BATCH_MAX = 128, ACOUSTIC_BLOCKERS = 16, ACOUSTIC_PATHS = PHYSICS_ACOUSTIC_PATHS };
 typedef struct { double lo[3], hi[3]; } Box;
 typedef enum { BACKEND_AUTO, BACKEND_CPU, BACKEND_GPU, BACKEND_INVALID } Backend;
 
@@ -176,7 +176,7 @@ static void pack_segment(float *row, const double a[3], const double b[3], const
     for (int k = 0; k < 3; ++k) segment[k] = b[k] - a[k];
     pack_ray(row, a, segment, box);
 }
-static bool acoustic(const Json *args, const Json *settings, Text *out)
+static bool acoustic(const Json *args, const Json *settings, Text *out, PhysicsReading *reading)
 {
     Box room, blockers[ACOUSTIC_BLOCKERS];
     const Json *boxes = at(args, "blockers"), *item;
@@ -230,15 +230,23 @@ static bool acoustic(const Json *args, const Json *settings, Text *out)
         "Y-max echo", "Z-min echo", "Z-max echo"};
     format(out, "Acoustic paths (%s visibility, %.4g m/s). Levels relative to the direct source at 1 m.",
            total ? engine : "no blocker tests", speed);
+    if (reading) reading->kind = READING_ACOUSTIC;
     for (int path = 0; path < ACOUSTIC_PATHS; ++path) {
         if (path && reflection == 0) break;
+        const double delay = 1000 * distances[path] / speed;
+        const double level = 20 * ((path ? log10(reflection) : 0) - log10(distances[path]));
+        if (reading) {
+            reading->arrivals++;
+            reading->arrival[path].blocked = blocked[path];
+            reading->arrival[path].delay_ms = delay;
+            reading->arrival[path].level_db = level;
+        }
         if (blocked[path]) format(out, "\n%s blocked.", paths[path]);
-        else format(out, "\n%s %.4g ms · %+.3g dB", paths[path], 1000 * distances[path] / speed,
-                    20 * ((path ? log10(reflection) : 0) - log10(distances[path])));
+        else format(out, "\n%s %.4g ms · %+.3g dB", paths[path], delay, level);
     }
     return true;
 }
-static bool fluid(const Json *args, const Json *settings, Text *out)
+static bool fluid(const Json *args, const Json *settings, Text *out, PhysicsReading *reading)
 {
     double height, tank, hole, seconds;
     if (!scalar(args, "height", 0, 1000, &height) || !scalar(args, "tank_area", 1e-6, 1e6, &tank) ||
@@ -247,8 +255,12 @@ static bool fluid(const Json *args, const Json *settings, Text *out)
     const double rate = setting(settings, OUTLET_COEFFICIENT) * hole * sqrt(2 * setting(settings, GRAVITY));
     const double remaining = fmax(0, sqrt(height) - rate * seconds / (2 * tank));
     const double level = remaining * remaining;
-    format(out, "Tank drain estimate: final level %.5g m, drained %.5g L, final flow %.5g L/s.",
-           level, (height - level) * tank * 1000, rate * remaining * 1000);
+    const double drained = (height - level) * tank * 1000, flow = rate * remaining * 1000;
+    format(out, "Tank drain estimate: final level %.5g m, drained %.5g L, final flow %.5g L/s. "
+           "Elapsed drainage interval: %.9g seconds.", level, drained, flow, seconds);
+    if (reading) *reading = (PhysicsReading){.kind = READING_FLUID, .seconds = seconds,
+        .level_m = level, .drained_l = drained, .remaining_l = level * tank * 1000, .flow_lps = flow,
+        .initial_flow_lps = rate * sqrt(height) * 1000};
     return true;
 }
 static bool gas(const Json *args, const Json *settings, Text *out)
@@ -279,13 +291,18 @@ static bool prop_load(const Json *args, Text *out)
            stress < capacity ? "holds" : stress == capacity ? "gives slightly" : "breaks");
     return true;
 }
-bool physics_run(const char *name, const Json *args, const Json *settings, Text *out)
+bool physics_run_reading(const char *name, const Json *args, const Json *settings, Text *out, PhysicsReading *reading)
 {
+    if (reading) *reading = (PhysicsReading){0};
     if (!strcmp(name, "ray")) return ray(args, out);
     if (!strcmp(name, "rays")) return rays(args, out);
-    if (!strcmp(name, "acoustic")) return acoustic(args, settings, out);
-    if (!strcmp(name, "fluid")) return fluid(args, settings, out);
+    if (!strcmp(name, "acoustic")) return acoustic(args, settings, out, reading);
+    if (!strcmp(name, "fluid")) return fluid(args, settings, out, reading);
     if (!strcmp(name, "gas")) return gas(args, settings, out);
     if (!strcmp(name, "prop_load")) return prop_load(args, out);
     return false;
+}
+bool physics_run(const char *name, const Json *args, const Json *settings, Text *out)
+{
+    return physics_run_reading(name, args, settings, out, nullptr);
 }

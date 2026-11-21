@@ -51,6 +51,45 @@ static bool tool_protocol(void)
     return ok;
 }
 
+static bool measurement_protocol(void)
+{
+    Preview p = {.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    bool ok = simulation_tool_reply(&p,
+        "{\"neutrino_tool\":\"fluid\",\"height\":1,\"tank_area\":2,\"outlet_area\":0.003,\"seconds\":10}") == SIM_REGENERATE &&
+        strstr(str(&p.tool_results), "Elapsed drainage interval: 10 seconds.") &&
+        simulation_tool_reply(&p, "The simulation says it drained eight seconds.") == SIM_REGENERATE &&
+        simulation_tool_reply(&p, "The tank drained for 8 seconds.") == SIM_NO_PROSE &&
+        simulation_tool_reply(&p, "The tank drained 81.525 liters over ten seconds. The clock chimed eight seconds later.") == SIM_NARRATIVE &&
+        !physics_prose_matches(p.readings, p.reading_count, "The tank drained 18 liters over ten seconds.") &&
+        !physics_prose_matches(p.readings, p.reading_count, "The simulation says the tank holds 0.95924 cubic meters.") &&
+        !physics_prose_matches(p.readings, p.reading_count, "The water level is already 80% full.") &&
+        !physics_prose_matches(p.readings, p.reading_count, "The water in the tank is thinning, the flow accelerating.") &&
+        physics_prose_matches(p.readings, p.reading_count, "The tank holds about 1.91848 cubic meters.");
+    Text prose = {0};
+    append(&prose, "Iona listens to the water rushing away.");
+    physics_prose_readouts(p.readings, p.reading_count, &prose);
+    ok = ok && strstr(str(&prose), "81.525 liters over 10 seconds") &&
+         physics_prose_matches(p.readings, p.reading_count, str(&prose));
+    free_protocol(&p);
+    p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    ok = ok && simulation_tool_reply(&p,
+         "{\"neutrino_tool\":\"acoustic\",\"min\":[0,0,0],\"max\":[6,5,4],\"source\":[1,2,2],\"listener\":[4,2,2]}") == SIM_REGENERATE &&
+         !physics_prose_matches(p.readings, p.reading_count, "The direct sound was blocked.") &&
+         !physics_prose_matches(p.readings, p.reading_count, "The first echo arrived at 20.39 ms.") &&
+         !physics_prose_matches(p.readings, p.reading_count, "Iona saw the display flash 81.525 liters and ten seconds.") &&
+         physics_prose_matches(p.readings, p.reading_count, "She remembered the earlier 81.525 liters.") &&
+         !physics_prose_matches(p.readings, p.reading_count, "The direct sound arrives at 14.57 ms and the first echo at 8.74 ms.") &&
+         physics_prose_matches(p.readings, p.reading_count, "The direct sound arrives at 8.74 ms and the first echo at 14.57 ms.");
+    clear(&prose);
+    append(&prose, "Iona hears the bell and a soft echo.");
+    physics_prose_readouts(p.readings, p.reading_count, &prose);
+    ok = ok && strstr(str(&prose), "first audible wall echo arrives at 14.57 milliseconds") &&
+         physics_prose_matches(p.readings, p.reading_count, str(&prose));
+    release(&prose);
+    free_protocol(&p);
+    return ok;
+}
+
 int main(int argc, char **argv)
 {
     const struct {
@@ -79,6 +118,10 @@ int main(int argc, char **argv)
     int failures = 0;
     if (!tool_protocol()) {
         fputs("The tool protocol must reject JSON prose, retain distinct results and skip reordered duplicate calls.\n", stderr);
+        failures++;
+    }
+    if (!measurement_protocol()) {
+        fputs("Saved narration must match typed fluid and acoustic readings and reject contradictory estimates.\n", stderr);
         failures++;
     }
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {

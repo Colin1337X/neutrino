@@ -23,6 +23,14 @@ typedef struct {
     char label[64];
     bool finished;
 } Candidate;
+enum { SIM_TOOL_LIMIT = 3, PHYSICS_ACOUSTIC_PATHS = 7 };
+typedef enum { READING_NONE, READING_FLUID, READING_ACOUSTIC } ReadingKind;
+typedef struct {
+    ReadingKind kind;
+    double seconds, level_m, drained_l, remaining_l, flow_lps, initial_flow_lps;
+    struct { bool blocked; double delay_ms, level_db; } arrival[PHYSICS_ACOUSTIC_PATHS];
+    int arrivals;
+} PhysicsReading;
 typedef struct {
     Operation op;
     Json *scene, *story;
@@ -35,8 +43,9 @@ typedef struct {
     int count, current, next, active;
     bool open, reasoning, stopped, complete, recalling, repeat_retry;
     Json *memory_picks, *tool_pending, *tool_requests;
-    int tool_rounds;
-    bool tool_prose_only, tool_prose_retry;
+    PhysicsReading readings[SIM_TOOL_LIMIT];
+    int tool_rounds, reading_count;
+    bool tool_prose_only, tool_prose_retry, tool_measurement_retry;
     Inference *recall_job;
 } Preview;
 
@@ -116,6 +125,9 @@ bool world_address(const Json *story, const char *line, Text *speaker, const cha
 const char *world_character_room(const Json *story, int head, const char *name, Text *out);
 bool world_inventory_tool(Json *story, int head, const Json *args);
 bool physics_run(const char *name, const Json *args, const Json *settings, Text *out);
+bool physics_run_reading(const char *name, const Json *args, const Json *settings, Text *out, PhysicsReading *reading);
+bool physics_prose_matches(const PhysicsReading *readings, int count, const char *body);
+void physics_prose_readouts(const PhysicsReading *readings, int count, Text *body);
 bool physics_tune(Json *settings, const Json *op);
 void physics_describe(const Json *settings, Text *out);
 bool simulation_enabled(const Json *story);

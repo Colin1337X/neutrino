@@ -18,7 +18,7 @@ else()
 endif()
 
 add_executable(neutrino src/main.c src/workspace.c src/terminal.c src/inference.c src/gateway.c src/memory.c src/facts.c src/world.c src/ui.c
-    src/simulation.c src/physics.c src/ray_gpu.c
+    src/simulation.c src/physics.c src/measurements.c src/ray_gpu.c
     third_party/cjson/cJSON.c)
 target_include_directories(neutrino PRIVATE third_party/cjson)
 if(MSVC)
@@ -53,7 +53,7 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME compendium_claims COMMAND compendium_claims_test)
 
-    add_executable(scene_physics_test tests/scene_physics.c src/physics.c src/ray_gpu.c src/simulation.c
+    add_executable(scene_physics_test tests/scene_physics.c src/physics.c src/measurements.c src/ray_gpu.c src/simulation.c
         src/workspace.c src/world.c third_party/cjson/cJSON.c)
     target_include_directories(scene_physics_test PRIVATE src third_party/cjson)
     if(MSVC)

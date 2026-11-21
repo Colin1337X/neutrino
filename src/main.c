@@ -485,9 +485,12 @@ static void messages_for_story(App *a, Json *messages)
         last_role = js(node, "role");
     }
     if (p->tool_prose_only)
-        messages_add(messages, "user", p->tool_prose_retry ?
+        messages_add(messages, "user", p->tool_measurement_retry ?
+            "Continue the scene in one or two sentences of dialogue or action. Focus on the current tool result only. "
+            "Describe the character's reaction in words and leave all numbers to the instrument readout." :
+            p->tool_prose_retry ?
             "Write one complete sentence of story dialogue or action. Use any simulator reading above in words." :
-            "Continue the scene in plain prose. Use the simulator readings above as part of the character's actions or dialogue. The calculations are finished.");
+            "Continue the scene in plain prose. Describe the effect of any simulator readings in words. Leave measurements to the instrument readout. The calculations are finished.");
     else if (i == first) messages_add(messages, "user", "Begin the story.");
     else if (!strcmp(last_role, "assistant"))
         messages_add(messages, "user", "Continue the story from this moment.");
@@ -501,6 +504,8 @@ static void messages_for_story(App *a, Json *messages)
         if (p->tool_feedback.len && !p->tool_prose_only)
             append(&revision, "\n\nUse the completed tool results above and continue in plain story prose. "
                               "Request another tool only if a different calculation is still needed.");
+        if (p->reading_count)
+            append(&revision, " Describe the effect in words and leave measurements to the instrument readout.");
         set(latest, "content", str(&revision));
         release(&revision);
     }
@@ -856,7 +861,8 @@ static bool update_generation(App *a)
                 clear(&c->body);
                 clear(&c->thinking);
                 if (simulation == SIM_NO_PROSE) {
-                    status(a, "The narrator did not produce prose. /narrate retries the uncompleted turn.");
+                    status(a, p->tool_measurement_retry ? "The narrator contradicted the tool results. /narrate retries this turn." :
+                           "The narrator did not produce prose. /narrate retries the uncompleted turn.");
                     p->complete = true;
                 } else {
                     status(a, "Tool processed · waiting for narration");
@@ -877,9 +883,10 @@ static bool update_generation(App *a)
                 }
                 return true;
             }
+            record_generation(a, c);
+            physics_prose_readouts(p->readings, p->reading_count, &c->body);
             int id = story_push(&a->ws, p->story, p->parent, "assistant", str(&c->body));
             simulation_commit(a, p, id);
-            record_generation(a, c);
             Json *reply = story_pick(p->story, id);
             if (c->thinking.len) set(reply, "reasoning", str(&c->thinking));
             if (p->speaker.len) set(reply, "speaker", str(&p->speaker));
