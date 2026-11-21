@@ -194,7 +194,10 @@ Use `/import FILE` or `--import FILE` to bring data into a Neutrino workspace.
 | Cherenkov v1 / Xenon v2 workspace JSON | Hierarchy, scene text, controls, revisions and Story Bible. A fresh workspace also takes the source configuration and scratchpad. |
 | rp-core v1 session JSONL | Cast and persona, messages, branches, active head, message edits, hidden flags and reasoning. |
 | Solo SillyTavern JSONL | Messages, selected swipes, alternate replies and hidden flags. An already imported matching card supplies character context. |
-| Character cards | JSON CCv1/v2/v3 and PNG cards with uncompressed `chara` or `ccv3` metadata. |
+| Character cards | SillyTavern/Character Card v1–v3 JSON and PNG with uncompressed `chara` or `ccv3` metadata. Includes greetings, alternate greetings and embedded lore. |
+| SillyTavern World Info JSON | Use `/lore FILE` to attach a book to the current story or `/import FILE` to start a story with that book. Accepts both keyed objects and arrays of entries. |
+
+Card text, lore and enabled prompt blocks support `{{char}}` and `{{user}}`. The character resolves to the card nickname when present. Imported greetings use the default player name, and later prompts use the active persona. World Info supports literal primary and secondary keys, all four secondary matching modes, case and whole-word options, per-entry scan depth, and constant and disabled entries. `/lore-test TEXT` previews activation. Regex, timing, recursive activation, and SillyTavern-specific extensions and scripts are outside this compatibility layer. [SillyTavern World Info](https://docs.sillytavern.app/usage/core-concepts/worldinfo/)
 
 Imports leave the input file intact. Workspace imports with colliding paths or IDs are rejected. `/export FILE` creates a fresh JSON backup. Use the backup on another machine or reimport it into an empty workspace.
 

@@ -572,6 +572,36 @@ static Json *png_card(const unsigned char *p, size_t total)
     return v2;
 }
 
+void story_expand_names(const Json *story, const char *source, Text *out)
+{
+    const Json *card = at(story, "card");
+    const char *character = js(card, "nickname"), *user = js(at(story, "persona"), "name");
+    if (!*character) character = js(card, "name");
+    if (!*user) user = "User";
+    for (const char *p = source; *p;) {
+        if (*character && !strncmp(p, "{{char}}", 8)) {
+            append(out, character);
+            p += 8;
+        } else if (!strncmp(p, "{{user}}", 8)) {
+            append(out, user);
+            p += 8;
+        } else {
+            const char *begin = p++;
+            while (*p && *p != '{') p++;
+            append_n(out, begin, (size_t)(p - begin));
+        }
+    }
+}
+
+static int push_card_greeting(Workspace *ws, Json *story, const char *greeting)
+{
+    Text expanded = {0};
+    story_expand_names(story, greeting, &expanded);
+    int id = story_push(ws, story, 0, "assistant", str(&expanded));
+    release(&expanded);
+    return id;
+}
+
 static Json *import_card(Workspace *ws, const Json *input)
 {
     Json *data = at(input, "data");
@@ -581,16 +611,44 @@ static Json *import_card(Workspace *ws, const Json *input)
     const char *greeting = js(data, "first_mes");
     if (!*greeting) greeting = js(data, "firstMessage");
     Json *story = story_add(ws, name, cJSON_Duplicate(data, true));
-    if (*greeting) story_push(ws, story, 0, "assistant", greeting);
+    if (*greeting) push_card_greeting(ws, story, greeting);
     int head = number(story, "head");
     Json *alt, *alternates = at(data, "alternate_greetings");
     if (!alternates) alternates = at(data, "greetings");
     cJSON_ArrayForEach(alt, alternates) {
         if (!cJSON_IsString(alt) || !*alt->valuestring) continue;
-        int id = story_push(ws, story, 0, "assistant", alt->valuestring);
+        int id = push_card_greeting(ws, story, alt->valuestring);
         if (!head) head = id;
     }
     integer(story, "head", head);
+    return story;
+}
+
+bool story_lorebook(const Json *input)
+{
+    const Json *entries = at(input, "entries"), *entry;
+    if (!cJSON_IsObject(entries) && !cJSON_IsArray(entries)) return false;
+    cJSON_ArrayForEach(entry, entries)
+        if (!cJSON_IsObject(entry) || !cJSON_IsString(at(entry, "content"))) return false;
+    return true;
+}
+
+static Json *import_lorebook(Workspace *ws, const Json *input, const char *path)
+{
+    const char *title = js(input, "name");
+    Text filename = {0};
+    if (!*title) {
+        const char *base = path;
+        for (const char *p = path; *p; p++)
+            if (*p == '/' || *p == '\\') base = p + 1;
+        const char *extension = strrchr(base, '.');
+        if (!extension || extension == base) extension = base + strlen(base);
+        append_n(&filename, base, (size_t)(extension - base));
+        title = filename.len ? str(&filename) : "World Info";
+    }
+    Json *story = story_add(ws, title, nullptr);
+    put(story, "lore", cJSON_Duplicate(input, true));
+    release(&filename);
     return story;
 }
 
@@ -814,8 +872,9 @@ Json *workspace_import(Workspace *ws, const char *path, Text *error)
                 ws->dirty = true;
             }
         }
-    } else if (input) result = import_card(ws, input);
-    if (!result && !error->len) append(error, "Expected a Xenon workspace, rp-core journal, solo SillyTavern chat, or JSON/PNG card.");
+    } else if (story_lorebook(input)) result = import_lorebook(ws, input, path);
+    else if (input) result = import_card(ws, input);
+    if (!result && !error->len) append(error, "Expected a workspace, journal, solo SillyTavern chat, JSON/PNG card, or World Info JSON.");
     cJSON_Delete(input);
     free(data);
     return result;
@@ -835,25 +894,63 @@ static bool bounded_source(Text *out, const char *label, const char *value, size
     format(out, "%s\n\n", value);
     return true;
 }
-static bool contains_folded(const char *text, const char *needle)
+static bool keyword_byte(unsigned char ch)
+{
+    return isalnum(ch) || ch == '_' || ch >= 0x80;
+}
+
+static bool lore_keyword(const char *text, const char *needle, bool sensitive, bool whole)
 {
     if (!*needle) return false;
-    while (*text) {
-        const char *a = text++, *b = needle;
-        while (*a && *b && tolower((unsigned char)*a) == tolower((unsigned char)*b)) { a++; b++; }
-        if (!*b) return true;
+    for (const char *start = text; *start; start++) {
+        if (whole && start > text && keyword_byte((unsigned char)start[-1])) continue;
+        const char *a = start, *b = needle;
+        while (*a && *b && (sensitive ? *a == *b :
+               tolower((unsigned char)*a) == tolower((unsigned char)*b))) { a++; b++; }
+        if (!*b && (!whole || !keyword_byte((unsigned char)*a))) return true;
     }
     return false;
 }
-static const char *lore_match(const Json *keys, const char *recent)
+
+static void lore_matches(const Json *story, const Json *keys, const char *recent, bool sensitive,
+                         bool whole, const char **first, bool *all)
 {
     Json *key;
-    cJSON_ArrayForEach(key, keys)
-        if (cJSON_IsString(key) && contains_folded(recent, key->valuestring)) return key->valuestring;
-    return NULL;
+    *first = nullptr;
+    *all = true;
+    cJSON_ArrayForEach(key, keys) {
+        if (!cJSON_IsString(key) || !*key->valuestring) continue;
+        Text expanded = {0};
+        story_expand_names(story, key->valuestring, &expanded);
+        if (lore_keyword(recent, str(&expanded), sensitive, whole)) {
+            if (!*first) *first = key->valuestring;
+        } else *all = false;
+        release(&expanded);
+    }
 }
 
-static void collect_lore(const Json *book, const char *label, const char *recent,
+static const Json *lore_option(const Json *entry, const char *key, const char *portable)
+{
+    const Json *value = at(entry, key);
+    if (!value || cJSON_IsNull(value)) value = at(entry, portable);
+    if (!value || cJSON_IsNull(value)) value = at(at(entry, "extensions"), key);
+    return value;
+}
+
+static void lore_recent(const Json *path, const char *cue, int depth, Text *out)
+{
+    int skip = cJSON_GetArraySize(path) - depth + (cue != nullptr);
+    Json *node;
+    cJSON_ArrayForEach(node, path) {
+        if (skip-- > 0) continue;
+        append(out, js(node, "content"));
+        append(out, "\n");
+    }
+    if (cue && depth) append(out, cue);
+}
+
+static void collect_lore(const Json *story, const Json *book, const char *label, const char *recent,
+                         const Json *path, const char *cue,
                          Text *out, size_t limit, Text *trace)
 {
     Json *entry;
@@ -861,37 +958,65 @@ static void collect_lore(const Json *book, const char *label, const char *recent
     cJSON_ArrayForEach(entry, at(book, "entries")) {
         const char *title = js(entry, "title");
         if (!*title) title = js(entry, "comment");
+        if (!*title) title = js(entry, "name");
         if (!*title) title = "Story reference";
         index++;
         if (trace) format(trace, "%s #%d — %s: ", label, index, title);
         bool enabled = !cJSON_IsFalse(at(entry, "enabled")) && !cJSON_IsTrue(at(entry, "disable"));
         bool constant = cJSON_IsTrue(at(entry, "constant"));
+        bool sensitive = cJSON_IsTrue(lore_option(entry, "caseSensitive", "case_sensitive"));
+        bool whole = cJSON_IsTrue(lore_option(entry, "matchWholeWords", "match_whole_words"));
+        const Json *depth = lore_option(entry, "scanDepth", "scan_depth");
+        Text scoped = {0};
+        int scan = 4;
+        const char *haystack = recent;
+        if (cJSON_IsNumber(depth) && depth->valueint >= 0 && depth->valueint <= 1000) {
+            scan = depth->valueint;
+            lore_recent(path, cue, scan, &scoped);
+            haystack = str(&scoped);
+        }
         Json *keys = at(entry, "keys");
         if (!keys) keys = at(entry, "key");
-        const char *match = lore_match(keys, recent);
+        const char *match, *second = nullptr;
+        bool all;
+        lore_matches(story, keys, haystack, sensitive, whole, &match, &all);
         Json *secondary = at(entry, "secondary_keys");
         if (!secondary) secondary = at(entry, "secondaryKeys");
         if (!secondary) secondary = at(entry, "keysecondary");
-        bool needs_secondary = cJSON_IsTrue(at(entry, "selective")) && secondary && secondary->child;
-        const char *second = needs_secondary ? lore_match(secondary, recent) : NULL;
+        const Json *selective = at(entry, "selective");
+        bool needs_secondary = !cJSON_IsFalse(selective) && cJSON_IsArray(secondary) && secondary->child;
+        const Json *logic = lore_option(entry, "selectiveLogic", "selective_logic");
+        int mode = cJSON_IsNumber(logic) ? logic->valueint : 0;
+        bool matched_secondary = true;
+        if (needs_secondary) {
+            lore_matches(story, secondary, haystack, sensitive, whole, &second, &all);
+            matched_secondary = mode == 1 ? !all : mode == 2 ? !second : mode == 3 ? all : second != nullptr;
+        }
         if (!enabled) { if (trace) append(trace, "skipped (disabled)\n"); }
-        else if (!constant && !match) { if (trace) append(trace, "skipped (no keyword in the latest four visible messages)\n"); }
-        else if (!constant && needs_secondary && !second) {
-            if (trace) format(trace, "skipped (matched '%s', required secondary keyword absent)\n", match);
+        else if (!constant && !match) {
+            if (trace && scan == 4) append(trace, "skipped (no keyword in the latest four visible messages)\n");
+            else if (trace) format(trace, "skipped (no keyword in the latest %d visible messages)\n", scan);
+        } else if (!constant && !matched_secondary) {
+            if (trace) format(trace, "skipped (matched '%s', %s)\n", match,
+                mode ? "secondary keyword condition failed" : "required secondary keyword absent");
         } else if (!*js(entry, "content")) {
             if (trace) append(trace, "skipped (empty content)\n");
         } else {
-            Text heading = {0};
+            Text heading = {0}, content = {0};
             format(&heading, "Lore: %s", title);
-            bool included = bounded_source(out, str(&heading), js(entry, "content"), limit);
+            story_expand_names(story, js(entry, "content"), &content);
+            bool included = bounded_source(out, str(&heading), str(&content), limit);
             if (trace) {
                 if (!included) append(trace, "skipped (matched, but over source budget)\n");
                 else if (constant) append(trace, "included (constant entry)\n");
+                else if (needs_secondary && mode) format(trace, "included (matched '%s', secondary keyword condition passed)\n", match);
                 else if (second) format(trace, "included (matched '%s' and '%s')\n", match, second);
                 else format(trace, "included (matched '%s')\n", match);
             }
             release(&heading);
+            release(&content);
         }
+        release(&scoped);
     }
 }
 bool collect_context_with_cue(const Workspace *ws, const Json *scene, const Json *story, int head,
@@ -953,19 +1078,13 @@ bool collect_context_with_cue(const Workspace *ws, const Json *scene, const Json
         }
         if (pass == 0 && story) {
             Text recent = {0};
-            Json *active = story_path(story, head), *node;
-            int skip = cJSON_GetArraySize(active) - (cue ? 3 : 4);
-            cJSON_ArrayForEach(node, active) {
-                if (skip-- > 0) continue;
-                append(&recent, js(node, "content"));
-                append(&recent, "\n");
-            }
-            if (cue) append(&recent, cue);
+            Json *active = story_path(story, head);
+            lore_recent(active, cue, 4, &recent);
             Json *card = at(story, "card");
-            collect_lore(at(card, "character_book"), "Card lore", str(&recent), out, limit, trace);
-            collect_lore(at(card, "book"), "Card book", str(&recent), out, limit, trace);
-            collect_lore(at(at(story, "persona"), "book"), "Persona book", str(&recent), out, limit, trace);
-            collect_lore(at(story, "lore"), "Attached lore", str(&recent), out, limit, trace);
+            collect_lore(story, at(card, "character_book"), "Card lore", str(&recent), active, cue, out, limit, trace);
+            collect_lore(story, at(card, "book"), "Card book", str(&recent), active, cue, out, limit, trace);
+            collect_lore(story, at(at(story, "persona"), "book"), "Persona book", str(&recent), active, cue, out, limit, trace);
+            collect_lore(story, at(story, "lore"), "Attached lore", str(&recent), active, cue, out, limit, trace);
             release(&recent);
             cJSON_Delete(active);
         }

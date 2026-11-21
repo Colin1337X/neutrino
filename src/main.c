@@ -108,7 +108,7 @@ const Command commands[] = {
     {"premise", " text", "Set the current scene's premise"},
     {"control", " name | value", "Set a creative control on the current scene"},
     {"preferences", " text", "Set workspace-wide writing preferences"},
-    {"import", " file", "Import a workspace, chat journal, or character card"},
+    {"import", " file", "Import a workspace, chat, character card, or lorebook"},
     {"export", " file", "Write a new workspace backup"},
     {"save", "", "Save the workspace"},
     {"model", " [MODEL|recall CONN:MODEL]", "Select a server-configured narrator or recall model"},
@@ -427,7 +427,10 @@ static void messages_for_story(App *a, Json *messages)
         "examples", "system_prompt", "post_history_instructions", "systemPrompt", "postHistory"};
     for (size_t i = 0; i < sizeof fields / sizeof *fields; i++) {
         const char *value = js(card, fields[i]);
-        if (*value) format(&system, "\n%s: %s", fields[i], value);
+        if (*value) {
+            format(&system, "\n%s: ", fields[i]);
+            story_expand_names(p->story, value, &system);
+        }
     }
     if (*js(persona, "name"))
         format(&system, "\nPlayer persona: %s — %s", js(persona, "name"), js(persona, "description"));
@@ -443,8 +446,10 @@ static void messages_for_story(App *a, Json *messages)
     if (!blocks) blocks = at(preset, "prompts");
     cJSON_ArrayForEach(prompt, blocks) {
         const char *content = js(prompt, "content");
-        if (*content && !cJSON_IsFalse(at(prompt, "enabled")) && !cJSON_IsTrue(at(prompt, "marker")))
-            format(&system, "\n\n%s", content);
+        if (*content && !cJSON_IsFalse(at(prompt, "enabled")) && !cJSON_IsTrue(at(prompt, "marker"))) {
+            append(&system, "\n\n");
+            story_expand_names(p->story, content, &system);
+        }
     }
     clear(&p->selection_trace);
     memory_inject(p->story, p->parent, p->memory_picks, &system, &p->selection_trace);
@@ -1304,10 +1309,10 @@ static void attach_story_file(App *a, const char *field, const char *path)
     if (!a->roleplay || !a->story) { status(a, "Open a roleplay story first."); return; }
     if (preview_busy(&a->preview)) { status(a, "Wait for generation to finish."); return; }
     char *data = read_file(path);
-    Json *value = data ? cJSON_ParseWithOpts(data, NULL, 1) : NULL;
+    Json *value = data ? cJSON_ParseWithOpts(!strncmp(data, "\xef\xbb\xbf", 3) ? data + 3 : data, NULL, 1) : NULL;
     free(data);
     bool lore = !strcmp(field, "lore");
-    bool valid = lore ? cJSON_IsArray(at(value, "entries")) || cJSON_IsObject(at(value, "entries")) :
+    bool valid = lore ? story_lorebook(value) :
         cJSON_IsArray(at(value, "blocks")) || cJSON_IsArray(at(value, "prompts"));
     if (!valid) {
         cJSON_Delete(value);
