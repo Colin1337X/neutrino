@@ -775,6 +775,16 @@ Json *compendium_opening_evidence(const char *reply)
     return entries;
 }
 
+static void add_signal(Json *facts, const char *name, const Text *sentence)
+{
+    if (cJSON_GetArraySize(facts) >= 6) return;
+    Json *fact = cJSON_CreateObject();
+    set(fact, "type", "event");
+    set(fact, "name", name);
+    set(fact, "description", str(sentence));
+    cJSON_AddItemToArray(facts, fact);
+}
+
 Json *compendium_signal_evidence(const char *reply)
 {
     Json *facts = cJSON_CreateArray();
@@ -803,22 +813,19 @@ Json *compendium_signal_evidence(const char *reply)
                  word(line, "strikes the bell") || word(line, "struck the bell") ||
                  word(line, "bell striking it") || word(line, "striking the bell") ||
                  word(line, "bell tolls") || word(line, "bell tolled")) label = "bell";
-        else if (!word(line, "await") && !word(line, "awaits") && !word(line, "awaiting") &&
+        if (label) add_signal(facts, label, &sentence);
+        if (!word(line, "await") && !word(line, "awaits") && !word(line, "awaiting") &&
                  !word(line, "expects") && !word(line, "expecting") &&
                  (word(line, "flare rises") || word(line, "flare rose") || word(line, "flare floats") ||
                   word(line, "flare drifts") || word(line, "flare erupts") || word(line, "flare burns") ||
                   word(line, "flare flares") || word(line, "flare flared") ||
                   word(line, "flare ignites") || word(line, "flare ignited") ||
                   word(line, "flare glows") || word(line, "flare glowed") ||
-                  word(line, "flare is burning") || word(line, "flare lights up") ||
+                  word(line, "flare is burning") || word(line, "flare burning") ||
+                  word(line, "flare still burning") || word(line, "flare lights up") ||
+                  word(line, "flare bursts") || word(line, "flare streaks") || word(line, "flare glowing") ||
                   word(line, "watches the flare") || word(line, "sees the flare") || (word(line, "flare") &&
-                   (word(line, "now floats") || word(line, "descends toward"))))) label = "flare";
-        if (!label) continue;
-        Json *fact = cJSON_CreateObject();
-        set(fact, "type", "event");
-        set(fact, "name", label);
-        set(fact, "description", str(&sentence));
-        cJSON_AddItemToArray(facts, fact);
+                   (word(line, "now floats") || word(line, "descends toward"))))) add_signal(facts, "flare", &sentence);
     }
     release(&sentence);
     release(&tokens);

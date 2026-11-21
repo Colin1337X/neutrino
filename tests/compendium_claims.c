@@ -249,6 +249,23 @@ int main(void)
     signals = compendium_signal_evidence("Iona waits for the signal. She expects the flare ignites near the pier.");
     if (signals->child) { fputs("An expected flare must not become a witnessed event.\n", stderr); rc = 1; }
     cJSON_Delete(signals);
+    const char *paired = "A bright, rhythmic flare burns brightly over the water as Iona rings the brass bell twice, signaling the approaching tide.";
+    signals = compendium_signal_evidence(paired);
+    if (cJSON_GetArraySize(signals) != 2 ||
+        strcmp(js(cJSON_GetArrayItem(signals, 0), "name"), "brass bell") ||
+        strcmp(js(cJSON_GetArrayItem(signals, 1), "name"), "flare") ||
+        strcmp(js(cJSON_GetArrayItem(signals, 1), "description"), paired)) {
+        fputs("A shared evidence sentence can establish both observed signals.\n", stderr);
+        rc = 1;
+    }
+    cJSON_Delete(signals);
+    signals = compendium_signal_evidence("Captain Mara stands on the opposite side, the flare burning with a violent flash.");
+    if (cJSON_GetArraySize(signals) != 1 ||
+        strcmp(js(cJSON_GetArrayItem(signals, 0), "name"), "flare")) {
+        fputs("A burning flare is observed even in a participial clause.\n", stderr);
+        rc = 1;
+    }
+    cJSON_Delete(signals);
     cJSON_Delete(batch);
     cJSON_Delete(known);
     return rc;

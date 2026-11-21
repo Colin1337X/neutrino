@@ -100,11 +100,20 @@ static Json *find_entity(const Json *entries, const char *type, const char *name
 }
 
 /* Short labels can legitimately be shared by unrelated people or objects. */
+static int signal_kind(const char *type, const char *name)
+{
+    if (strcmp(type, "event")) return 0;
+    if (same_words(name, "bell") || same_words(name, "brass bell")) return 1;
+    return same_words(name, "flare") ? 2 : 0;
+}
 static bool duplicates_fact(const Json *entries, const char *type, const char *name, const char *fact)
 {
+    const int signal = signal_kind(type, name);
     Json *item;
     cJSON_ArrayForEach(item, entries) {
         bool same_entity = !strcmp(js(item, "type"), type) && same_words(js(item, "name"), name);
+        /* Distinct witnessed signals may cite the very same sentence. */
+        if (signal && !same_entity && signal != signal_kind(js(item, "type"), js(item, "name"))) continue;
         if (!same_entity && strlen(fact) < 32) continue;
         const char *description = js(item, "description");
         if (same_words(description, fact)) return true;
