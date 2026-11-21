@@ -4,6 +4,53 @@
 #include <stdio.h>
 #include <string.h>
 
+void app_info(App *app, const char *title) { (void)app; (void)title; }
+void app_status(App *app, const char *message) { (void)app; (void)message; }
+
+static void free_protocol(Preview *p)
+{
+    cJSON_Delete(p->story);
+    cJSON_Delete(p->tool_pending);
+    cJSON_Delete(p->tool_requests);
+    release(&p->tool_feedback);
+    release(&p->tool_results);
+}
+
+static bool tool_protocol(void)
+{
+    const char *fluid = "{\"neutrino_tool\":\"fluid\",\"height\":1,\"tank_area\":2,\"outlet_area\":0.003,\"seconds\":10}";
+    const char *acoustic = "{\"neutrino_tool\":\"acoustic\",\"min\":[0,0,0],\"max\":[6,5,4],"
+                           "\"source\":[1,2,2],\"listener\":[4,2,2]}";
+    const char *acoustic_again = "{\"listener\":[4,2,2], \"source\":[1,2,2], \"max\":[6,5,4], "
+                                 "\"min\":[0,0,0], \"neutrino_tool\":\"acoustic\"}";
+    const char *misnamed = "{\"fluid_tool\":\"fluid\",\"height\":1}";
+    Preview p = {.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    bool ok = simulation_tool_reply(&p, fluid) == SIM_REGENERATE &&
+              simulation_tool_reply(&p, acoustic) == SIM_REGENERATE &&
+              strstr(str(&p.tool_feedback), "81.525 L") && strstr(str(&p.tool_feedback), "Direct 8.74 ms") &&
+              !strstr(str(&p.tool_feedback), "\"neutrino_tool\"") &&
+              simulation_tool_reply(&p, acoustic_again) == SIM_REGENERATE &&
+              p.tool_prose_only && cJSON_GetArraySize(p.tool_requests) == 2 &&
+              strstr(str(&p.tool_results), "Repeated tool request skipped") &&
+              simulation_tool_reply(&p, "```json\n[1,2]\n```") == SIM_REGENERATE &&
+              simulation_tool_reply(&p, misnamed) == SIM_NO_PROSE &&
+              simulation_tool_reply(&p, "[She waits for the bell.]") == SIM_NARRATIVE &&
+              simulation_tool_reply(&p, "She hears the bell echo against the walls.") == SIM_NARRATIVE;
+    free_protocol(&p);
+    p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    ok = ok && simulation_tool_reply(&p, fluid) == SIM_REGENERATE &&
+         simulation_tool_reply(&p, misnamed) == SIM_REGENERATE &&
+         p.tool_prose_only && p.tool_rounds == 1 &&
+         simulation_tool_reply(&p, "Water rushes down the drain.") == SIM_NARRATIVE;
+    free_protocol(&p);
+    p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    ok = ok && simulation_tool_reply(&p, misnamed) == SIM_REGENERATE &&
+         simulation_tool_reply(&p, fluid) == SIM_REGENERATE &&
+         strstr(str(&p.tool_feedback), "81.525 L");
+    free_protocol(&p);
+    return ok;
+}
+
 int main(int argc, char **argv)
 {
     const struct {
@@ -30,6 +77,10 @@ int main(int argc, char **argv)
         {"prop_load", "{\"strength\":\"ordinary\",\"load\":\"heavy\",\"speed\":20}", nullptr},
     };
     int failures = 0;
+    if (!tool_protocol()) {
+        fputs("The tool protocol must reject JSON prose, retain distinct results and skip reordered duplicate calls.\n", stderr);
+        failures++;
+    }
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
         Json *args = cJSON_Parse(cases[i].json);
         Text result = {0};

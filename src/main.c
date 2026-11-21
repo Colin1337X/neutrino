@@ -457,6 +457,10 @@ static void messages_for_story(App *a, Json *messages)
     int covered = 0;
     const char *recap = memory_enabled(p->story) ? memory_recap(path, &covered) : "";
     if (*recap) format(&system, "\n\nRecap of older story messages:\n%s", recap);
+    const Json *last = path->child ? path->child->prev : nullptr;
+    if (p->tool_prose_only && !strcmp(js(last, "role"), "user"))
+        format(&system, "\n\nLatest player action and scene direction (reference only for the prose reply):\n%s",
+               js(last, "content"));
     simulation_prompt(p, &system);
     messages_add(messages, "system", str(&system));
     release(&system);
@@ -476,18 +480,27 @@ static void messages_for_story(App *a, Json *messages)
     int i = 0;
     const char *last_role = "";
     cJSON_ArrayForEach(node, path) {
-        if (i++ >= first) messages_add(messages, js(node, "role"), js(node, "content"));
+        if (i++ >= first && !(node == last && p->tool_prose_only && !strcmp(js(node, "role"), "user")))
+            messages_add(messages, js(node, "role"), js(node, "content"));
         last_role = js(node, "role");
     }
-    if (i == first) messages_add(messages, "user", "Begin the story.");
+    if (p->tool_prose_only)
+        messages_add(messages, "user", p->tool_prose_retry ?
+            "Write one complete sentence of story dialogue or action. Use any simulator reading above in words." :
+            "Continue the scene in plain prose. Use the simulator readings above as part of the character's actions or dialogue. The calculations are finished.");
+    else if (i == first) messages_add(messages, "user", "Begin the story.");
     else if (!strcmp(last_role, "assistant"))
         messages_add(messages, "user", "Continue the story from this moment.");
-    if (p->repeat_retry) {
+    if (p->repeat_retry || (p->tool_feedback.len && !p->tool_prose_only)) {
         Json *latest = messages->child->prev;
         Text revision = {0};
         append(&revision, js(latest, "content"));
-        append(&revision, "\n\nFor this reply, use new phrasing. When I ask a question, answer it directly "
-                          "in character. Continue from what's already happened.");
+        if (p->repeat_retry)
+            append(&revision, "\n\nFor this reply, use new phrasing. When I ask a question, answer it directly "
+                              "in character. Continue from what's already happened.");
+        if (p->tool_feedback.len && !p->tool_prose_only)
+            append(&revision, "\n\nUse the completed tool results above and continue in plain story prose. "
+                              "Request another tool only if a different calculation is still needed.");
         set(latest, "content", str(&revision));
         release(&revision);
     }
@@ -573,8 +586,10 @@ static void release_preview(Preview *p)
     release(&p->world_context);
     release(&p->speaker);
     release(&p->tool_results);
+    release(&p->tool_feedback);
     cJSON_Delete(p->memory_picks);
     cJSON_Delete(p->tool_pending);
+    cJSON_Delete(p->tool_requests);
     *p = (Preview){0};
 }
 static void start_candidate(App *a, int index)
@@ -836,12 +851,12 @@ static bool update_generation(App *a)
     if (c->error.len || p->stopped) status(a, c->error.len ? str(&c->error) : "Generation cancelled");
     else {
         if (p->head == number(p->story, "head")) {
-            int previous_rounds = p->tool_rounds;
-            if (simulation_tool_reply(p, str(&c->body))) {
+            SimulationReply simulation = simulation_tool_reply(p, str(&c->body));
+            if (simulation != SIM_NARRATIVE) {
                 clear(&c->body);
                 clear(&c->thinking);
-                if (p->tool_rounds == previous_rounds) {
-                    status(a, "Narrator tool limit reached without a story reply.");
+                if (simulation == SIM_NO_PROSE) {
+                    status(a, "The narrator did not produce prose. /narrate retries the uncompleted turn.");
                     p->complete = true;
                 } else {
                     status(a, "Tool processed · waiting for narration");

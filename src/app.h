@@ -28,14 +28,15 @@ typedef struct {
     Json *scene, *story;
     Text source, messages_context, objective, lore_trace, memory_trace, recall_output, recall_error, recall_thinking;
     Text previous_reply, selection_trace;
-    Text world_context, speaker, tool_results;
+    Text world_context, speaker, tool_results, tool_feedback;
     size_t start, end, insert_at;
     int version, parent, head;
     Candidate candidates[30];
     int count, current, next, active;
     bool open, reasoning, stopped, complete, recalling, repeat_retry;
-    Json *memory_picks, *tool_pending;
+    Json *memory_picks, *tool_pending, *tool_requests;
     int tool_rounds;
+    bool tool_prose_only, tool_prose_retry;
     Inference *recall_job;
 } Preview;
 
@@ -120,7 +121,8 @@ void physics_describe(const Json *settings, Text *out);
 bool simulation_enabled(const Json *story);
 void simulation_command(App *a, const char *verb, const char *arg);
 void simulation_prompt(const Preview *p, Text *system);
-bool simulation_tool_reply(Preview *p, const char *body);
+typedef enum { SIM_NARRATIVE, SIM_REGENERATE, SIM_NO_PROSE } SimulationReply;
+SimulationReply simulation_tool_reply(Preview *p, const char *body);
 void simulation_commit(App *a, Preview *p, int id);
 
 #endif

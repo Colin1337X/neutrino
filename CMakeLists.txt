@@ -53,7 +53,8 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME compendium_claims COMMAND compendium_claims_test)
 
-    add_executable(scene_physics_test tests/scene_physics.c src/physics.c src/ray_gpu.c src/workspace.c third_party/cjson/cJSON.c)
+    add_executable(scene_physics_test tests/scene_physics.c src/physics.c src/ray_gpu.c src/simulation.c
+        src/workspace.c src/world.c third_party/cjson/cJSON.c)
     target_include_directories(scene_physics_test PRIVATE src third_party/cjson)
     if(MSVC)
         target_compile_definitions(scene_physics_test PRIVATE _CRT_SECURE_NO_WARNINGS)
