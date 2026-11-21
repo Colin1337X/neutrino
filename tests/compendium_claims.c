@@ -136,6 +136,30 @@ int main(void)
                                           "Iona imagines that she places a blue lantern on the desk.");
     if (opening->child) { fputs("Atmosphere and speculation must not create opening entries.\n", stderr); rc = 1; }
     cJSON_Delete(opening);
+    const char *relay_reply = "You step forward and present your name as Iona, the station keeper, and immediately reveal "
+        "the three new facts: the red box is concealed beneath your collar, Captain Mara has been pulled ashore at the "
+        "west pier, and the current tide is at its lowest, allowing the west gate to be unlocked.";
+    Text label = {0};
+    const char *type = compendium_filing_identity("item", "Copper Key", "The red box is concealed beneath Iona's collar.",
+                                                 relay_reply, &label);
+    if (strcmp(type, "item") || strcmp(str(&label), "Red box")) {
+        fputs("Use the object established by the narrator, independently of the player's cue.\n", stderr);
+        rc = 1;
+    }
+    clear(&label);
+    type = compendium_filing_identity("item", "Copper Key", "The copper key is concealed beneath the red box.",
+                                      "The copper key is concealed beneath the red box.", &label);
+    if (strcmp(type, "item") || label.len) { fputs("Do not rename an object to its container.\n", stderr); rc = 1; }
+    type = compendium_filing_identity("item", "Copper Key", "The red box is concealed beneath Iona's collar.",
+                                      "Iona points to the red box. The copper key is concealed beneath her collar.", &label);
+    if (strcmp(type, "item") || label.len) { fputs("A mention alone does not ground a replacement name.\n", stderr); rc = 1; }
+    type = compendium_filing_identity("creature", "Captain Mara", "Captain Mara has been pulled ashore at the west pier.",
+                                      relay_reply, &label);
+    if (strcmp(type, "character") || label.len) { fputs("Named captain should file as a character.\n", stderr); rc = 1; }
+    type = compendium_filing_identity("creature", "Captain Ember", "Captain Ember watches the bay.",
+                                      "Captain Ember, a dragon, watches the bay.", &label);
+    if (strcmp(type, "creature") || label.len) { fputs("Preserve explicit species evidence.\n", stderr); rc = 1; }
+    release(&label);
     cJSON_Delete(batch);
     cJSON_Delete(known);
     return rc;

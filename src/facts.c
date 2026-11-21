@@ -66,7 +66,8 @@ static const char *action_at(const char *s, const char **verb, const char **acti
     static const struct { const char *word, *action; } predicates[] = {
         {"stranded", "stranded"}, {"marooned", "stranded"},
         {"hiding", "hidden"}, {"hides", "hidden"}, {"conceals", "hidden"},
-        {"concealing", "hidden"}, {"hidden", "concealed"}, {"stores", "stored"}, {"storing", "stored"},
+        {"concealing", "hidden"}, {"hidden", "concealed"}, {"concealed", "concealed"},
+        {"stores", "stored"}, {"storing", "stored"},
         {"finds", "found"}, {"discovered", "found"}, {"found", "found"},
         {"located", "located"}
     };
@@ -372,6 +373,79 @@ static bool mentions(const char *text, const char *name)
     bool found = word(str(&words), name) != NULL;
     release(&words);
     return found;
+}
+
+static bool explicitly_nonhuman(const char *text, const char *name)
+{
+    static const char *const species[] = {
+        "dragon", "wolf", "dog", "cat", "bird", "raven", "owl", "kraken", "octopus", "squid",
+        "mermaid", "werewolf", "vampire", "ghost", "demon", "monster", "animal", "creature",
+        "horse", "bear", "serpent", "snake", "shark", "alien", "robot", "golem", "leviathan"
+    };
+    static const char *const links[] = {" is a ", " is an ", " is the ", " was a ", " was an ",
+                                        " was the ", " a ", " an ", " the "};
+    for (const char *p = word(text, name); p; p = word(p + strlen(name), name)) {
+        const char *after = p + strlen(name);
+        for (size_t i = 0; i < sizeof links / sizeof *links; i++) {
+            const char *noun = after;
+            if (!prefix(&noun, links[i])) continue;
+            for (size_t j = 0; j < sizeof species / sizeof *species; j++) {
+                size_t len = strlen(species[j]);
+                if (!strncmp(noun, species[j], len) && (!noun[len] || noun[len] == ' ')) return true;
+            }
+        }
+    }
+    return false;
+}
+
+/* Repair a supplied identity only when the narrator independently names it.
+   A location or another noun mentioned in the description cannot rename it. */
+const char *compendium_filing_identity(const char *type, const char *name, const char *description,
+                                       const char *reply, Text *corrected_name)
+{
+    if (strcmp(type, "item") && strcmp(type, "creature")) return type;
+    Text label = {0}, prose = {0}, detail = {0};
+    normalize_words(&label, name);
+    normalize_words(&prose, reply);
+    normalize_words(&detail, description);
+    if (!label.len) goto finish;
+    if (!strcmp(type, "creature")) {
+        static const char *const titles[] = {"captain ", "doctor ", "professor ", "officer ",
+            "sergeant ", "lieutenant ", "commander ", "king ", "queen ", "princess ", "prince ", "lady ", "lord "};
+        for (size_t i = 0; i < sizeof titles / sizeof *titles; i++) {
+            const char *person = str(&label);
+            if (prefix(&person, titles[i]) && *person && word(str(&prose), str(&label)) &&
+                !explicitly_nonhuman(str(&prose), str(&label)) &&
+                !explicitly_nonhuman(str(&detail), str(&label))) type = "character";
+        }
+    } else if (!word(str(&detail), str(&label))) {
+        const char *s = str(&detail), *verb = nullptr, *action = nullptr;
+        const char *pred = action_at(s, &verb, &action);
+        if (pred && !strcmp(action, "concealed") && pred > s) {
+            bool past = false;
+            const char *end = subject_end(s, pred, &past);
+            Text subject = {0};
+            noun_phrase(&subject, s, end);
+            /* Match through the concealment verb. Resolve pronouns and
+               spelling differences in the destination from the filing text. */
+            const char *start = s;
+            prefix(&start, "the ");
+            Text evidence = {0};
+            if (pred >= start) append_n(&evidence, start, (size_t)(pred - start) + strlen(verb));
+            if (subject.len && subject.len <= 160 && simple(str(&subject)) &&
+                strchr(str(&subject), ' ') && evidence.len && word(str(&prose), str(&evidence))) {
+                append(corrected_name, str(&subject));
+                corrected_name->data[0] = (char)toupper((unsigned char)corrected_name->data[0]);
+            }
+            release(&subject);
+            release(&evidence);
+        }
+    }
+finish:
+    release(&label);
+    release(&prose);
+    release(&detail);
+    return type;
 }
 
 static bool known_prop(const Json *known, const Json *history, const char *name)

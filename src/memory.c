@@ -389,6 +389,8 @@ static Json *filing_prompt(const Json *story, int id)
         "Return only a JSON array of up to six objects with type, name and description. "
         "Use one object per entity and choose the most specific type. Allowed types: "
         "character, place, item, event, note, faction, rule, relationship, plot, quest, creature. "
+        "Use character for named people. Keep the entity named in the description aligned with the entry name. "
+        "An object being hidden and the container or place hiding it are separate entities. "
         "Reuse existing names for updates. Skip facts already in the supplied ledger, including under another type. "
         "If nothing changed, return [].", &input);
     cJSON_Delete(existing);
@@ -416,7 +418,10 @@ static Json *parse_filing(const Text *output, const Json *story, const Json *rep
             return NULL;
         }
         index++;
-        if (duplicates_fact(result, type, name, description)) continue;
+        Text corrected = {0};
+        type = compendium_filing_identity(type, name, description, js(reply, "content"), &corrected);
+        if (corrected.len) name = str(&corrected);
+        if (duplicates_fact(result, type, name, description)) { release(&corrected); continue; }
         Text novel = {0};
         bool ambiguous = compendium_novel_claims(known, result, type, name, description, &novel);
         bool partial = strcmp(description, str(&novel)) != 0;
@@ -424,6 +429,7 @@ static Json *parse_filing(const Text *output, const Json *story, const Json *rep
         if (!novel.len || (!ambiguous && duplicates_fact(known, type, name, description)) ||
             duplicates_fact(result, type, name, description)) {
             release(&novel);
+            release(&corrected);
             continue;
         }
         Json *entity = find_entity(result, type, name);
@@ -437,6 +443,7 @@ static Json *parse_filing(const Text *output, const Json *story, const Json *rep
             }
             if (partial) put(entity, "memoryAppend", cJSON_CreateTrue());
             release(&novel);
+            release(&corrected);
             continue;
         }
         char id[40];
@@ -446,6 +453,7 @@ static Json *parse_filing(const Text *output, const Json *story, const Json *rep
         if (opening_fallback) set(fact, "memorySource", "reply-evidence");
         cJSON_AddItemToArray(result, fact);
         release(&novel);
+        release(&corrected);
     }
     cJSON_Delete(answer);
     if (!result->child) {

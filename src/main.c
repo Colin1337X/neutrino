@@ -33,12 +33,14 @@ const Command commands[] = {
     {"story", " title", "Start a roleplay story"},
     {"play", " [title]", "Start a roleplay linked to this scene"},
     {"branch", " [message ID]", "Inspect or switch the active path"},
+    {"tails", "", "List the ends of available roleplay branches"},
     {"rewind", " [ancestor ID]", "Rewind one exchange or return to an earlier message"},
     {"search", " text", "Find literal text on the active roleplay path"},
     {"memory", " [mode|new|edit|status]", "Open or manage branch-aware story memory"},
     {"world", " [log]", "Inspect this branch's room, inventory, or activity"},
     {"map", " [destination]", "Show world links or the shortest route from this room"},
     {"inspect", " [name]", "Read details about the room, a nearby character, or an item"},
+    {"inventory", " [held|worn|nearby]", "Browse items you hold, wear, or can reach"},
     {"room", " NAME | DESCRIPTION", "Define a room"},
     {"connect", " ROOM | ROOM", "Link two rooms"},
     {"go", " ROOM", "Move through an exit"},
@@ -81,6 +83,7 @@ const Command commands[] = {
     {"senses", " sight,sound,smell,touch,taste,metaphor", "Set Describe senses or use all"},
     {"select", " all | clear | START END", "Select a UTF-8 byte range for writing tools"},
     {"find", " text", "Find literal text across the manuscript"},
+    {"batch", " PATH", "Read scenes together from a folder, book, or chapter"},
     {"replace", " OLD | NEW", "Replace literal text in the current scene and save a revision"},
     {"revisions", "", "Inspect saved drafts"},
     {"compare", " NUMBER", "Compare a saved draft with the current scene"},
@@ -1033,6 +1036,37 @@ static void change_branch(App *a, int id)
     close_panel(a);
     status(a, id ? "Active branch changed" : "Rewound to the start of the story");
 }
+static void show_tails(App *a)
+{
+    if (!a->roleplay || !a->story) { status(a, "Open a roleplay story first."); return; }
+    const Json *nodes = at(a->story, "nodes");
+    const int count = cJSON_GetArraySize(nodes), head = number(a->story, "head");
+    bool *has_child = calloc((size_t)count + 1, sizeof(*has_child));
+    if (!has_child) abort();
+    Json *node;
+    cJSON_ArrayForEach(node, nodes) {
+        int parent = number(node, "parent");
+        if (parent > 0 && parent <= count) has_child[parent] = true;
+    }
+    show_info(a, "Branch ends");
+    format(&a->info, "%s · Active message #%d\n\n", ui_story_name(a), head);
+    int shown = 0;
+    for (node = nodes && nodes->child ? nodes->child->prev : nullptr; node;
+         node = node == nodes->child ? nullptr : node->prev) {
+        const int id = number(node, "id");
+        if (id < 1 || id > count || has_child[id] || cJSON_IsTrue(at(node, "hidden"))) continue;
+        if (++shown > 60) { append(&a->info, "Older branch ends omitted.\n"); break; }
+        const char *body = js(node, "content");
+        size_t len = strlen(body), n = len > 110 ? 110 : len;
+        while (n && ((unsigned char)body[n] & 0xc0) == 0x80) n--;
+        format(&a->info, "%s#%d · %s\n", id == head ? "Current  " : "", id, js(node, "role"));
+        append_n(&a->info, body, n);
+        append(&a->info, n < len ? "…\n\n" : "\n\n");
+    }
+    if (!shown) append(&a->info, "No visible branch ends yet.\n");
+    else append(&a->info, "/branch ID opens a branch end.");
+    free(has_child);
+}
 static void rewind_story(App *a, const char *arg)
 {
     if (!a->roleplay || !a->story) { status(a, "Open a roleplay story first."); return; }
@@ -1319,6 +1353,35 @@ static void rewrite_preset(App *a, const char *arg)
     }
     status(a, "Unknown preset. Use /rewrite-preset to list them.");
 }
+static void read_batch(App *a, const char *path)
+{
+    if (a->roleplay) { status(a, "Switch to Manuscript with F2 to read a batch."); return; }
+    if (*path != '/') { status(a, "Use /batch /folder/book/chapter or /batch / for all scenes."); return; }
+    size_t length = strlen(path);
+    while (length > 1 && path[length - 1] == '/') length--;
+    show_info(a, "Manuscript batch");
+    format(&a->info, "%.*s\n\n", (int)length, path);
+    int shown = 0;
+    Json *scene;
+    cJSON_ArrayForEach(scene, at(a->ws.root, "records")) {
+        if (strcmp(js(scene, "type"), "scene")) continue;
+        const char *name = js(scene, "path");
+        if (strncmp(name, path, length) || (length > 1 && name[length] && name[length] != '/')) continue;
+        if (a->info.len > 60000 || shown >= 40) {
+            append(&a->info, "More scenes omitted. Open a smaller batch.\n");
+            break;
+        }
+        const char *body = js(scene, "content");
+        size_t len = strlen(body), n = len > 8000 ? 8000 : len;
+        while (n && ((unsigned char)body[n] & 0xc0) == 0x80) n--;
+        format(&a->info, "%s\n", name);
+        if (n) append_n(&a->info, body, n);
+        else append(&a->info, "(Empty scene)");
+        append(&a->info, n < len ? "\n… Remaining text omitted.\n\n" : "\n\n");
+        shown++;
+    }
+    if (!shown) append(&a->info, "No manuscript scenes in this path.");
+}
 
 static void slash_command(App *a, char *line)
 {
@@ -1333,7 +1396,7 @@ static void slash_command(App *a, char *line)
         return;
     }
     const char *const world_commands[] = {"world", "room", "connect", "go", "item",
-        "take", "drop", "wear", "remove", "npc", "weather", "say", "map", "inspect"};
+        "take", "drop", "wear", "remove", "npc", "weather", "say", "map", "inspect", "inventory"};
     for (size_t i = 0; i < sizeof world_commands / sizeof *world_commands; i++) {
         if (!strcmp(line, world_commands[i])) { world_command(a, line, arg); return; }
     }
@@ -1347,6 +1410,8 @@ static void slash_command(App *a, char *line)
     else if (!strcmp(line, "edit")) edit_start(a);
     else if (!strcmp(line, "rewrite-preset")) rewrite_preset(a, arg);
     else if (!strcmp(line, "rewind")) rewind_story(a, arg);
+    else if (!strcmp(line, "tails")) show_tails(a);
+    else if (!strcmp(line, "batch")) read_batch(a, arg);
     else if (!strcmp(line, "search")) search_story(a, arg);
     else if (!strcmp(line, "replace")) replace_scene_text(a, arg);
     else if (!strcmp(line, "quit")) quit(a);

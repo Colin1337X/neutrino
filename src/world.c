@@ -87,6 +87,33 @@ static const char *item_state(const Json *item, const char *nearby)
 {
     return cJSON_IsTrue(at(item, "worn")) ? "Worn" : cJSON_IsTrue(at(item, "carried")) ? "Carried" : nearby;
 }
+static Json *world_state(const Json *story, int head);
+static void inventory_panel(App *a, const char *filter)
+{
+    bool held = !strcmp(filter, "held"), worn = !strcmp(filter, "worn"), nearby = !strcmp(filter, "nearby");
+    if (*filter && !held && !worn && !nearby) {
+        app_status(a, "Use /inventory [held|worn|nearby].");
+        return;
+    }
+    Json *state = world_state(a->story, number(a->story, "head"));
+    const char *room = js(state, "room");
+    app_info(a, "Inventory");
+    format(&a->info, "%s · %s\n\n", *room ? room : "No current room", *filter ? filter : "All available items");
+    int shown = 0;
+    Json *item;
+    cJSON_ArrayForEach(item, at(state, "item")) {
+        bool being_carried = cJSON_IsTrue(at(item, "carried"));
+        bool being_worn = cJSON_IsTrue(at(item, "worn"));
+        bool within_reach = !being_carried && *room && equal_name(room, js(item, "room"));
+        if (!(held ? being_carried && !being_worn : worn ? being_worn :
+              nearby ? within_reach : being_carried || within_reach)) continue;
+        format(&a->info, "%s · %s\n%s\n\n", item_state(item, "Nearby"), js(item, "name"), js(item, "text"));
+        shown++;
+    }
+    if (!shown) append(&a->info, "No items in this view.\n\n");
+    append(&a->info, "/inspect ITEM   /take ITEM   /wear ITEM   /remove ITEM   /drop ITEM");
+    cJSON_Delete(state);
+}
 
 static Json *world_state(const Json *story, int head)
 {
@@ -376,6 +403,7 @@ void world_command(App *a, const char *verb, char *argument)
     if (!strcmp(verb, "world")) { world_panel(a, !strcmp(argument, "log")); return; }
     if (!strcmp(verb, "map")) { world_map(a, trim(argument)); return; }
     if (!strcmp(verb, "inspect")) { inspect_world(a, trim(argument)); return; }
+    if (!strcmp(verb, "inventory")) { inventory_panel(a, trim(argument)); return; }
     if (preview_busy(&a->preview)) { app_status(a, "Finish the active reply before changing the world."); return; }
 
     bool room_cmd = !strcmp(verb, "room"), link_cmd = !strcmp(verb, "connect");
