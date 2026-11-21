@@ -243,6 +243,9 @@ static bool transfer(Inference *j, Response *r, long *status)
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
 #endif
     curl_easy_setopt(curl, CURLOPT_DISALLOW_USERNAME_IN_URL, 1L);
+    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+    curl_easy_setopt(curl, CURLOPT_HTTPAUTH, (long)CURLAUTH_NONE);
+    curl_easy_setopt(curl, CURLOPT_PROXYAUTH, (long)CURLAUTH_NONE);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);

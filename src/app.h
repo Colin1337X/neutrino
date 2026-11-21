@@ -22,6 +22,7 @@ typedef struct {
     Json *scene, *story;
     Text source, messages_context, objective, lore_trace, memory_trace, recall_output, recall_error, recall_thinking;
     Text previous_reply, selection_trace;
+    Text world_context, speaker;
     size_t start, end, insert_at;
     int version, parent, head;
     Candidate candidates[30];
@@ -34,7 +35,7 @@ typedef struct {
     Workspace ws;
     Json *scene, *story;
     bool roleplay, demo, quit, compact, editing, slash, view_panel;
-    bool panel_preview, selected;
+    bool panel_preview, selected, ssh_session;
     Focus focus;
     Text screen, prompt, edit, info, status, trace, server_address;
     char info_title[96];
@@ -49,6 +50,7 @@ typedef struct {
 } App;
 
 typedef struct { const char *name, *args, *summary; } Command;
+enum { COMMAND_MATCH_LIMIT = 96 };
 extern const Command commands[];
 extern const size_t command_count;
 extern const char *const operation_names[OP_COUNT];
@@ -82,5 +84,9 @@ void memory_pause(App *app);
 void memory_close(App *app);
 void memory_binding(App *app, const char *binding);
 Inference *memory_start_recall(const App *app, const Json *story, const Json *messages);
+void world_command(App *app, const char *verb, char *argument);
+void world_context(const Json *story, int head, Text *out);
+const char *world_room(const Json *story, int head, Text *out);
+bool world_address(const Json *story, const char *line, Text *speaker, const char **message);
 
 #endif

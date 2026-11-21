@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.18)
-project(neutrino VERSION 0.2.0 LANGUAGES C)
+project(neutrino VERSION 0.3.0 LANGUAGES C)
 
-add_executable(neutrino src/main.c src/workspace.c src/terminal.c src/inference.c src/gateway.c src/memory.c src/facts.c src/ui.c
+add_executable(neutrino src/main.c src/workspace.c src/terminal.c src/inference.c src/gateway.c src/memory.c src/facts.c src/world.c src/ui.c
     third_party/cjson/cJSON.c)
 target_include_directories(neutrino PRIVATE third_party/cjson)
 set_target_properties(neutrino PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)

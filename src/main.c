@@ -34,6 +34,16 @@ const Command commands[] = {
     {"play", " [title]", "Start a roleplay linked to this scene"},
     {"branch", " [message ID]", "Inspect or switch the active path"},
     {"memory", " [mode|new|edit|status]", "Open or manage branch-aware story memory"},
+    {"world", " [log]", "Inspect this branch's room, inventory, or activity"},
+    {"room", " NAME | DESCRIPTION", "Define a room"},
+    {"connect", " ROOM | ROOM", "Link two rooms"},
+    {"go", " ROOM", "Move through an exit"},
+    {"item", " NAME | DESCRIPTION", "Place an item in the current room"},
+    {"take", " ITEM", "Pick up a nearby item"},
+    {"drop", " ITEM", "Leave a carried item here"},
+    {"npc", " NAME | DESCRIPTION", "Add a character in this room"},
+    {"weather", " TEXT", "Set the weather on this branch"},
+    {"say", " TEXT", "Speak in this room without generating a reply"},
     {"trace", " [file]", "Inspect or export the exact last prompt and lore decisions"},
     {"swipe", "", "Generate an alternate reply"},
     {"previous", "", "Select the previous reply variant"},
@@ -331,6 +341,10 @@ static void messages_for_story(App *a, Json *messages)
         format(&system, "\nPlayer persona: %s — %s", js(persona, "name"), js(persona, "description"));
     if (p->objective.len) format(&system, "\nPlayer direction: %s", str(&p->objective));
     if (p->messages_context.len) format(&system, "\n\nStory sources:\n%s", str(&p->messages_context));
+    if (p->world_context.len)
+        format(&system, "\n\nCurrent world state (set through player actions):\n%s", str(&p->world_context));
+    if (p->speaker.len)
+        format(&system, "\nThe player addressed %s. Reply as that character in the current room.", str(&p->speaker));
     Json *preset = at(p->story, "preset"), *prompt;
     Json *blocks = at(preset, "blocks");
     if (!blocks) blocks = at(preset, "prompts");
@@ -442,6 +456,8 @@ static void release_preview(Preview *p)
     release(&p->recall_error);
     release(&p->previous_reply);
     release(&p->selection_trace);
+    release(&p->world_context);
+    release(&p->speaker);
     cJSON_Delete(p->memory_picks);
     *p = (Preview){0};
 }
@@ -458,6 +474,8 @@ static void next_candidate(App *a)
         format(&a->trace, "\nLore decisions\n%s\nCompendium\n%s%s",
             p->lore_trace.len ? str(&p->lore_trace) : "No lore entries attached.\n",
             str(&p->memory_trace), str(&p->selection_trace));
+        if (p->world_context.len) format(&a->trace, "\nWorld state\n%s", str(&p->world_context));
+        if (p->speaker.len) format(&a->trace, "Addressed character: %s\n", str(&p->speaker));
     }
     append(&a->trace, "\nMessages sent to the server (JSON, in order)\n\n");
     char *wire = cJSON_Print(messages);
@@ -542,7 +560,7 @@ static bool repeats_reply(const Preview *p, const Text *body)
     return exact || replay;
 }
 
-static void begin(App *a, Operation op, const char *objective, int parent)
+static void begin(App *a, Operation op, const char *objective, int parent, const char *speaker)
 {
     Preview *p = &a->preview;
     if (p->job) { status(a, "A generation is already running. Esc cancels."); return; }
@@ -558,6 +576,14 @@ static void begin(App *a, Operation op, const char *objective, int parent)
         p->parent = parent;
         p->head = number(a->story, "head");
         remember_previous_reply(p);
+        if (!speaker && op == SWIPE) speaker = js(story_pick(p->story, p->head), "speaker");
+        if (!speaker && op == NARRATE) speaker = js(story_pick(p->story, parent), "addressed");
+        if (speaker) append(&p->speaker, speaker);
+        world_context(p->story, parent, &p->world_context);
+        if (p->world_context.len > 32000) {
+            status(a, "World context exceeds the size limit for this request.");
+            return;
+        }
     } else {
         const char *source = scene_text(&a->ws, a->scene);
         size_t source_size = strlen(source);
@@ -657,6 +683,7 @@ static bool update_generation(App *a)
             int id = story_push(&a->ws, p->story, p->parent, "assistant", str(&c->body));
             Json *reply = story_pick(p->story, id);
             if (c->thinking.len) set(reply, "reasoning", str(&c->thinking));
+            if (p->speaker.len) set(reply, "speaker", str(&p->speaker));
             if (p->memory_picks) put(reply, "memoryRecallPicks", cJSON_Duplicate(p->memory_picks, true));
             memory_schedule(a, p->story, id);
             p->open = false;
@@ -996,11 +1023,22 @@ static void slash_command(App *a, char *line)
     while (*arg && !isspace((unsigned char)*arg)) arg++;
     if (*arg) *arg++ = 0;
     arg = trim_piece(arg);
+    if (a->ssh_session && (!strcmp(line, "import") || !strcmp(line, "export") ||
+        !strcmp(line, "lore") || !strcmp(line, "preset") || !strcmp(line, "preview-save") ||
+        !strcmp(line, "server") || (!strcmp(line, "trace") && *arg))) {
+        status(a, "That command requires a local workspace session.");
+        return;
+    }
+    const char *const world_commands[] = {"world", "room", "connect", "go", "item",
+        "take", "drop", "npc", "weather", "say"};
+    for (size_t i = 0; i < sizeof world_commands / sizeof *world_commands; i++) {
+        if (!strcmp(line, world_commands[i])) { world_command(a, line, arg); return; }
+    }
     for (int i = 0; i < NARRATE; i++) {
         char name[32];
         snprintf(name, sizeof name, "%s", operation_names[i]);
         name[0] = (char)tolower((unsigned char)name[0]);
-        if (!strcmp(line, name)) { begin(a, (Operation)i, arg, 0); return; }
+        if (!strcmp(line, name)) { begin(a, (Operation)i, arg, 0, NULL); return; }
     }
     if (!strcmp(line, "help")) show_help(a);
     else if (!strcmp(line, "edit")) edit_start(a);
@@ -1053,11 +1091,11 @@ static void slash_command(App *a, char *line)
         if (*arg) change_branch(a, parse_number(arg, 1, INT_MAX));
         else show_branches(a);
     } else if (!strcmp(line, "previous") || !strcmp(line, "next")) sibling(a, !strcmp(line, "next"));
-    else if (!strcmp(line, "narrate")) begin(a, NARRATE, arg, number(a->story, "head"));
+    else if (!strcmp(line, "narrate")) begin(a, NARRATE, arg, number(a->story, "head"), NULL);
     else if (!strcmp(line, "swipe")) {
         Json *node = story_pick(a->story, number(a->story, "head"));
         if (!node || strcmp(js(node, "role"), "assistant")) status(a, "Select a narrator reply to swipe.");
-        else begin(a, SWIPE, arg, number(node, "parent"));
+        else begin(a, SWIPE, arg, number(node, "parent"), NULL);
     } else if (!strcmp(line, "transcript")) {
         if (!a->story || scene_find(&a->ws, arg) || !number(a->story, "head")) {
             status(a, "Open a story with messages and use a new scene path.");
@@ -1066,7 +1104,8 @@ static void slash_command(App *a, char *line)
         Text transcript = {0};
         Json *path = story_path(a->story, number(a->story, "head")), *node;
         cJSON_ArrayForEach(node, path)
-            format(&transcript, "%s\n%s\n\n", !strcmp(js(node, "role"), "user") ? "Player" : "Narrator",
+            format(&transcript, "%s\n%s\n\n", !strcmp(js(node, "role"), "user") ? "Player" :
+                   *js(node, "speaker") ? js(node, "speaker") : "Narrator",
                    js(node, "content"));
         Json *scene = transcript.len <= EDIT_LIMIT ? scene_add(&a->ws, arg) : NULL;
         if (scene && scene_edit(&a->ws, scene, str(&transcript), "roleplay transcript")) {
@@ -1095,7 +1134,7 @@ static void slash_command(App *a, char *line)
         if (!p->open || p->story || p->job) status(a, "Open a completed writing preview first.");
         else {
             char *objective = copy(str(&p->objective));
-            begin(a, p->op, objective, 0);
+            begin(a, p->op, objective, 0, NULL);
             free(objective);
         }
     } else if (!strcmp(line, "preview-save")) {
@@ -1230,6 +1269,14 @@ static void submit(App *a)
         free(data);
         return;
     }
+    Text speaker = {0};
+    const char *message = data;
+    if (*data != '/' && a->roleplay && !world_address(a->story, data, &speaker, &message)) {
+        status(a, "Address a character shown by /world, followed by a message.");
+        release(&speaker);
+        free(data);
+        return;
+    }
     remember(a, data);
     clear(&a->prompt);
     a->cursor = 0;
@@ -1238,12 +1285,14 @@ static void submit(App *a)
     if (*data == '/') slash_command(a, data + 1);
     else if (a->roleplay) {
         if (!a->story) show_story(a, story_add(&a->ws, "Untitled story", NULL));
-        int id = story_push(&a->ws, a->story, number(a->story, "head"), "user", data);
+        int id = story_push(&a->ws, a->story, number(a->story, "head"), "user", message);
+        if (speaker.len) set(story_pick(a->story, id), "addressed", str(&speaker));
         close_panel(a);
         a->scroll = INT_MAX;
         save(a);
-        begin(a, NARRATE, "", id);
-    } else begin(a, CONTINUE, data, 0);
+        begin(a, NARRATE, "", id, speaker.len ? str(&speaker) : NULL);
+    } else begin(a, CONTINUE, data, 0, NULL);
+    release(&speaker);
     free(data);
 }
 
@@ -1257,8 +1306,8 @@ static void prompt_set(App *a, const char *value)
 }
 static void choose_command(App *a, bool invoke)
 {
-    int matches[64];
-    int count = ui_command_matches(a, matches, 64);
+    int matches[COMMAND_MATCH_LIMIT];
+    int count = ui_command_matches(a, matches, COMMAND_MATCH_LIMIT);
     if (!count) { if (invoke) submit(a); return; }
     if (a->command_cursor >= count) a->command_cursor = count - 1;
     const Command *cmd = &commands[matches[a->command_cursor]];
@@ -1279,8 +1328,8 @@ static void compose_key(App *a, int key)
     if (key == 9 && a->slash) { choose_command(a, false); return; }
     if (key == 13 || key == 10) {
         if (a->slash) {
-            int matches[64];
-            int total = ui_command_matches(a, matches, 64);
+            int matches[COMMAND_MATCH_LIMIT];
+            int total = ui_command_matches(a, matches, COMMAND_MATCH_LIMIT);
             if (a->command_cursor == 0 && total && !strcmp(str(t) + 1, commands[matches[0]].name)) submit(a);
             else choose_command(a, true);
         } else submit(a);
@@ -1289,8 +1338,8 @@ static void compose_key(App *a, int key)
     if (key == KEY_UP || key == KEY_DOWN) {
         int delta = key == KEY_DOWN ? 1 : -1;
         if (a->slash) {
-            int matches[64];
-            int total = ui_command_matches(a, matches, 64), next = a->command_cursor + delta;
+            int matches[COMMAND_MATCH_LIMIT];
+            int total = ui_command_matches(a, matches, COMMAND_MATCH_LIMIT), next = a->command_cursor + delta;
             if (next >= 0 && next < total) a->command_cursor = next;
         } else {
             int next = a->prompt_history + delta;
@@ -1371,7 +1420,7 @@ static void key_event(App *a, int key)
             return;
         case KEY_F4: edit_start(a); return;
         case KEY_F5:
-            begin(a, a->roleplay ? NARRATE : CONTINUE, "", number(a->story, "head"));
+            begin(a, a->roleplay ? NARRATE : CONTINUE, "", number(a->story, "head"), NULL);
             return;
         case KEY_F6: view_context(a); return;
         case KEY_F7:
@@ -1448,6 +1497,7 @@ static int run(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--demo")) a.demo = true;
         else if (!strcmp(argv[i], "--snapshot")) dump = true;
+        else if (!strcmp(argv[i], "--ssh-session")) a.ssh_session = true;
         else if (!strcmp(argv[i], "--serve")) serve = true;
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) {
             port = parse_number(argv[++i], 1, 65535);
@@ -1465,12 +1515,13 @@ static int run(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--workspace") && i + 1 < argc) path = argv[++i];
         else if (!strcmp(argv[i], "--import") && i + 1 < argc) import = argv[++i];
-        else if (!strcmp(argv[i], "--version")) { puts("Neutrino 0.2.0"); return 0; }
+        else if (!strcmp(argv[i], "--version")) { puts("Neutrino 0.3.0"); return 0; }
         else {
             bool help = !strcmp(argv[i], "--help") || !strcmp(argv[i], "-h");
             FILE *out = help ? stdout : stderr;
             if (!help) fprintf(out, "Unexpected argument: %s\n", argv[i]);
             fputs("Usage: neutrino [--workspace FILE] [--import FILE] [--demo] [--snapshot] [--server URL]\n"
+                  "       neutrino --ssh-session --workspace FILE [--server URL]\n"
                   "       neutrino --serve [--port PORT]\n"
                   "       neutrino bench ttft [ROUNDS] [--server URL]\n", out);
             return help ? 0 : 2;
@@ -1478,6 +1529,11 @@ static int run(int argc, char **argv)
     }
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+    if (a.ssh_session && (serve || bench || dump || import || a.demo ||
+        !*env("SSH_TTY", "") || *env("SSH_ORIGINAL_COMMAND", ""))) {
+        fputs("Open an interactive SSH connection with a PTY and no remote command.\n", stderr);
+        return 2;
+    }
     if (serve && bench) { fputs("Start the server and benchmark in separate processes.\n", stderr); return 2; }
     if (serve) return inference_server(port, &interrupted);
     if (bench) return bench_ttft(ui_endpoint(&a), env("NEUTRINO_SERVER_TOKEN", ""), bench, &interrupted);

@@ -1,0 +1,17 @@
+# Fill in absolute paths and a dedicated service account before using this file.
+Port 2222
+ListenAddress 127.0.0.1
+HostKey /srv/neutrino/ssh/ssh_host_ed25519_key
+AuthorizedKeysFile /srv/neutrino/ssh/authorized_keys
+AllowUsers neutrino
+AuthenticationMethods publickey
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+PermitUserRC no
+PermitUserEnvironment no
+DisableForwarding yes
+PermitTTY yes
+Compression no
+SetEnv LC_ALL=C.UTF-8
+ForceCommand /srv/neutrino/bin/neutrino --ssh-session --workspace /srv/neutrino/data/workspace.json --server http://127.0.0.1:4783/v1

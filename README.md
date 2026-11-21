@@ -43,6 +43,26 @@ In Manuscript, plain input supplies a direction for Continue. The writing palett
 
 Use `/play` from a scene to start a linked roleplay. The narrator receives the linked manuscript and shared story sources. Use `/story TITLE` to start independently, or `/import FILE` to start from a character card. A roleplay turn saves the player message, then streams the reply. `/swipe` generates a sibling reply. `/previous`, `/next`, and `/branch ID` navigate the tree. Use `/persona NAME | DESCRIPTION` for a player persona, `/lore FILE` for keyword-triggered sources, and `/preset FILE` for enabled prompt text. `/transcript /Folder/Book/Chapter/Scene` copies the active branch into a new manuscript scene.
 
+## Rooms, inventory, and characters
+
+The roleplay world takes inspiration from Neko Agent's rooms, carried items, environment, and addressed character replies. Create a room with `/room NAME | DESCRIPTION`. The first room is the starting point. Use `/connect ROOM | ROOM` to link rooms in both directions and `/go ROOM` to move through a link. Use `/item NAME | DESCRIPTION` to place a prop here, `/take NAME` to carry it, and `/drop NAME` to leave it in the current room. `/weather TEXT` sets the branch's conditions manually.
+
+Use `/npc NAME | DESCRIPTION` to place a character in the current room. `@Name MESSAGE` asks that character to respond through the configured narrator model. A character has to be present. `/say TEXT` records speech in the room without calling a model. `/world` shows the room, exits, inventory, and characters. `/world log` shows the branch's recent actions. Room definitions and exits belong to the story. Movement, inventory changes, speech, weather, and character placement follow the active branch. The narrator receives the current world state as context and `/trace` displays the state sent with the prompt. Only player commands change the world state. [Neko Agent module reference](https://github.com/GameDevFox/neko-agent/blob/0c5bc71/readme/MODULES.md)
+
+## Serve the TUI over SSH
+
+Install the C executable on the SSH host and start the inference server there. Configure a separate OpenSSH listener with [the example configuration](docs/sshd_config.example). Replace the account and paths with your deployment values, generate a host key, and install the intended user's public key in the configured authorized-keys file. Restrict those files to the serving account and administrator as appropriate. Configure a non-root account with write access to its workspace directory. To use a gateway token, supply it to the gateway and expose the same value to the forced command through the private OpenSSH service configuration.
+
+Validate the separate configuration with `sshd -t -f /path/to/sshd_config` before starting it with `sshd -f /path/to/sshd_config`. The example listens on loopback, and the client connects with a PTY:
+
+```sh
+ssh -tt -p 2222 neutrino@127.0.0.1
+```
+
+OpenSSH handles authentication and encryption. A forced command launches Neutrino on the host without a remote shell, SFTP, or forwarding. The SSH session disables arbitrary filename commands and changing the inference server. `/trace` remains available in the TUI. A workspace permits one writer, so a second connection to the same workspace reports a lock until the first closes. Use distinct workspace paths and OS accounts for separate users. The tested deployment uses Linux OpenSSH in WSL. [OpenSSH forced-command documentation](https://man.openbsd.org/sshd_config.5#ForceCommand)
+
+See the [dependency audit](docs/DEPENDENCIES.md) for the build, runtime, and deployment inventories.
+
 ## Connect the inference server
 
 Start Neutrino's server in a terminal on the machine that can reach the provider. For example, in PowerShell with Ollama running locally:

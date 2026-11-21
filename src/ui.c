@@ -312,7 +312,15 @@ static void detail(App *a, const Layout *l)
         const char *path = js(a->story, "scene");
         cell(a, x, y + 5, w, RAIL QUIET, "LINKED SCENE");
         cell(a, x, y + 6, w, RAIL TXT, strrchr(path, '/') ? strrchr(path, '/') + 1 : path);
-    } else if (a->selected && !a->roleplay) {
+    } else if (a->roleplay) {
+        Text room = {0};
+        const char *name = world_room(a->story, number(a->story, "head"), &room);
+        if (*name) {
+            cell(a, x, y + 5, w, RAIL QUIET, "CURRENT ROOM");
+            cell(a, x, y + 6, w, RAIL TXT, name);
+        }
+        release(&room);
+    } else if (a->selected) {
         snprintf(stat, sizeof stat, "%zu bytes selected", a->selection_b - a->selection_a);
         cell(a, x, y + 5, w, RAIL MINT, stat);
     }
@@ -323,7 +331,7 @@ static void detail(App *a, const Layout *l)
         snprintf(stat, sizeof stat, "F10  Story Bible · %d", n);
         cell(a, x, y + 12, w, RAIL TXT, a->roleplay ? "/memory  Compendium" : stat);
         cell(a, x, y + 13, w, RAIL TXT, a->roleplay ? "/trace   Prompt trace" : "F6   Context sources");
-        cell(a, x, y + 14, w, RAIL TXT, a->roleplay ? "/branch  History" : "/revisions   History");
+        cell(a, x, y + 14, w, RAIL TXT, a->roleplay ? "/world   Room & items" : "/revisions   History");
     }
 }
 static void breadcrumbs(App *a, const Layout *l, int x)
@@ -428,13 +436,16 @@ static void roleplay_rows(App *a, Text *body)
     cJSON_ArrayForEach(node, path) {
         bool player = !strcmp(js(node, "role"), "user");
         const char *name = player ? (*persona ? persona : "You") : (*character ? character : "Narrator");
-        format(body, "%s  %s  ·  #%d\n", player ? "›" : "◆", name, number(node, "id"));
+        if (!player && *js(node, "speaker")) name = js(node, "speaker");
+        const char *addressed = player ? js(node, "addressed") : "";
+        format(body, "%s  %s%s%s  ·  #%d\n", player ? "›" : "◆", name,
+               *addressed ? " → " : "", addressed, number(node, "id"));
         append(body, js(node, "content"));
         append(body, "\n\n");
     }
     Preview *p = &a->preview;
     if (p->job && p->story && p->story == a->story) {
-        format(body, "◆  %s  ·  %s\n", *character ? character : "Narrator",
+        format(body, "◆  %s  ·  %s\n", p->speaker.len ? str(&p->speaker) : *character ? character : "Narrator",
                p->recalling ? "recalling memory" : "responding");
         append(body, str(&p->candidates[0].body));
     }
@@ -532,7 +543,7 @@ static void composer(App *a, const Layout *l, int *cx, int *cy)
 static void palette(App *a, const Layout *l)
 {
     if (!a->slash || a->focus != COMPOSER) return;
-    int matches[64], count = ui_command_matches(a, matches, 64);
+    int matches[COMMAND_MATCH_LIMIT], count = ui_command_matches(a, matches, COMMAND_MATCH_LIMIT);
     int shown = minimum(count ? count : 1, minimum(7, maximum(1, a->rows - 10)));
     int first = clamp(a->command_cursor - shown + 1, 0, maximum(0, count - shown));
     int x = l->left + 2, y = a->rows - 6 - shown, w = minimum(78, l->width - 4);
