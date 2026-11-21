@@ -233,8 +233,9 @@ void simulation_prompt(const Preview *p, Text *system)
     release(&context);
     cJSON_Delete(state);
     if (!p->tool_prose_only) {
-        append(system, "\nYou may use an optional tool before narrating. Send only one JSON tool object "
-               "as the entire reply, or write normal prose. Stage only changes established by this scene. "
+        append(system, "\nYou may use optional tools before narrating. Send one JSON tool object, or an array "
+               "of read-only physics requests to run together, as the entire reply. State edits use one object. "
+               "Stage only changes established by this scene. "
                "Do not take or drop the player's items on their behalf unless requested. "
                "After a result, write the story reply if the request is answered. Each distinct tool request runs once.\n");
         append(system, tool_help);
@@ -276,6 +277,77 @@ static SimulationReply check_prose(Preview *p, const char *body)
     return SIM_REGENERATE;
 }
 
+static bool read_only_tool(const char *tool)
+{
+    return !strcmp(tool, "ray") || !strcmp(tool, "rays") || !strcmp(tool, "acoustic") ||
+           !strcmp(tool, "fluid") || !strcmp(tool, "gas") || !strcmp(tool, "prop_load");
+}
+
+static bool already_requested(const Preview *p, const Json *op)
+{
+    Json *previous;
+    cJSON_ArrayForEach(previous, p->tool_requests)
+        if (op && cJSON_Compare(previous, op, true)) return true;
+    return false;
+}
+
+static void execute_tool(Preview *p, const Json *op, const char *json)
+{
+    const char *tool = js(op, "neutrino_tool");
+    p->tool_rounds++;
+    if (*tool) {
+        if (!p->tool_requests) p->tool_requests = cJSON_CreateArray();
+        cJSON_AddItemToArray(p->tool_requests, cJSON_Duplicate(op, true));
+    }
+    Text result = {0};
+    if (read_only_tool(tool)) {
+        Json *state = preview_state(p);
+        PhysicsReading reading;
+        if (!physics_run_reading(tool, op, at(state, "physics"), &result, &reading))
+            append(&result, "Physics tool arguments rejected.");
+        else if (reading.kind != READING_NONE && p->reading_count < SIM_TOOL_LIMIT)
+            p->readings[p->reading_count++] = reading;
+        cJSON_Delete(state);
+    } else if (*tool) {
+        Json *scratch = cJSON_Duplicate(p->story, true);
+        Json *state = state_at(scratch, p->parent), *pending;
+        cJSON_ArrayForEach(pending, p->tool_pending) apply_tool(scratch, p->parent, state, pending, false);
+        if (apply_tool(scratch, p->parent, state, op, false)) {
+            if (!p->tool_pending) p->tool_pending = cJSON_CreateArray();
+            cJSON_AddItemToArray(p->tool_pending, cJSON_Duplicate(op, true));
+            append(&result, "Change staged for this reply.");
+        } else append(&result, "Unknown tool, invalid arguments, or unavailable item.");
+        cJSON_Delete(state);
+        cJSON_Delete(scratch);
+    } else append(&result, "Malformed tool request. Use one JSON object or a bounded array of read-only physics objects, each with a neutrino_tool key.");
+    format(&p->tool_feedback, "%d. %s\n", p->tool_rounds, str(&result));
+    format(&p->tool_results, "%d. %s\n", p->tool_rounds, str(&result));
+    if (*json) format(&p->tool_results, "%s\n", json);
+    if (p->tool_rounds >= SIM_TOOL_LIMIT) p->tool_prose_only = true;
+    release(&result);
+}
+
+static bool execute_read_only_batch(Preview *p, const Json *batch, const char *json)
+{
+    if (!cJSON_IsArray(batch)) return false;
+    int count = cJSON_GetArraySize(batch);
+    if (count < 1 || count > SIM_TOOL_LIMIT - p->tool_rounds) return false;
+    Json *item;
+    cJSON_ArrayForEach(item, batch)
+        if (!cJSON_IsObject(item) || !read_only_tool(js(item, "neutrino_tool"))) return false;
+    format(&p->tool_results, "Read-only batch submitted by the narrator:\n%s\n", json);
+    cJSON_ArrayForEach(item, batch) {
+        char *request = cJSON_PrintUnformatted(item);
+        if (!request) abort();
+        if (already_requested(p, item))
+            format(&p->tool_results, "Repeated tool request skipped inside the batch.\n%s\n", request);
+        else execute_tool(p, item, request);
+        free(request);
+    }
+    p->tool_prose_only = true;
+    return true;
+}
+
 SimulationReply simulation_tool_reply(Preview *p, const char *body)
 {
     if (!simulation_enabled(p->story)) return SIM_NARRATIVE;
@@ -301,11 +373,13 @@ SimulationReply simulation_tool_reply(Preview *p, const char *body)
     }
     if (length <= 4000) append_n(&json, body, length);
     Json *op = cJSON_ParseWithOpts(str(&json), nullptr, true);
+    if (execute_read_only_batch(p, op, str(&json))) {
+        release(&json);
+        cJSON_Delete(op);
+        return SIM_REGENERATE;
+    }
     const char *tool = js(op, "neutrino_tool");
-    Json *prior;
-    bool duplicate = false;
-    cJSON_ArrayForEach(prior, p->tool_requests)
-        if (op && cJSON_Compare(prior, op, true)) { duplicate = true; break; }
+    bool duplicate = already_requested(p, op);
     if (duplicate || (!*tool && p->tool_requests)) {
         append(&p->tool_results, duplicate ? "Repeated tool request skipped. Finishing in prose.\n" :
                "Discarded structured output without a valid tool name. Finishing in prose.\n");
@@ -315,38 +389,7 @@ SimulationReply simulation_tool_reply(Preview *p, const char *body)
         cJSON_Delete(op);
         return SIM_REGENERATE;
     }
-    p->tool_rounds++;
-    if (*tool) {
-        if (!p->tool_requests) p->tool_requests = cJSON_CreateArray();
-        cJSON_AddItemToArray(p->tool_requests, cJSON_Duplicate(op, true));
-    }
-    Text result = {0};
-    if (!strcmp(tool, "ray") || !strcmp(tool, "rays") || !strcmp(tool, "acoustic") ||
-        !strcmp(tool, "fluid") || !strcmp(tool, "gas") || !strcmp(tool, "prop_load")) {
-        Json *state = preview_state(p);
-        PhysicsReading reading;
-        if (!physics_run_reading(tool, op, at(state, "physics"), &result, &reading))
-            append(&result, "Physics tool arguments rejected.");
-        else if (reading.kind != READING_NONE && p->reading_count < SIM_TOOL_LIMIT)
-            p->readings[p->reading_count++] = reading;
-        cJSON_Delete(state);
-    } else if (*tool) {
-        Json *scratch = cJSON_Duplicate(p->story, true);
-        Json *state = state_at(scratch, p->parent), *pending;
-        cJSON_ArrayForEach(pending, p->tool_pending) apply_tool(scratch, p->parent, state, pending, false);
-        if (apply_tool(scratch, p->parent, state, op, false)) {
-            if (!p->tool_pending) p->tool_pending = cJSON_CreateArray();
-            cJSON_AddItemToArray(p->tool_pending, cJSON_Duplicate(op, true));
-            append(&result, "Change staged for this reply.");
-        } else append(&result, "Unknown tool, invalid arguments, or unavailable item.");
-        cJSON_Delete(state);
-        cJSON_Delete(scratch);
-    } else append(&result, "Malformed tool request. A tool request must be one JSON object with a neutrino_tool key.");
-    format(&p->tool_feedback, "%d. %s\n", p->tool_rounds, str(&result));
-    format(&p->tool_results, "%d. %s\n", p->tool_rounds, str(&result));
-    if (json.len) format(&p->tool_results, "%s\n", str(&json));
-    if (p->tool_rounds >= SIM_TOOL_LIMIT) p->tool_prose_only = true;
-    release(&result);
+    execute_tool(p, op, str(&json));
     release(&json);
     cJSON_Delete(op);
     return SIM_REGENERATE;

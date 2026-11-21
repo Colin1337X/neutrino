@@ -48,6 +48,20 @@ static bool tool_protocol(void)
          simulation_tool_reply(&p, fluid) == SIM_REGENERATE &&
          strstr(str(&p.tool_feedback), "81.525 L");
     free_protocol(&p);
+    p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    Text batch = {0};
+    format(&batch, "[%s,%s,%s]", fluid, acoustic, acoustic_again);
+    ok = ok && simulation_tool_reply(&p, str(&batch)) == SIM_REGENERATE &&
+        p.tool_rounds == 2 && p.tool_prose_only && p.reading_count == 2 &&
+        strstr(str(&p.tool_results), "Repeated tool request skipped inside the batch");
+    free_protocol(&p);
+    p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    clear(&batch);
+    format(&batch, "[%s,{\"neutrino_tool\":\"tune\",\"setting\":\"gravity\",\"value\":1}]", fluid);
+    ok = ok && simulation_tool_reply(&p, str(&batch)) == SIM_REGENERATE &&
+        p.reading_count == 0 && !p.tool_pending && strstr(str(&p.tool_results), "Malformed tool");
+    release(&batch);
+    free_protocol(&p);
     return ok;
 }
 
@@ -61,6 +75,7 @@ static bool measurement_protocol(void)
         simulation_tool_reply(&p, "The tank drained for 8 seconds.") == SIM_NO_PROSE &&
         simulation_tool_reply(&p, "The tank drained 81.525 liters over ten seconds. The clock chimed eight seconds later.") == SIM_NARRATIVE &&
         !physics_prose_matches(p.readings, p.reading_count, "The tank drained 18 liters over ten seconds.") &&
+        !physics_prose_matches(p.readings, p.reading_count, "The tank emptied in ten seconds.") &&
         !physics_prose_matches(p.readings, p.reading_count, "The simulation says the tank holds 0.95924 cubic meters.") &&
         !physics_prose_matches(p.readings, p.reading_count, "The water level is already 80% full.") &&
         !physics_prose_matches(p.readings, p.reading_count, "The water in the tank is thinning, the flow accelerating.") &&

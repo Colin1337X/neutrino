@@ -180,6 +180,13 @@ static bool sentence_matches(const PhysicsReading *readings, int count, const ch
         strstr(sentence, "outlet") || strstr(sentence, "water level") || strstr(sentence, "flow") ||
         strstr(sentence, "simulation") || strstr(sentence, "took") || strstr(sentence, "elapsed");
     const bool level = strstr(sentence, "level") || strstr(sentence, "depth") || strstr(sentence, "remaining");
+    if (strstr(sentence, "tank emptied") || strstr(sentence, "tank is empty") ||
+        strstr(sentence, "tank was empty") || strstr(sentence, "tank ran dry")) {
+        bool empty = false;
+        for (int i = 0; i < count; ++i)
+            if (readings[i].kind == READING_FLUID && readings[i].remaining_l == 0) empty = true;
+        if (has_fluid && !empty) return false;
+    }
     const bool direct = mentions(sentence, "direct");
     const bool echo = mentions(sentence, "echo") || mentions(sentence, "echoes") ||
                       mentions(sentence, "reflection") || mentions(sentence, "reflections");
