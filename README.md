@@ -103,6 +103,8 @@ The included calculators are geometric ray–box intersection, a draining tank e
 
 Set `medium.loss_db_per_m` for air or another room gas. This loss applies to the part of the path outside solids. Supply `medium.speed_m_s` to set the propagation speed, which otherwise comes from ambient air temperature. Delays use that speed along straight segments. The model uses single-bounce geometry and does not calculate refraction, diffraction, or frequency bands.
 
+When the latest player action supplies one matching acoustic request, the narrator can select it with `{"neutrino_tool":"acoustic"}`. Neutrino uses the supplied geometry and material values. For a turn devoted to that reading, end the action with `Acoustic setup:` followed by the request object. The pinned llama.cpp gateway constrains the first response to the short selector, then the narrator continues the scene. `/trace` shows both the selection and the complete arguments used for the calculation.
+
 Levels are relative to the direct source at one metre. In material mode `min_level_db` sets the modeled cutoff (default −120 dB), and audibility is the remaining margin in dB after geometric spreading and losses. A path stops at zero margin. This cutoff is a scene parameter. Use an appropriate source reference and threshold if you want to model a listener's hearing.
 
 ```text

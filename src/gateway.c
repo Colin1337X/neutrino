@@ -33,6 +33,9 @@ static const char filing_schema[] =
     "\"name\":{\"type\":\"string\"},"
     "\"description\":{\"type\":\"string\"}},"
     "\"required\":[\"type\",\"name\",\"description\"],\"additionalProperties\":false}}";
+static const char acoustic_selector_schema[] =
+    "{\"type\":\"object\",\"properties\":{\"neutrino_tool\":{\"enum\":[\"acoustic\"]}},"
+    "\"required\":[\"neutrino_tool\"],\"additionalProperties\":false}";
 typedef struct {
     const char *endpoint, *key, *model;
     RequestOptions options;
@@ -93,6 +96,14 @@ static bool route_for(const char *name, Route *route)
     if (!strcmp(name, "narrator") ||
         (!strncmp(name, "narrator/", 9) && !strcmp(name + 9, route->model)))
         return *route->model != 0;
+    if (!strcmp(name, "narrator-acoustic") ||
+        (!strncmp(name, "narrator-acoustic/", 18) && !strcmp(name + 18, route->model))) {
+        if (slots) {
+            route->options.json_schema = acoustic_selector_schema;
+            route->options.max_tokens = 48;
+        }
+        return *route->model != 0;
+    }
     if (!strcmp(name, "bench-narrator")) {
         route->options.max_tokens = 1;
         return *route->model != 0;

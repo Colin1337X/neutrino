@@ -140,7 +140,8 @@ Inference *app_inference(const App *a, const char *role, const Json *messages)
     Text route = {0};
     append(&route, role);
     const char *model = js(a->ws.root, "serverNarrator");
-    if (!strcmp(role, "narrator") && *model) format(&route, "/%s", model);
+    if ((!strcmp(role, "narrator") || !strcmp(role, "narrator-acoustic")) && *model)
+        format(&route, "/%s", model);
     Inference *job = inference_start(ui_endpoint(a), env("NEUTRINO_SERVER_TOKEN", ""), str(&route), messages);
     release(&route);
     return job;
@@ -481,9 +482,16 @@ static void messages_for_story(App *a, Json *messages)
     int i = 0;
     const char *last_role = "";
     cJSON_ArrayForEach(node, path) {
-        if (i++ >= first && !(node == last && p->tool_prose_only && !strcmp(js(node, "role"), "user")))
-            messages_add(messages, js(node, "role"), js(node, "content"));
         last_role = js(node, "role");
+        if (i++ < first) continue;
+        const char *content = js(node, "content");
+        if (node == last && !strcmp(last_role, "user")) {
+            if (p->tool_prose_only) continue;
+            Text selection = {0};
+            bool attached = simulation_acoustic_selection_prompt(p, &selection, content);
+            messages_add(messages, last_role, attached ? str(&selection) : content);
+            release(&selection);
+        } else messages_add(messages, last_role, content);
     }
     if (p->tool_prose_only)
         messages_add(messages, "user", p->tool_measurement_retry ?
@@ -491,7 +499,8 @@ static void messages_for_story(App *a, Json *messages)
             "Describe the character's reaction in words and leave all numbers to the instrument readout." :
             p->tool_prose_retry ?
             "Write one complete sentence of dialogue or physical action. Describe what the character experiences." :
-            "Continue the scene in plain prose with the character's immediate reaction. Leave measurements to the instrument readout.");
+            "Write one or two sentences of dialogue or physical action showing the character's immediate reaction. "
+            "Stay with what the character can sense or do. Leave measurements to the instrument readout.");
     else if (i == first) messages_add(messages, "user", "Begin the story.");
     else if (!strcmp(last_role, "assistant"))
         messages_add(messages, "user", "Continue the story from this moment.");
@@ -622,7 +631,8 @@ static void start_candidate(App *a, int index)
     append(&a->trace, wire);
     cJSON_free(wire);
     c->finished = false;
-    c->job = app_inference(a, "narrator", messages);
+    bool attached_acoustic = !p->tool_prose_only && !p->tool_rounds && simulation_attached_acoustic_turn(p);
+    c->job = app_inference(a, attached_acoustic ? "narrator-acoustic" : "narrator", messages);
     cJSON_Delete(messages);
     if (c->job) p->active++;
     else {

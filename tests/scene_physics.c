@@ -59,7 +59,7 @@ static bool tool_protocol(void)
     p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
     ok = ok && simulation_tool_reply(&p, str(&batch)) == SIM_REGENERATE &&
          simulation_tool_reply(&p, "Iona studies the [JsOn] output.") == SIM_REGENERATE &&
-         strstr(str(&p.tool_results), "Discarded prose that mentioned the tool protocol.") &&
+         strstr(str(&p.tool_results), "Discarded prose that broke character.") &&
          simulation_tool_reply(&p, "The neutrino_tool output showed a result.") == SIM_NO_PROSE &&
          simulation_tool_reply(&p, "Iona leans around the cabinet and listens.") == SIM_NARRATIVE;
     Text player_action = {0}, reference = {0};
@@ -192,6 +192,54 @@ static bool material_acoustics(void)
     return ok;
 }
 
+static bool supplied_acoustic_protocol(void)
+{
+    const char *acoustic = "{\"neutrino_tool\":\"acoustic\",\"min\":[0,0,0],\"max\":[10,8,4],"
+                           "\"source\":[2,2,2],\"listener\":[5,2,2],\"medium\":{\"loss_db_per_m\":1},"
+                           "\"blockers\":[{\"min\":[3,1,1],\"max\":[4,3,3],"
+                           "\"material\":{\"loss_db_per_m\":6,\"reflectivity\":0.5}}]}";
+    const char *selector = "{\"neutrino_tool\":\"acoustic\"}";
+    Workspace ws = {0};
+    Text cue = {0};
+    Preview p = {.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    format(&cue, "Iona listens. Use [%s].", acoustic);
+    p.parent = story_push(&ws, p.story, 0, "user", str(&cue));
+    Text prompt = {0};
+    bool ok = simulation_acoustic_selection_prompt(&p, &prompt, str(&cue)) &&
+        strstr(str(&prompt), selector) && !strstr(str(&prompt), "loss_db_per_m") &&
+        simulation_tool_reply(&p, selector) == SIM_REGENERATE && p.tool_rounds == 1 &&
+        strstr(str(&p.tool_results), acoustic) && strstr(str(&p.tool_results), "Using the matching player-supplied") &&
+        p.reading_count == 1 && strstr(str(&p.tool_results), "1 material traversals") &&
+        simulation_tool_reply(&p, "The Narrative\n Flow feels fluid.") == SIM_REGENERATE &&
+        simulation_tool_reply(&p, "Iona cups a hand to her ear.") == SIM_NARRATIVE;
+    release(&prompt);
+    free_protocol(&p);
+    p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    p.parent = story_push(&ws, p.story, 0, "user", str(&cue));
+    ok = ok && simulation_tool_reply(&p,
+        "[{\"neutrino_tool\":\"acoustic\",\"blockers\":[{\"min\":[3,1,1],\"max\":[4,3,3]}]}]") ==
+        SIM_REGENERATE && p.reading_count == 1 && p.tool_rounds == 1 && p.tool_prose_only &&
+        strstr(str(&p.tool_results), acoustic);
+    free_protocol(&p);
+    p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    format(&cue, " Or use {\"neutrino_tool\":\"acoustic\",\"min\":[0,0,0],\"max\":[12,8,4],"
+                 "\"source\":[2,2,2],\"listener\":[5,2,2]}.");
+    p.parent = story_push(&ws, p.story, 0, "user", str(&cue));
+    ok = ok && simulation_tool_reply(&p, selector) == SIM_REGENERATE && p.reading_count == 0 &&
+        strstr(str(&p.tool_results), "Physics tool arguments rejected.") &&
+        !strstr(str(&p.tool_results), "Using the matching player-supplied");
+    free_protocol(&p);
+    p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    format(&cue, " Acoustic setup: %s", acoustic);
+    p.parent = story_push(&ws, p.story, 0, "user", str(&cue));
+    ok = ok && simulation_attached_acoustic_turn(&p) &&
+        simulation_tool_reply(&p, selector) == SIM_REGENERATE && p.tool_rounds == 1 &&
+        p.reading_count == 1 && p.tool_prose_only && strstr(str(&p.tool_results), acoustic);
+    free_protocol(&p);
+    release(&cue);
+    return ok;
+}
+
 int main(int argc, char **argv)
 {
     const struct {
@@ -228,6 +276,10 @@ int main(int argc, char **argv)
     }
     if (!material_acoustics()) {
         fputs("Material acoustics must split and attenuate paths and stop them at the modeled cutoff.\n", stderr);
+        failures++;
+    }
+    if (!supplied_acoustic_protocol()) {
+        fputs("Acoustic selectors must preserve supplied materials and reject ambiguous inputs or out-of-character prose.\n", stderr);
         failures++;
     }
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {

@@ -136,6 +136,8 @@ bool simulation_enabled(const Json *story);
 void simulation_command(App *a, const char *verb, const char *arg);
 void simulation_prompt(const Preview *p, Text *system);
 void simulation_player_reference(Text *out, const char *action);
+bool simulation_acoustic_selection_prompt(const Preview *p, Text *out, const char *action);
+bool simulation_attached_acoustic_turn(const Preview *p);
 typedef enum { SIM_NARRATIVE, SIM_REGENERATE, SIM_NO_PROSE } SimulationReply;
 SimulationReply simulation_tool_reply(Preview *p, const char *body);
 void simulation_commit(App *a, Preview *p, int id);

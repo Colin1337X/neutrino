@@ -241,6 +241,8 @@ void simulation_prompt(const Preview *p, Text *system)
                "Stage only changes established by this scene. "
                "Do not take or drop the player's items on their behalf unless requested. "
                "When no calculation or edit is needed, write story prose.\n");
+        append(system, "If the latest player action supplies one acoustic request, select it with "
+                       "{\"neutrino_tool\":\"acoustic\"}. The simulator uses the supplied values, including the materials.\n");
         append(system, tool_help);
     } else append(system, "\nWrite only in-world narrative or dialogue. Show what the character senses or does in the scene. "
                   "Keep implementation details out of the fiction.\n");
@@ -271,25 +273,37 @@ static bool structured_reply(const char *body)
            !strncmp(first, "false", 5) || !strncmp(first, "null", 4);
 }
 
+static bool breaks_character(const char *body)
+{
+    static const char *const phrases[] = {
+        "json", "neutrino_tool", "narrative flow", "narrative pacing", "story pacing",
+        "as a narrator", "out of character", "physics tool rejected"
+    };
+    for (const char *word = body; *word; ++word) {
+        if (word != body && (isalnum((unsigned char)word[-1]) || word[-1] == '_')) continue;
+        for (size_t i = 0; i < sizeof phrases / sizeof *phrases; ++i) {
+            const char *p = word, *phrase = phrases[i];
+            while (*phrase && *p) {
+                if (*phrase == ' ' && isspace((unsigned char)*p)) {
+                    do { ++p; } while (isspace((unsigned char)*p));
+                } else if (*phrase == tolower((unsigned char)*p)) ++p;
+                else break;
+                ++phrase;
+            }
+            if (!*phrase && !isalnum((unsigned char)*p) && *p != '_') return true;
+        }
+    }
+    return false;
+}
+
 static SimulationReply check_prose(Preview *p, const char *body)
 {
-    if (p->reading_count) {
-        for (const char *word = body; *word;) {
-            while (*word && !isalnum((unsigned char)*word) && *word != '_') word++;
-            const char *end = word;
-            while (isalnum((unsigned char)*end) || *end == '_') end++;
-            if ((end - word == 4 && tolower((unsigned char)word[0]) == 'j' &&
-                 tolower((unsigned char)word[1]) == 's' && tolower((unsigned char)word[2]) == 'o' &&
-                 tolower((unsigned char)word[3]) == 'n') ||
-                (end - word == 13 && !memcmp(word, "neutrino_tool", 13))) {
-                if (p->tool_prose_retry) return SIM_NO_PROSE;
-                p->tool_prose_retry = true;
-                p->tool_prose_only = true;
-                append(&p->tool_results, "Discarded prose that mentioned the tool protocol. Retrying in character.\n");
-                return SIM_REGENERATE;
-            }
-            word = end;
-        }
+    if (p->tool_results.len && breaks_character(body)) {
+        if (p->tool_prose_retry) return SIM_NO_PROSE;
+        p->tool_prose_retry = true;
+        p->tool_prose_only = true;
+        append(&p->tool_results, "Discarded prose that broke character. Retrying in character.\n");
+        return SIM_REGENERATE;
     }
     if (physics_prose_matches(p->readings, p->reading_count, body)) return SIM_NARRATIVE;
     if (p->tool_measurement_retry) return SIM_NO_PROSE;
@@ -305,22 +319,31 @@ static bool read_only_tool(const char *tool)
            !strcmp(tool, "fluid") || !strcmp(tool, "gas") || !strcmp(tool, "prop_load");
 }
 
-void simulation_player_reference(Text *out, const char *action)
+static void player_reference(Text *out, const char *action, bool acoustic_only)
 {
     const char *start = strpbrk(action, "[{");
     while (start) {
         const char *end;
         Json *example = cJSON_ParseWithOpts(start, &end, false);
-        const Json *request = cJSON_IsArray(example) ? cJSON_GetArrayItem(example, 0) : example;
+        const Json *request = cJSON_IsArray(example) ? example->child : example;
         bool tool_example = *js(request, "neutrino_tool");
+        if (acoustic_only)
+            for (; tool_example && request; request = request->next)
+                tool_example = !strcmp(js(request, "neutrino_tool"), "acoustic");
+        const char *next = example ? end : start + 1;
         cJSON_Delete(example);
         if (tool_example) {
             append_n(out, action, (size_t)(start - action));
             action = end;
         }
-        start = strpbrk(tool_example ? action : start + 1, "[{");
+        start = strpbrk(next, "[{");
     }
     append(out, action);
+}
+
+void simulation_player_reference(Text *out, const char *action)
+{
+    player_reference(out, action, false);
 }
 
 static bool already_requested(const Preview *p, const Json *op)
@@ -329,6 +352,114 @@ static bool already_requested(const Preview *p, const Json *op)
     cJSON_ArrayForEach(previous, p->tool_requests)
         if (op && cJSON_Compare(previous, op, true)) return true;
     return false;
+}
+
+static bool argument_subset(const Json *selection, const Json *supplied)
+{
+    if (cJSON_IsObject(selection) && cJSON_IsObject(supplied)) {
+        const Json *field;
+        cJSON_ArrayForEach(field, selection)
+            if (!argument_subset(field, at(supplied, field->string))) return false;
+        return true;
+    }
+    if (cJSON_IsArray(selection) && cJSON_IsArray(supplied)) {
+        const Json *a = selection->child, *b = supplied->child;
+        for (; a && b; a = a->next, b = b->next)
+            if (!argument_subset(a, b)) return false;
+        return !a && !b;
+    }
+    return cJSON_Compare(selection, supplied, true);
+}
+
+static Json *attached_acoustic_arguments(const Json *player)
+{
+    const char *setup = strstr(js(player, "content"), "Acoustic setup:");
+    if (!setup) return nullptr;
+    Json *value = cJSON_ParseWithOpts(setup + strlen("Acoustic setup:"), nullptr, true);
+    const Json *request = cJSON_IsArray(value) && cJSON_GetArraySize(value) == 1 ? value->child : value;
+    Json *arguments = nullptr;
+    if (!strcmp(js(request, "neutrino_tool"), "acoustic") &&
+        at(request, "min") && at(request, "max") && at(request, "source") && at(request, "listener")) {
+        arguments = cJSON_Duplicate(request, true);
+        if (!arguments) abort();
+    }
+    cJSON_Delete(value);
+    return arguments;
+}
+
+static Json *supplied_acoustic_arguments(const Preview *p, const Json *selection)
+{
+    if (strcmp(js(selection, "neutrino_tool"), "acoustic")) return nullptr;
+    const Json *player = story_pick(p->story, p->parent);
+    if (strcmp(js(player, "role"), "user")) return nullptr;
+    Json *attached = attached_acoustic_arguments(player);
+    if (attached) {
+        if (argument_subset(selection, attached) && !cJSON_Compare(selection, attached, true)) return attached;
+        cJSON_Delete(attached);
+        return nullptr;
+    }
+    Json *match = nullptr;
+    const char *start = js(player, "content");
+    while ((start = strpbrk(start, "[{"))) {
+        const char *end;
+        Json *parsed = cJSON_ParseWithOpts(start, &end, false);
+        const Json *item = cJSON_IsArray(parsed) ? parsed->child : parsed;
+        for (; item; item = item->next) {
+            if (strcmp(js(item, "neutrino_tool"), "acoustic") ||
+                !at(item, "min") || !at(item, "max") || !at(item, "source") || !at(item, "listener") ||
+                !argument_subset(selection, item)) continue;
+            if (!match) {
+                match = cJSON_Duplicate(item, true);
+                if (!match) abort();
+            } else if (!cJSON_Compare(match, item, true)) {
+                cJSON_Delete(match);
+                cJSON_Delete(parsed);
+                return nullptr;
+            }
+        }
+        start = parsed ? end : start + 1;
+        cJSON_Delete(parsed);
+    }
+    if (match && cJSON_Compare(match, selection, true)) {
+        cJSON_Delete(match);
+        return nullptr;
+    }
+    return match;
+}
+
+bool simulation_attached_acoustic_turn(const Preview *p)
+{
+    if (!simulation_enabled(p->story)) return false;
+    const Json *player = story_pick(p->story, p->parent);
+    if (strcmp(js(player, "role"), "user")) return false;
+    Json *arguments = attached_acoustic_arguments(player);
+    bool attached = arguments != nullptr;
+    cJSON_Delete(arguments);
+    return attached;
+}
+
+bool simulation_acoustic_selection_prompt(const Preview *p, Text *out, const char *action)
+{
+    if (!simulation_enabled(p->story)) return false;
+    const char selector[] = "{\"neutrino_tool\":\"acoustic\"}";
+    Json *parsed = cJSON_Parse(selector);
+    Json *arguments = supplied_acoustic_arguments(p, parsed);
+    cJSON_Delete(parsed);
+    if (!arguments) return false;
+    bool completed = already_requested(p, arguments);
+    cJSON_Delete(arguments);
+    player_reference(out, action, true);
+    if (!completed)
+        format(out, "\n\nThe current acoustic setup is already attached to this turn. "
+                    "Select it with %s and leave the coordinates and materials to the simulator.", selector);
+    return true;
+}
+
+static void trace_acoustic_selection(Preview *p, const Json *expanded, const char *request)
+{
+    if (expanded)
+        format(&p->tool_results, "Narrator acoustic selection: %s\nUsing the matching player-supplied acoustic arguments.\n",
+               request);
 }
 
 static void execute_tool(Preview *p, const Json *op, const char *json)
@@ -377,12 +508,18 @@ static bool execute_read_only_batch(Preview *p, const Json *batch, const char *j
         if (!cJSON_IsObject(item) || !read_only_tool(js(item, "neutrino_tool"))) return false;
     format(&p->tool_results, "Read-only batch submitted by the narrator:\n%s\n", json);
     cJSON_ArrayForEach(item, batch) {
-        char *request = cJSON_PrintUnformatted(item);
-        if (!request) abort();
-        if (already_requested(p, item))
-            format(&p->tool_results, "Repeated tool request skipped inside the batch.\n%s\n", request);
-        else execute_tool(p, item, request);
-        free(request);
+        Json *expanded = supplied_acoustic_arguments(p, item);
+        const Json *selected = expanded ? expanded : item;
+        char *raw = cJSON_PrintUnformatted(item);
+        char *effective = expanded ? cJSON_PrintUnformatted(expanded) : raw;
+        if (!raw || !effective) abort();
+        trace_acoustic_selection(p, expanded, raw);
+        if (already_requested(p, selected))
+            format(&p->tool_results, "Repeated tool request skipped inside the batch.\n%s\n", effective);
+        else execute_tool(p, selected, effective);
+        if (expanded) cJSON_free(effective);
+        cJSON_free(raw);
+        cJSON_Delete(expanded);
     }
     p->tool_prose_only = true;
     return true;
@@ -448,18 +585,27 @@ SimulationReply simulation_tool_reply(Preview *p, const char *body)
         cJSON_Delete(op);
         return SIM_REGENERATE;
     }
-    const char *tool = js(op, "neutrino_tool");
-    bool duplicate = already_requested(p, op);
+    Json *expanded = supplied_acoustic_arguments(p, op);
+    const Json *selected = expanded ? expanded : op;
+    const char *tool = js(selected, "neutrino_tool");
+    bool duplicate = already_requested(p, selected);
     if (duplicate || (!*tool && p->tool_requests)) {
         append(&p->tool_results, duplicate ? "Repeated tool request skipped. Finishing in prose.\n" :
                "Discarded structured output without a valid tool name. Finishing in prose.\n");
         if (json.len) format(&p->tool_results, "%s\n", str(&json));
         p->tool_prose_only = true;
         release(&json);
+        cJSON_Delete(expanded);
         cJSON_Delete(op);
         return SIM_REGENERATE;
     }
-    execute_tool(p, op, str(&json));
+    char *effective = expanded ? cJSON_PrintUnformatted(expanded) : nullptr;
+    if (expanded && !effective) abort();
+    trace_acoustic_selection(p, expanded, str(&json));
+    execute_tool(p, selected, expanded ? effective : str(&json));
+    if (expanded && simulation_attached_acoustic_turn(p)) p->tool_prose_only = true;
+    cJSON_free(effective);
+    cJSON_Delete(expanded);
     release(&json);
     cJSON_Delete(op);
     return SIM_REGENERATE;
