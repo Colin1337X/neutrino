@@ -560,7 +560,7 @@ bool memory_tick(App *app)
         lane->task = MEMORY_IDLE;
         return true;
     }
-    if (app->preview.job || monotonic_ms() < lane->after) return false;
+    if (preview_busy(&app->preview) || monotonic_ms() < lane->after) return false;
     lane->after = monotonic_ms() + 250;
     Json *story, *node;
     cJSON_ArrayForEach(story, at(app->ws.root, "stories")) {

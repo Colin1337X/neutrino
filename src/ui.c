@@ -6,10 +6,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define ROOT "\x1b[48;2;17;20;27m"
-#define RAIL "\x1b[48;2;22;27;36m"
-#define FIELD "\x1b[48;2;26;32;44m"
-#define PICK "\x1b[48;2;39;58;64m"
+#define ROOT "\x1b[48;2;13;17;25m"
+#define RAIL "\x1b[48;2;19;25;36m"
+#define FIELD "\x1b[48;2;23;31;44m"
+#define PICK "\x1b[48;2;28;57;59m"
+#define PLUM "\x1b[48;2;46;38;65m"
 #define TXT "\x1b[38;2;223;231;238m"
 #define DIM "\x1b[38;2;156;171;190m"
 #define QUIET "\x1b[38;2;128;144;165m"
@@ -35,8 +36,9 @@ static Layout layout(const App *a)
     l.left = (a->cols - l.width) / 2;
     l.top = 6;
     l.height = a->rows - 12;
-    l.rail = !a->compact && l.width >= 75 ? 26 : a->focus == LIBRARY ? minimum(26, l.width / 2) : 0;
-    l.detail = !a->compact && l.width >= 104 ? 24 : 0;
+    l.rail = l.height < 4 ? 0 : !a->compact && l.width >= 75 ? 26 :
+             a->focus == LIBRARY ? minimum(26, l.width / 2) : 0;
+    l.detail = l.height >= 4 && !a->compact && l.width >= 104 ? 24 : 0;
     l.main_x = l.left + l.rail;
     l.main = l.width - l.rail - l.detail;
     l.detail_x = l.main_x + l.main;
@@ -92,6 +94,15 @@ static void cell(App *a, int x, int y, int width, const char *style, const char 
     styled(a, style);
     display(a, label, strlen(label), minimum(width, a->cols - x));
 }
+static void clipped_cell(App *a, int x, int y, int width, const char *style, const char *label)
+{
+    if (width < 2 || display_width(label, strlen(label)) <= width) {
+        cell(a, x, y, width, style, label);
+        return;
+    }
+    cell(a, x, y, width - 1, style, label);
+    cell(a, x + width - 1, y, 1, style, "…");
+}
 static void paint(App *a, int x, int y, int width, const char *style)
 {
     if (width <= 0 || y < 0 || y >= a->rows) return;
@@ -109,6 +120,24 @@ static void right(App *a, int edge, int y, int max, const char *style, const cha
 {
     int width = minimum(display_width(label, strlen(label)), max);
     cell(a, edge - width, y, width, style, label);
+}
+static void edge(App *a, int x, int y, int width, const char *style, bool top)
+{
+    cell(a, x, y, 1, style, top ? "╭" : "╰");
+    rule(a, x + 1, y, width - 2, style);
+    cell(a, x + width - 1, y, 1, style, top ? "╮" : "╯");
+}
+static void card_row(App *a, int x, int y, int width, const char *fill, const char *border)
+{
+    paint(a, x + 1, y, width - 2, fill);
+    cell(a, x, y, 1, border, "│");
+    cell(a, x + width - 1, y, 1, border, "│");
+}
+static void card(App *a, int x, int y, int width, int height, const char *border)
+{
+    edge(a, x, y, width, border, true);
+    for (int row = 1; row < height - 1; row++) card_row(a, x, y + row, width, RAIL, border);
+    edge(a, x, y + height - 1, width, border, false);
 }
 
 static void add_row(Rows *r, size_t start, size_t end)
@@ -243,39 +272,40 @@ int ui_command_matches(const App *a, int *results, int cap)
 
 static void header(App *a, const Layout *l)
 {
-    cell(a, l->left + 2, 1, l->width - 4, ROOT MINT BOLD, "◈  NEUTRINO");
-    if (l->width >= 61)
-        cell(a, l->left + 17, 1, l->width - 38, ROOT QUIET NORMAL, "FICTION WORKSPACE");
+    cell(a, l->left + 2, 1, l->width - 4, a->roleplay ? ROOT LAV BOLD : ROOT MINT BOLD, "◈  NEUTRINO");
 }
 static void header_tabs(App *a, const Layout *l)
 {
-    right(a, l->left + l->width - 2, 1, 22, ROOT QUIET NORMAL, a->demo ? "DEMO WORKSPACE" : "LOCAL WORKSPACE");
+    right(a, l->left + l->width - 2, 1, 22, ROOT QUIET NORMAL,
+          a->demo ? "DEMO WORKSPACE" : a->ssh_session ? "SSH WORKSPACE" : "LOCAL WORKSPACE");
     int x = l->left + 2;
-    cell(a, x, 3, 18, a->roleplay ? ROOT DIM NORMAL : PICK MINT BOLD, "  Manuscript  ");
-    cell(a, x + 15, 3, 14, a->roleplay ? PICK LAV BOLD : ROOT DIM NORMAL, "  Roleplay  ");
+    cell(a, x, 3, 15, a->roleplay ? ROOT DIM NORMAL : PICK MINT BOLD,
+         a->roleplay ? "   Manuscript  " : " ◆ Manuscript  ");
+    cell(a, x + 16, 3, 14, a->roleplay ? PLUM LAV BOLD : ROOT DIM NORMAL,
+         a->roleplay ? " ◆ Roleplay  " : "   Roleplay  ");
     if (l->width >= 62) right(a, l->left + l->width - 2, 3, 28, ROOT QUIET NORMAL, "F2 switch mode");
     rule(a, l->left + 1, 4, l->width - 2, ROOT LINE NORMAL);
 }
 static void library(App *a, const Layout *l)
 {
-    if (!l->rail) return;
+    if (!l->rail || l->height < 4) return;
     int x = l->left + 1, width = l->rail - 2;
-    for (int i = 0; i <= l->height; i++) paint(a, x, l->top + i - 1, width, RAIL);
-    cell(a, x + 2, l->top, width - 4, a->focus == LIBRARY ? RAIL MINT BOLD : RAIL DIM BOLD, "LIBRARY");
-    cell(a, x + 2, l->top + 2, width - 4, RAIL QUIET NORMAL, a->roleplay ? "STORIES" : "MANUSCRIPT");
-    int capacity = maximum(1, l->height - 6), count = ui_library_size(a);
+    card(a, x, l->top - 1, width, l->height + 2, a->focus == LIBRARY ?
+         (a->roleplay ? RAIL LAV NORMAL : RAIL MINT NORMAL) : RAIL LINE NORMAL);
+    cell(a, x + 2, l->top, width - 4, RAIL TXT BOLD, a->roleplay ? "Stories" : "Manuscript library");
+    int capacity = maximum(1, l->height - 3), count = ui_library_size(a);
     if (a->rail_cursor >= a->rail_offset + capacity) a->rail_offset = a->rail_cursor - capacity + 1;
     if (a->rail_cursor < a->rail_offset) a->rail_offset = a->rail_cursor;
-    int y = l->top + 4;
+    int y = l->top + 2;
     for (int i = a->rail_offset; i < count && i < a->rail_offset + capacity; i++, y++) {
         Json *item = ui_library_at(a, i);
         const char *name = a->roleplay ? js(item, "title") : item ? js(item, "name") : "Scratchpad";
         bool active = item == (a->roleplay ? a->story : a->scene);
         bool cursor = a->focus == LIBRARY && i == a->rail_cursor;
-        const char *style = active || cursor ? PICK MINT : RAIL DIM;
+        const char *style = active || cursor ? (a->roleplay ? PLUM LAV : PICK MINT) : RAIL DIM;
         paint(a, x + 1, y, width - 2, style);
         cell(a, x + 2, y, 2, style, cursor ? "›" : active ? "◆" : "·");
-        cell(a, x + 4, y, width - 5, style, name);
+        clipped_cell(a, x + 4, y, width - 5, style, name);
     }
     if (!count) cell(a, x + 2, y, width - 4, RAIL QUIET, "No stories yet");
     cell(a, x + 2, l->top + l->height - 1, width - 4, RAIL QUIET NORMAL,
@@ -294,17 +324,20 @@ static int word_count(const char *s)
 }
 static void detail(App *a, const Layout *l)
 {
-    if (!l->detail) return;
+    if (!l->detail || l->height < 4) return;
     int x = l->detail_x, y = l->top, w = l->detail - 3;
-    for (int i = 0; i <= l->height; i++) paint(a, x, y + i - 1, l->detail - 1, RAIL);
+    card(a, x, y - 1, l->detail - 1, l->height + 2, RAIL LINE NORMAL);
     x += 2;
-    cell(a, x, y, w, RAIL DIM BOLD, "INSPECTOR");
+    w -= 2;
+    cell(a, x, y, w, RAIL TXT BOLD, "Inspector");
     if (l->height < 12) return;
     char stat[80];
     cell(a, x, y + 2, w, RAIL QUIET NORMAL, a->roleplay ? "ACTIVE PATH" : "DRAFT");
-    if (a->roleplay)
-        snprintf(stat, sizeof stat, "#%d  ·  %d messages", number(a->story, "head"),
-                 cJSON_GetArraySize(at(a->story, "nodes")));
+    if (a->roleplay) {
+        int messages = cJSON_GetArraySize(at(a->story, "nodes"));
+        snprintf(stat, sizeof stat, "#%d  ·  %d message%s", number(a->story, "head"), messages,
+                 messages == 1 ? "" : "s");
+    }
     else snprintf(stat, sizeof stat, "%d words  ·  rev %d", word_count(a->editing ?
                   str(&a->edit) : scene_text(&a->ws, a->scene)), number(a->scene, "version"));
     cell(a, x, y + 3, w, RAIL TXT, stat);
@@ -328,10 +361,11 @@ static void detail(App *a, const Layout *l)
     cell(a, x, y + 9, w, RAIL TXT, ui_model(a));
     if (l->height > 16) {
         int n = cJSON_GetArraySize(at(a->ws.root, "bible"));
-        snprintf(stat, sizeof stat, "F10  Story Bible · %d", n);
+        rule(a, x, y + 11, w, RAIL LINE NORMAL);
+        snprintf(stat, sizeof stat, "F10 Story Bible (%d)", n);
         cell(a, x, y + 12, w, RAIL TXT, a->roleplay ? "/memory  Compendium" : stat);
-        cell(a, x, y + 13, w, RAIL TXT, a->roleplay ? "/trace   Prompt trace" : "F6   Context sources");
-        cell(a, x, y + 14, w, RAIL TXT, a->roleplay ? "/world   Room & items" : "/revisions   History");
+        cell(a, x, y + 13, w, RAIL TXT, a->roleplay ? "/trace   Prompt" : "F6   Context");
+        cell(a, x, y + 14, w, RAIL TXT, a->roleplay ? "/world   Room" : "/revisions History");
     }
 }
 static void breadcrumbs(App *a, const Layout *l, int x)
@@ -349,7 +383,7 @@ static void breadcrumbs(App *a, const Layout *l, int x)
             else append_n(&crumb, s, 1);
         }
     } else append(&crumb, "MANUSCRIPT");
-    cell(a, x, l->top, l->main - 7, ROOT QUIET NORMAL, str(&crumb));
+    clipped_cell(a, x, l->top, l->main - 7, ROOT QUIET NORMAL, str(&crumb));
     release(&crumb);
 }
 
@@ -393,14 +427,19 @@ static void manuscript(App *a, const Layout *l, int x, int y, int width, int hei
 {
     const char *s = a->editing ? str(&a->edit) : scene_text(&a->ws, a->scene);
     if (!*s && !a->editing) {
+        if (height < 3) {
+            cell(a, x, y, width, ROOT MINT, "F4 edit  ·  /draft generate");
+            a->scroll = 0;
+            return;
+        }
         if (a->scene) {
-            cell(a, x, y + 1, width, ROOT DIM NORMAL, "This scene is empty.");
-            cell(a, x, y + 3, width, ROOT MINT, "F4  Start writing     /draft  Generate a first pass");
+            cell(a, x, y, width, ROOT DIM NORMAL, "This scene is empty.");
+            cell(a, x, y + 2, width, ROOT MINT, "F4  Start writing     /draft  Generate a first pass");
         } else {
-            cell(a, x, y + 1, width, ROOT MINT BOLD, "Write a scene or play it out.");
-            cell(a, x, y + 3, width, ROOT TXT NORMAL, "F4          Write in the scratchpad");
-            cell(a, x, y + 4, width, ROOT TXT, "/scene      Create a manuscript scene");
-            cell(a, x, y + 5, width, ROOT TXT, "/import     Bring in a project, session or character");
+            cell(a, x, y, width, ROOT MINT BOLD, "Write a scene or play it out.");
+            cell(a, x, y + 2, width, ROOT TXT NORMAL, "F4          Write in the scratchpad");
+            if (height >= 4) cell(a, x, y + 3, width, ROOT TXT, "/scene      Create a manuscript scene");
+            if (height >= 5) cell(a, x, y + 4, width, ROOT TXT, "/import     Bring in a project, session or character");
         }
         a->scroll = 0;
         return;
@@ -444,7 +483,7 @@ static void roleplay_rows(App *a, Text *body)
         append(body, "\n\n");
     }
     Preview *p = &a->preview;
-    if (p->job && p->story && p->story == a->story) {
+    if (preview_busy(p) && p->story && p->story == a->story) {
         format(body, "◆  %s  ·  %s\n", p->speaker.len ? str(&p->speaker) : *character ? character : "Narrator",
                p->recalling ? "recalling memory" : "responding");
         append(body, str(&p->candidates[0].body));
@@ -485,21 +524,28 @@ static void panel(App *a, const Layout *l, int x, int y, int width, int height)
     if (a->panel_preview) {
         Candidate *c = &p->candidates[p->current];
         char label[140];
-        snprintf(label, sizeof label, "%s  ·  %d/%d  ·  %s", c->label, p->current + 1, p->count,
-                 p->job && p->running == p->current ? "streaming" : p->reasoning ? "reasoning" : "candidate");
-        cell(a, x, l->top, width, ROOT GOLD NORMAL, label);
-        cell(a, x, l->top + 1, width, ROOT TXT BOLD, "Review candidate");
+        int ready = 0;
+        for (int i = 0; i < p->count; i++)
+            if (p->candidates[i].finished && p->candidates[i].body.len &&
+                !p->candidates[i].error.len) ready++;
+        snprintf(label, sizeof label, "%s  ·  %d of %d ready",
+                 p->reasoning ? "Reasoning" : "Candidate review", ready, p->count);
+        cell(a, x, l->top, width, ROOT QUIET NORMAL, label);
+        const char *state = c->job ? "Streaming" : c->error.len ? "Interrupted" :
+                            !c->finished ? "Queued" : c->body.len ? "Ready" : "Empty";
+        snprintf(label, sizeof label, "%d/%d  %s  ·  %s", p->current + 1, p->count, c->label, state);
+        cell(a, x, l->top + 1, width, c->job ? ROOT GOLD BOLD : ROOT TXT BOLD, label);
         if (p->reasoning) append(&text, c->thinking.len ? str(&c->thinking) : "The provider has supplied no reasoning.");
         else if (c->body.len) append(&text, str(&c->body));
-        else append(&text, p->current > p->running ? "Waiting for this candidate." :
-                    p->job ? "Waiting for the model…" : "No text received.");
+        else append(&text, c->job ? "Waiting for the model…" :
+                    !c->finished ? "Waiting for a worker…" : "No text received.");
         if (c->error.len) format(&text, "\n\n%s", str(&c->error));
     } else {
         cell(a, x, l->top, width, ROOT MINT NORMAL, "WORKSPACE");
         cell(a, x, l->top + 1, width, ROOT TXT BOLD, a->info_title);
         append(&text, str(&a->info));
     }
-    rule(a, x, l->top + 2, width, ROOT LINE NORMAL);
+    if (y > l->top + 2) rule(a, x, l->top + 2, width, ROOT LINE NORMAL);
     Rows rows = wrap(str(&text), text.len, width);
     a->panel_scroll = clamp(a->panel_scroll, 0, maximum(0, rows.count - height));
     draw_lines(a, str(&text), rows, a->panel_scroll, x, y, width, height, 0, 0);
@@ -511,15 +557,23 @@ static void panel(App *a, const Layout *l, int x, int y, int width, int height)
 static void composer(App *a, const Layout *l, int *cx, int *cy)
 {
     int x = l->left + 1, y = a->rows - 5, w = l->width - 2;
-    const char *style = a->focus == COMPOSER ? FIELD MINT NORMAL : FIELD DIM NORMAL;
-    rule(a, x, y, w, ROOT LINE NORMAL);
-    paint(a, x, y + 1, w, FIELD);
+    const char *accent = a->roleplay ? ROOT LAV NORMAL : ROOT MINT NORMAL;
+    const char *border = a->focus == COMPOSER ? accent : ROOT LINE NORMAL;
+    const char *style = a->focus == COMPOSER ? (a->roleplay ? FIELD LAV BOLD : FIELD MINT BOLD) : FIELD DIM NORMAL;
+    edge(a, x, y, w, border, true);
+    cell(a, x + 2, y, 18, border, a->editing ? " Editor " : a->roleplay ? " Next action " : " Writing direction ");
+    card_row(a, x, y + 1, w, FIELD, border);
+    edge(a, x, y + 2, w, border, false);
     cell(a, x + 1, y + 1, 4, style, a->editing ? "✎" : a->roleplay ? "›" : "❯");
     int width = w - 6;
     if (a->editing) {
         cell(a, x + 4, y + 1, width, FIELD TXT,
              "Editing manuscript   Ctrl+S save   Ctrl+Space select   Esc close");
         return;
+    }
+    if (w >= 67) {
+        right(a, x + w - 2, y + 1, 9, FIELD QUIET, "↵ send");
+        width -= 9;
     }
     const char *s = str(&a->prompt);
     size_t start = 0;
@@ -531,8 +585,9 @@ static void composer(App *a, const Layout *l, int *cx, int *cy)
         used += glyph;
         i = prev;
     }
-    const char *placeholder = a->roleplay ? "Write your next action, or type / for commands…" :
-                                           "Give a writing direction, or type / for commands…";
+    const char *placeholder = width < 39 ? "Type / for commands" :
+                              a->roleplay ? "What do you do?  / for commands" :
+                                           "What should happen next?  / for commands";
     cell(a, x + 4, y + 1, width, FIELD TXT, a->prompt.len ? s + start : "");
     if (!a->prompt.len) cell(a, x + 4, y + 1, width, FIELD QUIET, placeholder);
     if (a->focus == COMPOSER) {
@@ -544,15 +599,17 @@ static void palette(App *a, const Layout *l)
 {
     if (!a->slash || a->focus != COMPOSER) return;
     int matches[COMMAND_MATCH_LIMIT], count = ui_command_matches(a, matches, COMMAND_MATCH_LIMIT);
-    int shown = minimum(count ? count : 1, minimum(7, maximum(1, a->rows - 10)));
+    int shown = minimum(count ? count : 1, minimum(7, maximum(1, a->rows - 12)));
     int first = clamp(a->command_cursor - shown + 1, 0, maximum(0, count - shown));
-    int x = l->left + 2, y = a->rows - 6 - shown, w = minimum(78, l->width - 4);
-    paint(a, x, y, w, RAIL);
-    cell(a, x + 2, y, w - 4, RAIL MINT BOLD, "COMMANDS");
+    int x = l->main_x + 2, y = a->rows - 7 - shown, w = minimum(78, l->main - 4);
+    const char *border = a->roleplay ? RAIL LAV NORMAL : RAIL MINT NORMAL;
+    card(a, x, y, w, shown + 2, border);
+    cell(a, x + 2, y, w - 4, border, " Commands ");
+    if (w >= 52) right(a, x + w - 2, y, 24, border, " ↑↓ select  Esc close ");
     for (int i = 0; i < shown; i++) {
         int n = first + i;
         const char *bg = n == a->command_cursor && count ? PICK : RAIL;
-        paint(a, x, y + i + 1, w, bg);
+        paint(a, x + 1, y + i + 1, w - 2, bg);
         if (count) {
             const Command *cmd = &commands[matches[n]];
             Text name = {0};
@@ -581,14 +638,14 @@ static void frame(App *a)
     detail(a, &l);
     int title_x = l.main_x + 3, x = l.main_x + 3, width = content_width(&l);
     int y = l.top + 4, height = maximum(1, l.height - 5);
-    if (l.height < 6) { y = l.top + 2; height = 1; }
+    if (l.height < 7) { y = l.top + 2; height = maximum(1, a->rows - 5 - y); }
     int cx = -1, cy = -1;
     if (a->view_panel) panel(a, &l, x, y, width, height);
     else {
         breadcrumbs(a, &l, title_x);
-        cell(a, title_x, l.top + 1, l.main - 6, ROOT TXT BOLD,
-             a->roleplay ? ui_story_name(a) : ui_scene_name(a));
-        if (l.height >= 6) rule(a, x, l.top + 2, width, ROOT LINE NORMAL);
+        clipped_cell(a, title_x, l.top + 1, l.main - 6, ROOT TXT BOLD,
+                     a->roleplay ? ui_story_name(a) : ui_scene_name(a));
+        if (y > l.top + 2) rule(a, x, l.top + 2, width, ROOT LINE NORMAL);
         if (a->roleplay) roleplay(a, &l, x, y, width, height);
         else manuscript(a, &l, x, y, width, height, &cx, &cy);
     }
@@ -600,12 +657,12 @@ static void frame(App *a)
         cell(a, title_x, a->rows - 7, l.main - 6, ROOT QUIET NORMAL, hint);
     }
     composer(a, &l, &cx, &cy);
-    const char *state = a->status.len ? str(&a->status) : "Ready · /server shows the inference address";
-    int sw = l.width >= 102 ? l.width - 41 : l.width - 4;
-    cell(a, l.left + 2, a->rows - 2, sw, a->preview.job ? ROOT GOLD : ROOT DIM, state);
-    if (l.width >= 102)
-        right(a, l.left + l.width - 2, a->rows - 2, 39, ROOT QUIET NORMAL,
-              "F1 help   Ctrl+P commands   Ctrl+Q quit");
+    const char *state = a->status.len ? str(&a->status) : "Ready";
+    const char *keys = l.width >= 94 ? "F1 help   Ctrl+P commands   Ctrl+Q quit" :
+                       l.width >= 55 ? "Ctrl+P commands" : "F1 help";
+    int reserve = (int)strlen(keys) + 3;
+    cell(a, l.left + 2, a->rows - 2, l.width - reserve - 4, preview_busy(&a->preview) ? ROOT GOLD : ROOT DIM, state);
+    right(a, l.left + l.width - 2, a->rows - 2, reserve, ROOT QUIET NORMAL, keys);
     palette(a, &l);
     styled(a, ROOT TXT NORMAL);
     if (cx >= 0 && cy >= 0) editor_cursor(a, cx, cy);

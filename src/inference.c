@@ -1,6 +1,7 @@
 #include "neutrino.h"
 
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -38,7 +39,8 @@ struct Inference {
     char *url, *key, *body;
     int timeout_ms;
     Text out, reasoning, error;
-    bool cancel, done, started;
+    atomic_bool cancel;
+    bool done, started;
 #ifdef _WIN32
     SRWLOCK lock;
     HANDLE thread;
@@ -72,10 +74,7 @@ static void unlock(Inference *j)
 }
 static bool cancelled(Inference *j)
 {
-    lock(j);
-    bool result = j->cancel;
-    unlock(j);
-    return result;
+    return atomic_load_explicit(&j->cancel, memory_order_relaxed);
 }
 
 static bool read_choice(Response *r, const char *packet)
@@ -285,7 +284,7 @@ static void *worker(void *arg)
         }
     } else if (ok && r.sse && r.pending.len) receive(&r, "\n", 1);
     lock(j);
-    if (j->cancel) {
+    if (cancelled(j)) {
         clear(&j->error);
         append(&j->error, "Cancelled. Any partial output is available for review.");
     } else if (!j->error.len) {
@@ -318,6 +317,7 @@ Inference *inference_request(const char *endpoint, const char *key, const char *
 #endif
     Inference *j = calloc(1, sizeof(*j));
     if (!j) abort();
+    atomic_init(&j->cancel, false);
     Text url = {0};
     size_t len = strlen(endpoint);
     while (len && endpoint[len - 1] == '/') len--;
@@ -384,9 +384,7 @@ bool inference_read(Inference *j, Text *out, Text *thinking, Text *error)
 }
 void inference_cancel(Inference *j)
 {
-    lock(j);
-    j->cancel = true;
-    unlock(j);
+    atomic_store_explicit(&j->cancel, true, memory_order_relaxed);
 }
 void inference_free(Inference *j)
 {

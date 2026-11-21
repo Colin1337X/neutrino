@@ -7,6 +7,10 @@
 #include <signal.h>
 #include "cJSON.h"
 
+#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L
+#error "Neutrino requires a C23 compiler."
+#endif
+
 typedef cJSON Json;
 typedef struct { char *data; size_t len, cap; } Text;
 #define FILE_LIMIT (32u * 1024u * 1024u)

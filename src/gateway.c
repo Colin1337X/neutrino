@@ -329,24 +329,25 @@ static void pump_client(Client *c, const char *token)
         monotonic_ms() - c->touched > (c->messages ? 300000u : 30000u)) discard_socket(c);
 }
 
-static void dispatch(Client clients[CLIENTS])
+static void dispatch(Client clients[CLIENTS], int workers)
 {
-    bool busy[3] = {0};
+    int active[3] = {0};
     for (int i = 0; i < CLIENTS; i++)
-        if (clients[i].job) busy[clients[i].route.lane] = true;
+        if (clients[i].job) active[clients[i].route.lane]++;
     /* Players go ahead of agents waiting for a shared provider slot. */
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < CLIENTS; i++) {
             Client *c = &clients[i];
-            if (!c->messages || busy[c->route.lane] ||
-                ((pass == 0) != (c->route.options.max_tokens == 0 || c->route.options.max_tokens == 1))) continue;
             Route *r = &c->route;
+            int limit = r->options.slot >= 0 || r->lane != 0 ? 1 : workers;
+            if (!c->messages || active[r->lane] >= limit ||
+                ((pass == 0) != (c->route.options.max_tokens == 0 || c->route.options.max_tokens == 1))) continue;
             c->job = inference_request(r->endpoint, r->key, r->model, c->messages, r->options);
             cJSON_Delete(c->messages);
             c->messages = NULL;
             c->touched = monotonic_ms();
             if (c->job) {
-                busy[r->lane] = true;
+                active[r->lane]++;
                 append(&c->send, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
                                   "Cache-Control: no-store\r\nConnection: close\r\n\r\n");
             } else http_error(c, 502, "Upstream Unavailable");
@@ -360,6 +361,12 @@ int inference_server(int port, const volatile sig_atomic_t *stop)
         fputs("Set NEUTRINO_MODEL in the server environment before starting Neutrino.\n", stderr);
         return 2;
     }
+    const char *configured_workers = env("NEUTRINO_WORKERS", "2");
+    if (strlen(configured_workers) != 1 || configured_workers[0] < '1' || configured_workers[0] > '4') {
+        fputs("NEUTRINO_WORKERS must be a number from 1 to 4.\n", stderr);
+        return 2;
+    }
+    const int workers = configured_workers[0] - '0';
 #ifdef _WIN32
     WSADATA data;
     if (WSAStartup(MAKEWORD(2, 2), &data)) return 1;
@@ -398,7 +405,7 @@ int inference_server(int port, const volatile sig_atomic_t *stop)
                 }
             }
             for (int i = 0; i < CLIENTS; i++) pump_client(&clients[i], token);
-            dispatch(clients);
+            dispatch(clients, workers);
             pause_ms(12);
         }
         for (int i = 0; i < CLIENTS; i++) discard_socket(&clients[i]);

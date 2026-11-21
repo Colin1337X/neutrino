@@ -16,7 +16,12 @@ typedef struct {
     Text output, reasoning, error;
     Json *cached_picks;
 } MemoryLane;
-typedef struct { Text body, thinking, error; char label[64]; } Candidate;
+typedef struct {
+    Text body, thinking, error;
+    Inference *job;
+    char label[64];
+    bool finished;
+} Candidate;
 typedef struct {
     Operation op;
     Json *scene, *story;
@@ -26,11 +31,16 @@ typedef struct {
     size_t start, end, insert_at;
     int version, parent, head;
     Candidate candidates[30];
-    int count, current, running;
+    int count, current, next, active;
     bool open, reasoning, stopped, complete, recalling, repeat_retry;
     Json *memory_picks;
-    Inference *job;
+    Inference *recall_job;
 } Preview;
+
+static inline bool preview_busy(const Preview *preview)
+{
+    return preview->recall_job != nullptr || preview->active > 0;
+}
 typedef struct {
     Workspace ws;
     Json *scene, *story;

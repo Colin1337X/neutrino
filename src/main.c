@@ -188,7 +188,7 @@ static void show_preview(App *a)
 static void close_panel(App *a) { a->view_panel = false; a->focus = COMPOSER; }
 static void close_preview(App *a)
 {
-    if (a->preview.job) { status(a, "Esc cancels generation."); return; }
+    if (preview_busy(&a->preview)) { status(a, "Esc cancels generation."); return; }
     a->preview.open = false;
     close_panel(a);
 }
@@ -439,9 +439,24 @@ static Json *request_messages(App *a, const char *label)
     return messages;
 }
 
+static void cancel_preview(Preview *p)
+{
+    p->stopped = true;
+    if (p->recall_job) inference_cancel(p->recall_job);
+    for (int i = 0; i < p->next; i++)
+        if (p->candidates[i].job) inference_cancel(p->candidates[i].job);
+    for (; p->next < p->count; p->next++) {
+        Candidate *candidate = &p->candidates[p->next];
+        append(&candidate->error, "Cancelled before dispatch.");
+        candidate->finished = true;
+    }
+}
+
 static void release_preview(Preview *p)
 {
+    if (p->recall_job) inference_free(p->recall_job);
     for (size_t i = 0; i < sizeof p->candidates / sizeof *p->candidates; i++) {
+        if (p->candidates[i].job) inference_free(p->candidates[i].job);
         release(&p->candidates[i].body);
         release(&p->candidates[i].thinking);
         release(&p->candidates[i].error);
@@ -461,13 +476,14 @@ static void release_preview(Preview *p)
     cJSON_Delete(p->memory_picks);
     *p = (Preview){0};
 }
-static void next_candidate(App *a)
+static void start_candidate(App *a, int index)
 {
     Preview *p = &a->preview;
-    Candidate *c = &p->candidates[p->running];
+    Candidate *c = &p->candidates[index];
     Json *messages = request_messages(a, c->label);
     clear(&a->trace);
     format(&a->trace, "%s · %s · %s\n", operation_names[p->op], c->label, ui_model(a));
+    if (!p->story && p->count > 1) format(&a->trace, "Last dispatched candidate %d/%d\n", index + 1, p->count);
     if (p->story) {
         format(&a->trace, "Story: %s · parent #%d\n", js(p->story, "title"), p->parent);
         if (p->repeat_retry) append(&a->trace, "Second attempt · discarded a repeat of the previous reply.\n");
@@ -482,13 +498,53 @@ static void next_candidate(App *a)
     if (!wire) abort();
     append(&a->trace, wire);
     cJSON_free(wire);
-    p->job = app_inference(a, "narrator", messages);
+    c->finished = false;
+    c->job = app_inference(a, "narrator", messages);
     cJSON_Delete(messages);
-    if (!p->job) {
+    if (c->job) p->active++;
+    else {
         append(&c->error, "Could not start inference. Check /server and the server process.");
-        status(a, str(&c->error));
-        p->complete = true;
+        c->finished = true;
+        if (p->story) {
+            status(a, str(&c->error));
+            p->complete = true;
+        }
     }
+}
+
+static void dispatch_writing(App *a)
+{
+    Preview *p = &a->preview;
+    enum { CANDIDATE_WORKERS = 3 };
+    while (!p->stopped && p->active < CANDIDATE_WORKERS && p->next < p->count) {
+        const int index = p->next++;
+        start_candidate(a, index);
+    }
+    if (p->active || p->next != p->count) return;
+    p->complete = true;
+    bool ready = false, has_text = false;
+    for (int i = 0; i < p->count; i++) {
+        const Candidate *candidate = &p->candidates[i];
+        if (!candidate->body.len) continue;
+        has_text = true;
+        if (!candidate->error.len) ready = true;
+    }
+    if (p->stopped) status(a, ready ? "Cancelled · completed candidates are available" :
+        has_text ? "Generation cancelled · partial text is available for review" : "Generation cancelled");
+    else status(a, ready ? "Review ready · ←/→ candidates · /accept or /reject" :
+        p->candidates[0].error.len ? str(&p->candidates[0].error) : "The model returned no candidate text");
+}
+
+static bool read_candidate(Preview *p, Candidate *c)
+{
+    size_t before = c->body.len + c->thinking.len + c->error.len;
+    if (!inference_read(c->job, &c->body, &c->thinking, &c->error))
+        return before != c->body.len + c->thinking.len + c->error.len;
+    inference_free(c->job);
+    c->job = nullptr;
+    c->finished = true;
+    p->active--;
+    return true;
 }
 static bool begin_recall(App *a)
 {
@@ -517,10 +573,10 @@ static bool begin_recall(App *a)
     if (!strcmp(mode, "sync")) {
         Json *messages = memory_recall_prompt(p->story, p->parent, str(&p->objective));
         if (messages) {
-            p->job = memory_start_recall(a, p->story, messages);
+            p->recall_job = memory_start_recall(a, p->story, messages);
             cJSON_Delete(messages);
         }
-        if (p->job) {
+        if (p->recall_job) {
             p->recalling = true;
             status(a, "Recalling story memory · Esc cancels");
             return true;
@@ -563,7 +619,7 @@ static bool repeats_reply(const Preview *p, const Text *body)
 static void begin(App *a, Operation op, const char *objective, int parent, const char *speaker)
 {
     Preview *p = &a->preview;
-    if (p->job) { status(a, "A generation is already running. Esc cancels."); return; }
+    if (preview_busy(p)) { status(a, "A generation is already running. Esc cancels."); return; }
     if (op < NARRATE && a->roleplay) { status(a, "F2 switches to Manuscript for writing tools."); return; }
     if (op >= NARRATE && (!a->roleplay || !a->story)) { status(a, "Open a roleplay story first."); return; }
     release_preview(p);
@@ -629,18 +685,20 @@ static void begin(App *a, Operation op, const char *objective, int parent, const
     memory_pause(a);
     if (p->story && begin_recall(a)) return;
     status(a, "Generating · Esc cancels");
-    next_candidate(a);
+    if (p->story) {
+        p->next = 1;
+        start_candidate(a, 0);
+    } else dispatch_writing(a);
 }
 
 static bool update_generation(App *a)
 {
     Preview *p = &a->preview;
-    if (!p->job) return false;
-    Candidate *c = &p->candidates[p->running];
+    if (!preview_busy(p)) return false;
     if (p->recalling) {
-        if (!inference_read(p->job, &p->recall_output, &p->recall_thinking, &p->recall_error)) return false;
-        inference_free(p->job);
-        p->job = NULL;
+        if (!inference_read(p->recall_job, &p->recall_output, &p->recall_thinking, &p->recall_error)) return false;
+        inference_free(p->recall_job);
+        p->recall_job = nullptr;
         p->recalling = false;
         if (p->stopped || p->head != number(p->story, "head")) {
             p->open = false;
@@ -652,20 +710,23 @@ static bool update_generation(App *a)
         append(&p->memory_trace, p->memory_picks ? "Used synchronous model recall and lexical matches.\n" :
             "Model recall failed or returned invalid IDs. Used lexical recall.\n");
         status(a, "Generating · Esc cancels");
-        next_candidate(a);
+        p->next = 1;
+        start_candidate(a, 0);
         return true;
     }
-    size_t before = c->body.len + c->thinking.len + c->error.len;
-    if (!inference_read(p->job, &c->body, &c->thinking, &c->error))
-        return before != c->body.len + c->thinking.len + c->error.len;
-    inference_free(p->job);
-    p->job = NULL;
+    if (!p->story) {
+        bool changed = false;
+        int active = p->active;
+        for (int i = 0; i < p->next; i++)
+            if (p->candidates[i].job && read_candidate(p, &p->candidates[i])) changed = true;
+        if (p->active != active) dispatch_writing(a);
+        return changed;
+    }
+    Candidate *c = &p->candidates[0];
+    bool changed = read_candidate(p, c);
+    if (!c->finished) return changed;
     if (c->error.len || p->stopped) status(a, c->error.len ? str(&c->error) : "Generation cancelled");
-    else if (p->running + 1 < p->count && !p->stopped) {
-        p->running++;
-        next_candidate(a);
-        return true;
-    } else if (p->story) {
+    else {
         if (p->head == number(p->story, "head")) {
             if (repeats_reply(p, &c->body)) {
                 if (!p->repeat_retry) {
@@ -673,7 +734,7 @@ static bool update_generation(App *a)
                     clear(&c->body);
                     clear(&c->thinking);
                     status(a, "Repeated reply discarded · retrying");
-                    next_candidate(a);
+                    start_candidate(a, 0);
                 } else {
                     status(a, "The model repeated itself twice. /narrate retries the uncompleted turn.");
                     p->complete = true;
@@ -691,7 +752,7 @@ static bool update_generation(App *a)
             status(a, p->op == SWIPE ? "Alternate reply saved · /previous or /branch" : "Reply saved");
             save(a);
         } else status(a, "The active branch moved. The reply is available in F7.");
-    } else status(a, "Review ready · ←/→ candidates · /accept or /reject");
+    }
     p->complete = true;
     return true;
 }
@@ -764,9 +825,9 @@ static void view_context(App *a)
 static void accept(App *a, bool insert)
 {
     Preview *p = &a->preview;
-    if (p->job || !p->open || !p->complete) { status(a, "Wait for a completed candidate."); return; }
+    if (preview_busy(p) || !p->open || !p->complete) { status(a, "Wait for a completed candidate."); return; }
     Candidate *c = &p->candidates[p->current];
-    if (!c->body.len || c->error.len || p->current > p->running) {
+    if (!c->finished || !c->body.len || c->error.len) {
         status(a, "This candidate did not complete. Use /preview-save to keep partial text.");
         return;
     }
@@ -972,7 +1033,7 @@ static void set_selection(App *a, const char *arg)
 static void attach_story_file(App *a, const char *field, const char *path)
 {
     if (!a->roleplay || !a->story) { status(a, "Open a roleplay story first."); return; }
-    if (a->preview.job) { status(a, "Wait for generation to finish."); return; }
+    if (preview_busy(&a->preview)) { status(a, "Wait for generation to finish."); return; }
     char *data = read_file(path);
     Json *value = data ? cJSON_ParseWithOpts(data, NULL, 1) : NULL;
     free(data);
@@ -991,7 +1052,7 @@ static void attach_story_file(App *a, const char *field, const char *path)
 
 static void import_file(App *a, const char *arg)
 {
-    if (a->preview.open || a->preview.job) { status(a, "Close the candidate review before importing."); return; }
+    if (a->preview.open || preview_busy(&a->preview)) { status(a, "Close the candidate review before importing."); return; }
     Text error = {0};
     Json *result = workspace_import(&a->ws, arg, &error);
     if (!result) status(a, str(&error));
@@ -1009,9 +1070,8 @@ static void import_file(App *a, const char *arg)
 
 static void quit(App *a)
 {
-    if (a->preview.job) {
-        a->preview.stopped = true;
-        inference_cancel(a->preview.job);
+    if (preview_busy(&a->preview)) {
+        cancel_preview(&a->preview);
         status(a, "Cancelling generation. Quit after the connection closes.");
     } else if (workspace_save(&a->ws)) a->quit = true;
     else status(a, "Save failed. /export can write a backup before closing.");
@@ -1131,7 +1191,7 @@ static void slash_command(App *a, char *line)
         }
     } else if (!strcmp(line, "regenerate")) {
         Preview *p = &a->preview;
-        if (!p->open || p->story || p->job) status(a, "Open a completed writing preview first.");
+        if (!p->open || p->story || preview_busy(p)) status(a, "Open a completed writing preview first.");
         else {
             char *objective = copy(str(&p->objective));
             begin(a, p->op, objective, 0, NULL);
@@ -1226,7 +1286,7 @@ static void slash_command(App *a, char *line)
         if (!strncmp(arg, "recall", 6) && (!arg[6] || isspace((unsigned char)arg[6])))
             memory_binding(a, trim_left(arg + 6));
         else if (!*arg) status(a, ui_model(a));
-        else if (a->preview.job) status(a, "Finish or cancel generation before changing models.");
+        else if (preview_busy(&a->preview)) status(a, "Finish or cancel generation before changing models.");
         else if (strlen(arg) > 160 || strpbrk(arg, " \t\r\n")) status(a, "Enter one server-configured model ID or default.");
         else {
             set(a->ws.root, "serverNarrator", !strcmp(arg, "default") ? "" : arg);
@@ -1235,7 +1295,7 @@ static void slash_command(App *a, char *line)
         }
     } else if (!strcmp(line, "server")) {
         if (!*arg) status(a, ui_endpoint(a));
-        else if (a->preview.job || a->memory.job) status(a, "Wait for active requests before changing servers.");
+        else if (preview_busy(&a->preview) || a->memory.job) status(a, "Wait for active requests before changing servers.");
         else if (a->server_override || *env("NEUTRINO_SERVER", ""))
             status(a, "Restart without --server or NEUTRINO_SERVER to change the address here.");
         else if ((strncmp(arg, "http://", 7) && strncmp(arg, "https://", 8)) || strpbrk(arg, " \t\r\n?#@"))
@@ -1264,7 +1324,7 @@ static void submit(App *a)
 {
     if (!*trim_left(str(&a->prompt))) return;
     char *data = copy(trim_left(str(&a->prompt)));
-    if (*data != '/' && a->roleplay && a->preview.job) {
+    if (*data != '/' && a->roleplay && preview_busy(&a->preview)) {
         status(a, "A generation is already running. Esc cancels.");
         free(data);
         return;
@@ -1401,9 +1461,8 @@ static void key_event(App *a, int key)
     switch (key) {
         case 17: if (a->editing) edit_save(a); if (!a->editing) quit(a); return;
         case 3: case 27:
-            if (a->preview.job) {
-                a->preview.stopped = true;
-                inference_cancel(a->preview.job);
+            if (preview_busy(&a->preview)) {
+                cancel_preview(&a->preview);
                 status(a, "Cancelling generation…");
             } else if (a->slash) a->slash = false;
             else if (a->view_panel) close_panel(a);
@@ -1515,7 +1574,7 @@ static int run(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--workspace") && i + 1 < argc) path = argv[++i];
         else if (!strcmp(argv[i], "--import") && i + 1 < argc) import = argv[++i];
-        else if (!strcmp(argv[i], "--version")) { puts("Neutrino 0.3.0"); return 0; }
+        else if (!strcmp(argv[i], "--version")) { puts("Neutrino 0.4.0"); return 0; }
         else {
             bool help = !strcmp(argv[i], "--help") || !strcmp(argv[i], "-h");
             FILE *out = help ? stdout : stderr;
@@ -1592,10 +1651,7 @@ static int run(int argc, char **argv)
         }
         restore_terminal();
     }
-    if (a.preview.job) {
-        inference_cancel(a.preview.job);
-        inference_free(a.preview.job);
-    }
+    if (preview_busy(&a.preview)) cancel_preview(&a.preview);
     memory_close(&a);
     release_preview(&a.preview);
     for (int i = 0; i < a.history_count; i++) free(a.history[i]);

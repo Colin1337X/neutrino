@@ -266,7 +266,7 @@ void world_command(App *a, const char *verb, char *argument)
 {
     if (!a->roleplay || !a->story) { app_status(a, "Open a roleplay story to use its world."); return; }
     if (!strcmp(verb, "world")) { world_panel(a, !strcmp(argument, "log")); return; }
-    if (a->preview.job) { app_status(a, "Finish the active reply before changing the world."); return; }
+    if (preview_busy(&a->preview)) { app_status(a, "Finish the active reply before changing the world."); return; }
 
     bool room_cmd = !strcmp(verb, "room"), link_cmd = !strcmp(verb, "connect");
     bool prop_cmd = !strcmp(verb, "item") || !strcmp(verb, "npc");

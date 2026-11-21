@@ -4,13 +4,14 @@ A native C terminal workspace for writing fiction and playing it out. Manuscript
 
 ## Build and open
 
-Use a UTF-8, VT-capable terminal. Windows builds use WinHTTP. Linux and macOS builds require the libcurl development package and POSIX threads. CMake 3.18 or later builds the C11 application. cJSON is bundled under its own [license](third_party/cjson/LICENSE).
+Use a UTF-8, VT-capable terminal. Build with CMake 3.25 or later and a compiler that reports final C23 support, such as GCC 15.2 or the Clang driver in Zig 0.15.2. Release and RelWithDebInfo use `-O3`. Windows uses WinHTTP. Linux and macOS need the libcurl development package and POSIX threads. cJSON is bundled under its own [license](third_party/cjson/LICENSE).
 
 ```powershell
-# Windows, with the Visual Studio C++ desktop workload installed
-cmake -S . -B build
-cmake --build build --config Release
-.\build\Release\neutrino.exe --demo
+# Windows, with Zig 0.15.2 on PATH
+New-Item -ItemType Directory -Force build | Out-Null
+$sources = (Get-ChildItem src/*.c).FullName
+zig cc -target x86_64-windows-gnu -std=c23 -O3 -municode -Ithird_party/cjson $sources third_party/cjson/cJSON.c -lwinhttp -lws2_32 -o build/neutrino.exe
+.\build\neutrino.exe --demo
 ```
 
 ```sh
@@ -39,7 +40,7 @@ The demo opens an original manuscript and a connected roleplay story. It runs in
 
 Create a scene with `/scene /Folder/Book/Chapter/Scene`. In the editor, use **Ctrl+S** to save and **Ctrl+Space** to anchor a selection. Move the caret to extend the selection, then save. The palette also accepts `/select all` or a pair of UTF-8 byte offsets. Saved scene edits and accepted candidates create revisions. Use `/revisions` and `/restore NUMBER` to inspect and restore them.
 
-In Manuscript, plain input supplies a direction for Continue. The writing palette has Continue, Rewrite, Expand, Describe, Draft, Brainstorm, Critique, Continuity, and Bible extraction. Compare streamed candidates with the left and right arrows, then accept or reject. Describe offers selectable senses and multiple variants per sense via `/senses` and `/count`. Use `/insert` to add a detail after the target, or `/preview-save FILE` to keep a candidate separately. If the source has changed since generation, Neutrino blocks applying the candidate. Accepted extracts land as Bible drafts for manual promotion.
+In Manuscript, plain input supplies a direction for Continue. The writing palette has Continue, Rewrite, Expand, Describe, Draft, Brainstorm, Critique, Continuity, and Bible extraction. Up to three candidate requests run on worker threads. Review shows each candidate's status and keeps their original order as they finish. Compare them with the left and right arrows, then accept or reject. Describe offers selectable senses and multiple variants per sense via `/senses` and `/count`. Use `/insert` to add a detail after the target, or `/preview-save FILE` to keep a candidate separately. If the source has changed since generation, Neutrino blocks applying the candidate. Accepted extracts land as Bible drafts for manual promotion.
 
 Use `/play` from a scene to start a linked roleplay. The narrator receives the linked manuscript and shared story sources. Use `/story TITLE` to start independently, or `/import FILE` to start from a character card. A roleplay turn saves the player message, then streams the reply. `/swipe` generates a sibling reply. `/previous`, `/next`, and `/branch ID` navigate the tree. Use `/persona NAME | DESCRIPTION` for a player persona, `/lore FILE` for keyword-triggered sources, and `/preset FILE` for enabled prompt text. `/transcript /Folder/Book/Chapter/Scene` copies the active branch into a new manuscript scene.
 
@@ -69,13 +70,13 @@ Start Neutrino's server in a terminal on the machine that can reach the provider
 
 ```powershell
 $env:NEUTRINO_MODEL = 'your-installed-model-id'
-.\build\Release\neutrino.exe --serve
+.\build\neutrino.exe --serve
 ```
 
 Open the TUI in a second terminal. Its default server address is `http://127.0.0.1:4783/v1`. The TUI sends prompts to Neutrino's server, which opens the upstream provider connection and streams the reply back.
 
 ```powershell
-.\build\Release\neutrino.exe --demo
+.\build\neutrino.exe --demo
 ```
 
 | Server setting | Purpose |
@@ -86,6 +87,7 @@ Open the TUI in a second terminal. Its default server address is `http://127.0.0
 | `NEUTRINO_AGENT_MODEL` | Filing and historian model. Defaults to the narrator model. |
 | `NEUTRINO_RECALL_MODEL` | Recall model. Defaults to the agent model. |
 | `NEUTRINO_RECALL_ENDPOINT`, `NEUTRINO_RECALL_API_KEY` | Optional dedicated recall provider and its bearer credential. |
+| `NEUTRINO_WORKERS` | Parallel upstream requests for the default provider when unpinned. Set 1–4, default 2. A pinned llama.cpp slot or a dedicated recall endpoint runs one request at a time. |
 | `NEUTRINO_SERVER_TOKEN` | Optional credential between the TUI and Neutrino's server. Set it in both processes when enabled. |
 
 The server listens on loopback. To use a server on another machine, forward the port over SSH, for example `ssh -N -L 4783:127.0.0.1:4783 user@server`. The TUI still needs a connection to Neutrino's server. It has no provider credentials or provider endpoint to configure. Use `--serve --port PORT` to change the listener and `--server URL`, `NEUTRINO_SERVER`, or `/server URL` to change the client address. The slash command applies to the current TUI session. A reverse proxy must pass HTTP/1.1 with a loopback Host header and stream responses without buffering.
