@@ -23,6 +23,8 @@ cmake --build build
 
 The demo opens an original manuscript and a connected roleplay story. It runs in memory. For persistent work, start without `--demo`. Neutrino saves to `.neutrino.json` in the working directory by default. Use `--workspace FILE` or `NEUTRINO_WORKSPACE` for a different file. A sidecar lock prevents two Neutrino processes from writing to the same workspace. `--snapshot` prints a static ANSI frame for inspection.
 
+The TUI reflows when the terminal resizes. On narrow or short terminals, **F3** opens the library in place of the reading pane. Short terminals also use a single-line composer. Use `/focus` to hide the side panes at any width.
+
 ## Use the workspace
 
 | Key | Action |
@@ -88,9 +90,14 @@ Open the TUI in a second terminal. Its default server address is `http://127.0.0
 | `NEUTRINO_RECALL_MODEL` | Recall model. Defaults to the agent model. |
 | `NEUTRINO_RECALL_ENDPOINT`, `NEUTRINO_RECALL_API_KEY` | Optional dedicated recall provider and its bearer credential. |
 | `NEUTRINO_WORKERS` | Parallel upstream requests for the default provider when unpinned. Set 1–4, default 2. A pinned llama.cpp slot or a dedicated recall endpoint runs one request at a time. |
+| `NEUTRINO_STREAM_USAGE` | Optional. Set to `1` if the default upstream provider supports OpenAI-compatible `stream_options.include_usage` and only returns token counts when asked. llama.cpp timing metrics work without this setting. |
 | `NEUTRINO_SERVER_TOKEN` | Optional credential between the TUI and Neutrino's server. Set it in both processes when enabled. |
 
 The server listens on loopback. To use a server on another machine, forward the port over SSH, for example `ssh -N -L 4783:127.0.0.1:4783 user@server`. The TUI still needs a connection to Neutrino's server. It has no provider credentials or provider endpoint to configure. Use `--serve --port PORT` to change the listener and `--server URL`, `NEUTRINO_SERVER`, or `/server URL` to change the client address. The slash command applies to the current TUI session. A reverse proxy must pass HTTP/1.1 with a loopback Host header and stream responses without buffering.
+
+Use `/neofetch` in a local or SSH session to see gateway availability, provider activity, model, routing, and active and queued requests. The dashboard refreshes every few seconds while open. Gateway status comes from the authenticated `GET /v1/status` endpoint. The provider row shows the outcome and age of the last observed request on the default provider lane.
+
+The dashboard reports median tokens per second and median upstream time to first token (TTFT) for up to 32 completed foreground generations in the current session. Throughput uses provider timing where available or the provider's completion token count and the observed time between the first and last streamed output. The display shows how many samples contributed to each median. Changing server or narrator clears the session sample window.
 
 **Esc** requests cancellation and keeps partial foreground text available for export. Windows may wait for an outstanding WinHTTP read to return. The TUI owns the workspace and its memory queue. Closing it cancels active requests; unfinished filing picks up when the workspace reopens.
 

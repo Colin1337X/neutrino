@@ -13,6 +13,7 @@
 
 typedef cJSON Json;
 typedef struct { char *data; size_t len, cap; } Text;
+#define NEUTRINO_VERSION "0.5.0"
 #define FILE_LIMIT (32u * 1024u * 1024u)
 #define EDIT_LIMIT (2u * 1024u * 1024u)
 
@@ -79,12 +80,24 @@ size_t utf_encode(int cp, char bytes[4]);
 int utf_width(const char *s, size_t n);
 
 typedef struct Inference Inference;
-typedef struct { int slot, max_tokens, timeout_ms; const char *json_schema; } RequestOptions;
+typedef struct {
+    int slot, max_tokens, timeout_ms;
+    const char *json_schema;
+    bool include_usage;
+} RequestOptions;
+typedef struct {
+    double tokens_per_second;
+    int completion_tokens;
+    uint64_t ttft_ms;
+    bool has_ttft;
+} InferenceMetrics;
 Inference *inference_start(const char *endpoint, const char *key, const char *model,
                            const Json *messages);
 Inference *inference_request(const char *endpoint, const char *key, const char *model,
                              const Json *messages, RequestOptions options);
 bool inference_read(Inference *job, Text *out, Text *reasoning, Text *error);
+Inference *inference_probe(const char *endpoint, const char *key);
+InferenceMetrics inference_metrics(Inference *job);
 void inference_cancel(Inference *job);
 void inference_free(Inference *job);
 uint64_t monotonic_ms(void);

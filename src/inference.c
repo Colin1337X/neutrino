@@ -1,6 +1,8 @@
 #include "neutrino.h"
 
 #include <stdio.h>
+#include <limits.h>
+#include <math.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,8 +41,9 @@ struct Inference {
     char *url, *key, *body;
     int timeout_ms;
     Text out, reasoning, error;
+    InferenceMetrics metrics;
     atomic_bool cancel;
-    bool done, started;
+    bool done, started, probe, from_gateway;
 #ifdef _WIN32
     SRWLOCK lock;
     HANDLE thread;
@@ -53,7 +56,8 @@ struct Inference {
 typedef struct {
     Inference *job;
     Text pending, batch;
-    bool sse, final, malformed;
+    uint64_t start, first, last;
+    bool sse, final, end_marker, malformed, saw_output;
 } Response;
 
 static void lock(Inference *j)
@@ -77,6 +81,13 @@ static bool cancelled(Inference *j)
     return atomic_load_explicit(&j->cancel, memory_order_relaxed);
 }
 
+static double positive_number(const Json *obj, const char *key)
+{
+    const Json *value = at(obj, key);
+    return cJSON_IsNumber(value) && isfinite(value->valuedouble) && value->valuedouble > 0
+        ? value->valuedouble : 0;
+}
+
 static bool read_choice(Response *r, const char *packet)
 {
     Json *json = cJSON_ParseWithOpts(packet, NULL, 1);
@@ -87,7 +98,33 @@ static bool read_choice(Response *r, const char *packet)
     const char *content = js(message, "content"), *thinking = js(message, "reasoning_content");
     if (!*thinking) thinking = js(message, "reasoning");
     Inference *j = r->job;
+    if (*content || *thinking) {
+        r->last = monotonic_ms();
+        if (!r->saw_output) {
+            r->first = r->last;
+            r->saw_output = true;
+        }
+    }
     lock(j);
+    const Json *metrics = at(json, "neutrino_metrics");
+    if (j->from_gateway && cJSON_IsObject(metrics)) {
+        double rate = positive_number(metrics, "tokens_per_second");
+        double tokens = positive_number(metrics, "completion_tokens");
+        const Json *ttft = at(metrics, "ttft_ms");
+        j->metrics.tokens_per_second = rate;
+        if (tokens <= INT_MAX) j->metrics.completion_tokens = (int)tokens;
+        if (cJSON_IsNumber(ttft) && ttft->valuedouble >= 0 && ttft->valuedouble <= 3600000) {
+            j->metrics.ttft_ms = (uint64_t)ttft->valuedouble;
+            j->metrics.has_ttft = true;
+        }
+    } else if (!j->from_gateway) {
+        const Json *timings = at(json, "timings");
+        double tokens = positive_number(at(json, "usage"), "completion_tokens");
+        if (!tokens) tokens = positive_number(timings, "predicted_n");
+        if (tokens > 0 && tokens <= INT_MAX) j->metrics.completion_tokens = (int)tokens;
+        double rate = positive_number(timings, "predicted_per_second");
+        if (rate) j->metrics.tokens_per_second = rate;
+    }
     if (at(json, "error")) append(&j->error, "Provider returned an inference error.");
     if (j->out.len + strlen(content) <= EDIT_LIMIT && j->reasoning.len + strlen(thinking) <= EDIT_LIMIT) {
         append(&j->out, content);
@@ -102,6 +139,11 @@ static bool read_choice(Response *r, const char *packet)
 static bool receive(Response *r, const char *data, size_t n)
 {
     if (cancelled(r->job) || r->pending.len + n > FILE_LIMIT) return false;
+    if (r->job->probe) {
+        if (r->pending.len + n > 16384 || memchr(data, 0, n)) return false;
+        append_n(&r->pending, data, n);
+        return true;
+    }
     append_n(&r->pending, data, n);
     size_t offset = 0;
     while (offset < r->pending.len) {
@@ -117,7 +159,7 @@ static bool receive(Response *r, const char *data, size_t n)
             const char *body = line + 5;
             len -= 5;
             while (len && *body == ' ') { body++; len--; }
-            if (len == 6 && !memcmp(body, "[DONE]", 6)) r->final = true;
+            if (len == 6 && !memcmp(body, "[DONE]", 6)) r->final = r->end_marker = true;
             else if (len) {
                 append_n(&r->batch, body, len);
                 if (!read_choice(r, str(&r->batch))) r->malformed = true;
@@ -169,7 +211,7 @@ static bool transfer(Inference *j, Response *r, long *status)
     }
     wchar_t *host = wide_slice(parts.lpszHostName, parts.dwHostNameLength);
     wchar_t *path = wide_slice(parts.lpszUrlPath, parts.dwUrlPathLength);
-    HINTERNET session = WinHttpOpen(L"Neutrino/0.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+    HINTERNET session = WinHttpOpen(L"Neutrino/" NEUTRINO_VERSION, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (session) {
         int setup = j->timeout_ms > 0 && j->timeout_ms < 10000 ? j->timeout_ms : 10000;
@@ -177,7 +219,7 @@ static bool transfer(Inference *j, Response *r, long *status)
         WinHttpSetTimeouts(session, setup, setup, setup, read);
     }
     HINTERNET conn = session ? WinHttpConnect(session, host, parts.nPort, 0) : NULL;
-    HINTERNET req = conn ? WinHttpOpenRequest(conn, L"POST", path, NULL, WINHTTP_NO_REFERER,
+    HINTERNET req = conn ? WinHttpOpenRequest(conn, j->probe ? L"GET" : L"POST", path, NULL, WINHTTP_NO_REFERER,
                         WINHTTP_DEFAULT_ACCEPT_TYPES, parts.nScheme == INTERNET_SCHEME_HTTPS
                         ? WINHTTP_FLAG_SECURE : 0) : NULL;
     DWORD redirect = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
@@ -185,7 +227,7 @@ static bool transfer(Inference *j, Response *r, long *status)
     append(&headers, "Content-Type: application/json\r\nAccept: text/event-stream, application/json\r\n");
     if (*j->key) format(&headers, "Authorization: Bearer %s\r\n", j->key);
     wchar_t *fields = wide(str(&headers));
-    DWORD length = (DWORD)strlen(j->body), code = 0, size = sizeof code;
+    DWORD length = j->body ? (DWORD)strlen(j->body) : 0, code = 0, size = sizeof code;
     bool ok = req && fields && !cancelled(j) &&
         WinHttpSetOption(req, WINHTTP_OPTION_REDIRECT_POLICY, &redirect, sizeof redirect) &&
         WinHttpSendRequest(req, fields, (DWORD)-1, j->body, length, length, 0) &&
@@ -199,7 +241,7 @@ static bool transfer(Inference *j, Response *r, long *status)
         do {
             ok = !cancelled(j) && WinHttpReadData(req, buffer, sizeof buffer, &n);
             if (ok && n) ok = receive(r, buffer, n);
-        } while (ok && n && !r->final);
+        } while (ok && n && !r->end_marker);
     }
     if (req) WinHttpCloseHandle(req);
     if (conn) WinHttpCloseHandle(conn);
@@ -248,10 +290,10 @@ static bool transfer(Inference *j, Response *r, long *status)
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 10000L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, j->probe ? 2500L : 10000L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, j->timeout_ms > 0 ? (long)j->timeout_ms : 300000L);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, j->body);
+    if (!j->probe) curl_easy_setopt(curl, CURLOPT_POSTFIELDS, j->body);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_receive);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, r);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
@@ -273,10 +315,10 @@ static void *worker(void *arg)
 #endif
 {
     Inference *j = arg;
-    Response r = {.job = j};
+    Response r = {.job = j, .start = monotonic_ms()};
     long status = 0;
     bool ok = transfer(j, &r, &status);
-    if (ok && status >= 200 && status < 300 && !r.sse) {
+    if (!j->probe && ok && status >= 200 && status < 300 && !r.sse) {
         if (!strncmp(str(&r.pending), "data:", 5)) receive(&r, "\n", 1);
         else {
             append(&r.batch, str(&r.pending));
@@ -291,8 +333,15 @@ static void *worker(void *arg)
         if (status && (status < 200 || status >= 300))
             format(&j->error, "Provider returned HTTP %ld.", status);
         else if (!ok) append(&j->error, "Connection failed or timed out. Check the endpoint.");
+        else if (j->probe) append_n(&j->out, str(&r.pending), r.pending.len);
         else if (!r.final || r.malformed) append(&j->error, "The provider returned an incomplete or invalid stream.");
         else if (!j->out.len) append(&j->error, "The model returned no prose.");
+    }
+    if (!j->probe && !j->from_gateway && r.saw_output && !j->error.len) {
+        j->metrics.has_ttft = true;
+        j->metrics.ttft_ms = r.first - r.start;
+        if (!j->metrics.tokens_per_second && j->metrics.completion_tokens > 1 && r.last > r.first)
+            j->metrics.tokens_per_second = (j->metrics.completion_tokens - 1) * 1000.0 / (double)(r.last - r.first);
     }
     j->done = true;
     unlock(j);
@@ -305,33 +354,17 @@ static void *worker(void *arg)
 #endif
 }
 
-Inference *inference_request(const char *endpoint, const char *key, const char *model,
-                             const Json *messages, RequestOptions options)
+static char *request_body(const char *model, const Json *messages, RequestOptions options)
 {
-    if ((strncmp(endpoint, "http://", 7) && strncmp(endpoint, "https://", 8)) ||
-        strpbrk(endpoint, "\r\n?#") || strpbrk(key, "\r\n") || !*model) return NULL;
-#ifndef _WIN32
-    static bool curl_ready;
-    if (!curl_ready) curl_ready = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
-    if (!curl_ready) return NULL;
-#endif
-    Inference *j = calloc(1, sizeof(*j));
-    if (!j) abort();
-    atomic_init(&j->cancel, false);
-    Text url = {0};
-    size_t len = strlen(endpoint);
-    while (len && endpoint[len - 1] == '/') len--;
-    append_n(&url, endpoint, len);
-    const char suffix[] = "/chat/completions";
-    if (len < sizeof suffix - 1 || strcmp(str(&url) + len - (sizeof suffix - 1), suffix))
-        append(&url, suffix);
-    j->url = url.data;
-    j->key = copy(key);
-    j->timeout_ms = options.timeout_ms;
     Json *body = cJSON_CreateObject();
     set(body, "model", model);
     put(body, "messages", cJSON_Duplicate(messages, true));
     put(body, "stream", cJSON_CreateTrue());
+    if (options.include_usage) {
+        Json *stream_options = cJSON_CreateObject();
+        put(stream_options, "include_usage", cJSON_CreateTrue());
+        put(body, "stream_options", stream_options);
+    }
     if (options.slot >= 0) {
         integer(body, "id_slot", options.slot);
         put(body, "cache_prompt", cJSON_CreateTrue());
@@ -347,9 +380,41 @@ Inference *inference_request(const char *endpoint, const char *key, const char *
         put(format, "json_schema", wrapper);
         put(body, "response_format", format);
     }
-    j->body = cJSON_PrintUnformatted(body);
+    char *json = cJSON_PrintUnformatted(body);
     cJSON_Delete(body);
-    if (!j->body) abort();
+    if (!json) abort();
+    return json;
+}
+
+static Inference *start_request(const char *endpoint, const char *key, const char *model,
+                                const Json *messages, RequestOptions options, bool probe, bool from_gateway)
+{
+    if ((strncmp(endpoint, "http://", 7) && strncmp(endpoint, "https://", 8)) ||
+        strpbrk(endpoint, "\r\n?#") || strpbrk(key, "\r\n") || (!probe && !*model)) return NULL;
+#ifndef _WIN32
+    static bool curl_ready;
+    if (!curl_ready) curl_ready = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
+    if (!curl_ready) return NULL;
+#endif
+    Inference *j = calloc(1, sizeof(*j));
+    if (!j) abort();
+    atomic_init(&j->cancel, false);
+    j->probe = probe;
+    j->from_gateway = from_gateway;
+    Text url = {0};
+    size_t len = strlen(endpoint);
+    while (len && endpoint[len - 1] == '/') len--;
+    const char suffix[] = "/chat/completions";
+    const size_t suffix_len = sizeof suffix - 1;
+    const bool has_completion_path = len >= suffix_len && !memcmp(endpoint + len - suffix_len, suffix, suffix_len);
+    if (probe && has_completion_path) len -= suffix_len;
+    append_n(&url, endpoint, len);
+    if (probe) append(&url, "/status");
+    else if (!has_completion_path) append(&url, suffix);
+    j->url = url.data;
+    j->key = copy(key);
+    j->timeout_ms = options.timeout_ms;
+    if (!probe) j->body = request_body(model, messages, options);
 #ifdef _WIN32
     InitializeSRWLock(&j->lock);
     j->thread = (HANDLE)_beginthreadex(NULL, 0, worker, j, 0, NULL);
@@ -362,9 +427,25 @@ Inference *inference_request(const char *endpoint, const char *key, const char *
     inference_free(j);
     return NULL;
 }
+Inference *inference_request(const char *endpoint, const char *key, const char *model,
+                             const Json *messages, RequestOptions options)
+{
+    return start_request(endpoint, key, model, messages, options, false, false);
+}
 Inference *inference_start(const char *endpoint, const char *key, const char *model, const Json *messages)
 {
-    return inference_request(endpoint, key, model, messages, (RequestOptions){.slot = -1});
+    return start_request(endpoint, key, model, messages, (RequestOptions){.slot = -1}, false, true);
+}
+Inference *inference_probe(const char *endpoint, const char *key)
+{
+    return start_request(endpoint, key, "", nullptr, (RequestOptions){.timeout_ms = 2500}, true, false);
+}
+InferenceMetrics inference_metrics(Inference *j)
+{
+    lock(j);
+    InferenceMetrics metrics = j->metrics;
+    unlock(j);
+    return metrics;
 }
 static void mirror(Text *dst, const Text *src)
 {

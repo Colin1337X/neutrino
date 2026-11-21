@@ -19,6 +19,7 @@ typedef struct {
 typedef struct {
     Text body, thinking, error;
     Inference *job;
+    InferenceMetrics metrics;
     char label[64];
     bool finished;
 } Candidate;
@@ -37,6 +38,17 @@ typedef struct {
     Inference *recall_job;
 } Preview;
 
+enum { NEOFETCH_SAMPLES = 32 };
+typedef struct {
+    Inference *probe;
+    Json *server;
+    Text error;
+    uint64_t refresh_at;
+    bool stale_probe;
+    InferenceMetrics samples[NEOFETCH_SAMPLES];
+    int count, next;
+} Neofetch;
+
 static inline bool preview_busy(const Preview *preview)
 {
     return preview->recall_job != nullptr || preview->active > 0;
@@ -45,7 +57,7 @@ typedef struct {
     Workspace ws;
     Json *scene, *story;
     bool roleplay, demo, quit, compact, editing, slash, view_panel;
-    bool panel_preview, selected, ssh_session;
+    bool panel_preview, panel_neofetch, selected, ssh_session;
     Focus focus;
     Text screen, prompt, edit, info, status, trace, server_address;
     char info_title[96];
@@ -56,6 +68,7 @@ typedef struct {
     int history_count;
     Preview preview;
     MemoryLane memory;
+    Neofetch neo;
     const char *server_override;
 } App;
 

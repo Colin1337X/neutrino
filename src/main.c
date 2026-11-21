@@ -92,6 +92,7 @@ const Command commands[] = {
     {"save", "", "Save the workspace"},
     {"model", " [MODEL|recall CONN:MODEL]", "Select a server-configured narrator or recall model"},
     {"server", " [URL]", "Set the Neutrino inference server"},
+    {"neofetch", "", "Show server status and generation performance"},
     {"focus", "", "Toggle the side panes"},
     {"quit", "", "Save and exit"}
 };
@@ -174,6 +175,7 @@ static void show_info(App *a, const char *title)
     clear(&a->info);
     a->view_panel = true;
     a->panel_preview = false;
+    a->panel_neofetch = false;
     a->panel_scroll = 0;
     a->focus = PANEL;
 }
@@ -182,10 +184,79 @@ static void show_preview(App *a)
 {
     a->view_panel = true;
     a->panel_preview = true;
+    a->panel_neofetch = false;
     a->panel_scroll = 0;
     a->focus = PANEL;
 }
 static void close_panel(App *a) { a->view_panel = false; a->focus = COMPOSER; }
+
+static void show_neofetch(App *a)
+{
+    show_info(a, "Neofetch");
+    a->panel_neofetch = true;
+    a->neo.refresh_at = 0;
+}
+
+static void record_generation(App *a, const Candidate *candidate)
+{
+    if (!candidate->body.len || candidate->error.len) return;
+    Neofetch *neo = &a->neo;
+    neo->samples[neo->next] = candidate->metrics;
+    neo->next = (neo->next + 1) % NEOFETCH_SAMPLES;
+    if (neo->count < NEOFETCH_SAMPLES) neo->count++;
+}
+
+static void reset_neofetch_server(Neofetch *neo)
+{
+    if (neo->probe) {
+        inference_cancel(neo->probe);
+        neo->stale_probe = true;
+    }
+    cJSON_Delete(neo->server);
+    neo->server = nullptr;
+    clear(&neo->error);
+    neo->refresh_at = 0;
+}
+
+static bool tick_neofetch(App *a)
+{
+    Neofetch *neo = &a->neo;
+    const uint64_t now = monotonic_ms();
+    const bool shown = a->view_panel && a->panel_neofetch;
+    if (neo->probe) {
+        Text body = {0}, reasoning = {0}, error = {0};
+        bool done = inference_read(neo->probe, &body, &reasoning, &error);
+        if (done) {
+            inference_free(neo->probe);
+            neo->probe = nullptr;
+            if (!neo->stale_probe) {
+                cJSON_Delete(neo->server);
+                neo->server = cJSON_ParseWithOpts(str(&body), nullptr, true);
+                clear(&neo->error);
+                if (strcmp(js(neo->server, "service"), "neutrino")) {
+                    cJSON_Delete(neo->server);
+                    neo->server = nullptr;
+                    append(&neo->error, error.len ? str(&error) : "Unrecognized status response.");
+                }
+                neo->refresh_at = now + 3000;
+            }
+            neo->stale_probe = false;
+        }
+        release(&body);
+        release(&reasoning);
+        release(&error);
+        return done && shown;
+    }
+    if (shown && now >= neo->refresh_at) {
+        neo->probe = inference_probe(ui_endpoint(a), env("NEUTRINO_SERVER_TOKEN", ""));
+        neo->refresh_at = now + 3000;
+        if (!neo->probe && !neo->error.len) {
+            append(&neo->error, "Could not start the status check.");
+            return true;
+        }
+    }
+    return false;
+}
 static void close_preview(App *a)
 {
     if (preview_busy(&a->preview)) { status(a, "Esc cancels generation."); return; }
@@ -540,6 +611,7 @@ static bool read_candidate(Preview *p, Candidate *c)
     size_t before = c->body.len + c->thinking.len + c->error.len;
     if (!inference_read(c->job, &c->body, &c->thinking, &c->error))
         return before != c->body.len + c->thinking.len + c->error.len;
+    c->metrics = inference_metrics(c->job);
     inference_free(c->job);
     c->job = nullptr;
     c->finished = true;
@@ -717,8 +789,13 @@ static bool update_generation(App *a)
     if (!p->story) {
         bool changed = false;
         int active = p->active;
-        for (int i = 0; i < p->next; i++)
-            if (p->candidates[i].job && read_candidate(p, &p->candidates[i])) changed = true;
+        for (int i = 0; i < p->next; i++) {
+            Candidate *candidate = &p->candidates[i];
+            if (candidate->job && read_candidate(p, candidate)) {
+                if (candidate->finished) record_generation(a, candidate);
+                changed = true;
+            }
+        }
         if (p->active != active) dispatch_writing(a);
         return changed;
     }
@@ -742,6 +819,7 @@ static bool update_generation(App *a)
                 return true;
             }
             int id = story_push(&a->ws, p->story, p->parent, "assistant", str(&c->body));
+            record_generation(a, c);
             Json *reply = story_pick(p->story, id);
             if (c->thinking.len) set(reply, "reasoning", str(&c->thinking));
             if (p->speaker.len) set(reply, "speaker", str(&p->speaker));
@@ -1105,6 +1183,10 @@ static void slash_command(App *a, char *line)
     else if (!strcmp(line, "quit")) quit(a);
     else if (!strcmp(line, "save")) { status(a, "Workspace saved"); save(a); }
     else if (!strcmp(line, "focus")) a->compact = !a->compact;
+    else if (!strcmp(line, "neofetch")) {
+        if (*arg) status(a, "Use /neofetch without arguments.");
+        else show_neofetch(a);
+    }
     else if (!strcmp(line, "memory")) memory_command(a, arg);
     else if (!strcmp(line, "trace")) {
         if (!a->trace.len) status(a, "No model prompt has been prepared in this session.");
@@ -1289,7 +1371,9 @@ static void slash_command(App *a, char *line)
         else if (preview_busy(&a->preview)) status(a, "Finish or cancel generation before changing models.");
         else if (strlen(arg) > 160 || strpbrk(arg, " \t\r\n")) status(a, "Enter one server-configured model ID or default.");
         else {
-            set(a->ws.root, "serverNarrator", !strcmp(arg, "default") ? "" : arg);
+            const char *model = !strcmp(arg, "default") ? "" : arg;
+            if (strcmp(js(a->ws.root, "serverNarrator"), model)) a->neo.count = a->neo.next = 0;
+            set(a->ws.root, "serverNarrator", model);
             a->ws.dirty = true;
             status(a, "Narrator model selection saved");
         }
@@ -1301,6 +1385,10 @@ static void slash_command(App *a, char *line)
         else if ((strncmp(arg, "http://", 7) && strncmp(arg, "https://", 8)) || strpbrk(arg, " \t\r\n?#@"))
             status(a, "Use the Neutrino server URL, such as http://127.0.0.1:4783/v1.");
         else {
+            if (strcmp(ui_endpoint(a), arg)) {
+                a->neo.count = a->neo.next = 0;
+                reset_neofetch_server(&a->neo);
+            }
             clear(&a->server_address);
             append(&a->server_address, arg);
             status(a, "Inference server set for this session");
@@ -1461,7 +1549,8 @@ static void key_event(App *a, int key)
     switch (key) {
         case 17: if (a->editing) edit_save(a); if (!a->editing) quit(a); return;
         case 3: case 27:
-            if (preview_busy(&a->preview)) {
+            if (key == 27 && a->view_panel && a->panel_neofetch && !a->slash) close_panel(a);
+            else if (preview_busy(&a->preview)) {
                 cancel_preview(&a->preview);
                 status(a, "Cancelling generation…");
             } else if (a->slash) a->slash = false;
@@ -1574,7 +1663,7 @@ static int run(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--workspace") && i + 1 < argc) path = argv[++i];
         else if (!strcmp(argv[i], "--import") && i + 1 < argc) import = argv[++i];
-        else if (!strcmp(argv[i], "--version")) { puts("Neutrino 0.4.0"); return 0; }
+        else if (!strcmp(argv[i], "--version")) { puts("Neutrino " NEUTRINO_VERSION); return 0; }
         else {
             bool help = !strcmp(argv[i], "--help") || !strcmp(argv[i], "-h");
             FILE *out = help ? stdout : stderr;
@@ -1633,6 +1722,7 @@ static int run(int argc, char **argv)
                 redraw = true;
             }
             if (update_generation(&a)) redraw = true;
+            if (tick_neofetch(&a)) redraw = true;
             if (memory_tick(&a)) {
                 save(&a);
                 redraw = true;
@@ -1654,6 +1744,9 @@ static int run(int argc, char **argv)
     if (preview_busy(&a.preview)) cancel_preview(&a.preview);
     memory_close(&a);
     release_preview(&a.preview);
+    reset_neofetch_server(&a.neo);
+    if (a.neo.probe) inference_free(a.neo.probe);
+    release(&a.neo.error);
     for (int i = 0; i < a.history_count; i++) free(a.history[i]);
     release(&a.screen);
     release(&a.prompt);

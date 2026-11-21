@@ -21,7 +21,10 @@
 #define BOLD "\x1b[1m"
 #define NORMAL "\x1b[22m"
 
-typedef struct { int left, width, top, height, rail, main, main_x, detail, detail_x; } Layout;
+typedef struct {
+    int left, width, top, height, rail, main, main_x, detail, detail_x;
+    bool dense, library_only;
+} Layout;
 typedef struct { size_t start, end; } Row;
 typedef struct { Row *items; int count, capacity; } Rows;
 typedef struct { Text text; Rows rows; } RenderText;
@@ -34,11 +37,16 @@ static Layout layout(const App *a)
     Layout l = {0};
     l.width = minimum(a->cols, 152);
     l.left = (a->cols - l.width) / 2;
-    l.top = 6;
-    l.height = a->rows - 12;
-    l.rail = l.height < 4 ? 0 : !a->compact && l.width >= 75 ? 26 :
-             a->focus == LIBRARY ? minimum(26, l.width / 2) : 0;
-    l.detail = l.height >= 4 && !a->compact && l.width >= 104 ? 24 : 0;
+    l.dense = a->rows < 18;
+    l.top = l.dense ? 3 : 6;
+    l.height = a->rows - l.top - (l.dense ? 3 : 6);
+    bool show_sides = !a->compact && !l.dense && !(a->view_panel && a->panel_neofetch);
+    if (show_sides && l.width >= 74) l.rail = clamp(l.width / 5, 24, 30);
+    if (show_sides && l.width >= 108 && l.height >= 12) l.detail = clamp(l.width / 5, 23, 28);
+    if (a->focus == LIBRARY && !l.rail) {
+        l.rail = l.width;
+        l.library_only = true;
+    }
     l.main_x = l.left + l.rail;
     l.main = l.width - l.rail - l.detail;
     l.detail_x = l.main_x + l.main;
@@ -272,28 +280,37 @@ int ui_command_matches(const App *a, int *results, int cap)
 
 static void header(App *a, const Layout *l)
 {
-    cell(a, l->left + 2, 1, l->width - 4, a->roleplay ? ROOT LAV BOLD : ROOT MINT BOLD, "◈  NEUTRINO");
+    cell(a, l->left + 2, l->dense ? 0 : 1, l->width - 4,
+         a->roleplay ? ROOT LAV BOLD : ROOT MINT BOLD, "◈  NEUTRINO");
 }
 static void header_tabs(App *a, const Layout *l)
 {
-    right(a, l->left + l->width - 2, 1, 22, ROOT QUIET NORMAL,
-          a->demo ? "DEMO WORKSPACE" : a->ssh_session ? "SSH WORKSPACE" : "LOCAL WORKSPACE");
+    if (l->width >= 34)
+        right(a, l->left + l->width - 2, l->dense ? 0 : 1, 22, ROOT QUIET NORMAL,
+              a->demo ? "DEMO WORKSPACE" : a->ssh_session ? "SSH WORKSPACE" : "LOCAL WORKSPACE");
     int x = l->left + 2;
-    cell(a, x, 3, 15, a->roleplay ? ROOT DIM NORMAL : PICK MINT BOLD,
-         a->roleplay ? "   Manuscript  " : " ◆ Manuscript  ");
-    cell(a, x + 16, 3, 14, a->roleplay ? PLUM LAV BOLD : ROOT DIM NORMAL,
-         a->roleplay ? " ◆ Roleplay  " : "   Roleplay  ");
-    if (l->width >= 62) right(a, l->left + l->width - 2, 3, 28, ROOT QUIET NORMAL, "F2 switch mode");
-    rule(a, l->left + 1, 4, l->width - 2, ROOT LINE NORMAL);
+    int y = l->dense ? 1 : 3;
+    if (l->width < 36)
+        cell(a, x, y, l->width - 4, a->roleplay ? ROOT LAV BOLD : ROOT MINT BOLD,
+             a->roleplay ? "Roleplay   F2 switch" : "Manuscript   F2 switch");
+    else {
+        cell(a, x, y, 15, a->roleplay ? ROOT DIM NORMAL : PICK MINT BOLD,
+             a->roleplay ? "   Manuscript  " : " ◆ Manuscript  ");
+        cell(a, x + 16, y, 14, a->roleplay ? PLUM LAV BOLD : ROOT DIM NORMAL,
+             a->roleplay ? " ◆ Roleplay  " : "   Roleplay  ");
+        if (l->width >= 62) right(a, l->left + l->width - 2, y, 28, ROOT QUIET NORMAL, "F2 switch mode");
+    }
+    if (!l->library_only) rule(a, l->left + 1, l->dense ? 2 : 4, l->width - 2, ROOT LINE NORMAL);
 }
 static void library(App *a, const Layout *l)
 {
     if (!l->rail || l->height < 4) return;
     int x = l->left + 1, width = l->rail - 2;
-    card(a, x, l->top - 1, width, l->height + 2, a->focus == LIBRARY ?
+    int height = l->height - (l->dense ? 1 : 0);
+    card(a, x, l->top - 1, width, height + 2, a->focus == LIBRARY ?
          (a->roleplay ? RAIL LAV NORMAL : RAIL MINT NORMAL) : RAIL LINE NORMAL);
     cell(a, x + 2, l->top, width - 4, RAIL TXT BOLD, a->roleplay ? "Stories" : "Manuscript library");
-    int capacity = maximum(1, l->height - 3), count = ui_library_size(a);
+    int capacity = maximum(1, height - 3), count = ui_library_size(a);
     if (a->rail_cursor >= a->rail_offset + capacity) a->rail_offset = a->rail_cursor - capacity + 1;
     if (a->rail_cursor < a->rail_offset) a->rail_offset = a->rail_cursor;
     int y = l->top + 2;
@@ -308,8 +325,9 @@ static void library(App *a, const Layout *l)
         clipped_cell(a, x + 4, y, width - 5, style, name);
     }
     if (!count) cell(a, x + 2, y, width - 4, RAIL QUIET, "No stories yet");
-    cell(a, x + 2, l->top + l->height - 1, width - 4, RAIL QUIET NORMAL,
-         a->focus == LIBRARY ? "↑↓ select  ↵ open" : "F3 browse library");
+    if (height >= 4)
+        cell(a, x + 2, l->top + height - 1, width - 4, RAIL QUIET NORMAL,
+             a->focus == LIBRARY ? "↑↓ select  ↵ open" : "F3 browse library");
 }
 static int word_count(const char *s)
 {
@@ -554,25 +572,98 @@ static void panel(App *a, const Layout *l, int x, int y, int width, int height)
     release(&text);
 }
 
+static int compare_sample(const void *left, const void *right)
+{
+    double a = *(const double *)left, b = *(const double *)right;
+    return (a > b) - (a < b);
+}
+static double median(double samples[], int count)
+{
+    qsort(samples, (size_t)count, sizeof *samples, compare_sample);
+    return (samples[(count - 1) / 2] + samples[count / 2]) / 2;
+}
+static void neofetch(App *a, const Layout *l, int x, int y, int width, int height)
+{
+    const Neofetch *neo = &a->neo;
+    const Json *server = neo->server;
+    const char *gateway = server ? "Online" : neo->error.len ? "Unavailable" : "Checking…";
+    const char *gateway_style = server ? ROOT MINT BOLD : neo->error.len ? ROOT GOLD BOLD : ROOT DIM BOLD;
+    cell(a, x, l->top, width, ROOT TXT BOLD, "Neofetch");
+    if (width >= 28) right(a, x + width, l->top, 13, gateway_style, gateway);
+    if (y > l->top + 1) rule(a, x, l->top + 1, width, ROOT LINE NORMAL);
+    const char *const mark[] = {
+        "       ╱╲       ",
+        "     ╱    ╲     ",
+        "   ╱   ╱╲   ╲   ",
+        "  ╲   ╲╱   ╱  ",
+        "    ╲    ╱    ",
+        "      ╲╱      ",
+    };
+    if (width >= 61 && height >= 8) {
+        for (size_t row = 0; row < sizeof mark / sizeof *mark; row++)
+            cell(a, x + 1, y + (int)row, 17, a->roleplay ? ROOT LAV BOLD : ROOT MINT BOLD, mark[row]);
+        cell(a, x + 3, y + 7, 16, ROOT QUIET, "NEUTRINO");
+        x += 21;
+        width -= 21;
+    }
+    Text body = {0};
+    format(&body, "Gateway  %s%s%s\n", gateway, server ? " · " : "", js(server, "version"));
+    if (server) {
+        const char *provider = js(server, "provider");
+        if (!strcmp(provider, "ok") || !strcmp(provider, "failed"))
+            format(&body, "Provider  Last request %s · %ds ago\n",
+                   !strcmp(provider, "ok") ? "succeeded" : "failed", number(server, "provider_age_s"));
+        else append(&body, "Provider  No requests observed\n");
+        format(&body, "Model  %s\n", *js(server, "model") ? js(server, "model") : ui_model(a));
+        format(&body, "Load  %d active · %d queued\n", number(server, "active"), number(server, "queued"));
+        if (cJSON_IsTrue(at(server, "pinned_slots"))) append(&body, "Routing  Pinned llama.cpp slots\n");
+        else format(&body, "Workers  %d on the default provider\n", number(server, "workers"));
+    } else if (neo->error.len) format(&body, "%s\n", str(&neo->error));
+    double rates[NEOFETCH_SAMPLES], ttfts[NEOFETCH_SAMPLES];
+    int rate_count = 0, ttft_count = 0;
+    for (int i = 0; i < neo->count; i++) {
+        InferenceMetrics sample = neo->samples[i];
+        if (sample.tokens_per_second > 0) rates[rate_count++] = sample.tokens_per_second;
+        if (sample.has_ttft) ttfts[ttft_count++] = (double)sample.ttft_ms;
+    }
+    append(&body, "\nSession performance\n");
+    if (rate_count)
+        format(&body, "Median tok/s  %.1f · %d measured\n", median(rates, rate_count), rate_count);
+    else format(&body, "Median tok/s  %s\n", neo->count ? "Unavailable" : "Waiting for a generation");
+    if (ttft_count) format(&body, "Median TTFT  %.0f ms · %d measured\n", median(ttfts, ttft_count), ttft_count);
+    else append(&body, "Median TTFT  Unavailable\n");
+    format(&body, "Sample window  %d/%d completed\n\n", neo->count, NEOFETCH_SAMPLES);
+    format(&body, "Terminal  %d×%d · %s\nClient  %s · %s\n", a->cols, a->rows,
+           a->roleplay ? "Roleplay" : "Manuscript", NEUTRINO_VERSION, a->ssh_session ? "SSH" : "Local");
+    Rows rows = wrap(str(&body), body.len, width);
+    a->panel_scroll = clamp(a->panel_scroll, 0, maximum(0, rows.count - height));
+    draw_lines(a, str(&body), rows, a->panel_scroll, x, y, width, height, 0, 0);
+    scroll_mark(a, l, a->panel_scroll, rows.count, height, y);
+    free(rows.items);
+    release(&body);
+}
+
 static void composer(App *a, const Layout *l, int *cx, int *cy)
 {
-    int x = l->left + 1, y = a->rows - 5, w = l->width - 2;
+    int x = l->left + 1, y = a->rows - (l->dense ? 3 : 4), w = l->width - 2;
     const char *accent = a->roleplay ? ROOT LAV NORMAL : ROOT MINT NORMAL;
     const char *border = a->focus == COMPOSER ? accent : ROOT LINE NORMAL;
     const char *style = a->focus == COMPOSER ? (a->roleplay ? FIELD LAV BOLD : FIELD MINT BOLD) : FIELD DIM NORMAL;
-    edge(a, x, y, w, border, true);
-    cell(a, x + 2, y, 18, border, a->editing ? " Editor " : a->roleplay ? " Next action " : " Writing direction ");
-    card_row(a, x, y + 1, w, FIELD, border);
-    edge(a, x, y + 2, w, border, false);
-    cell(a, x + 1, y + 1, 4, style, a->editing ? "✎" : a->roleplay ? "›" : "❯");
+    if (!l->dense) {
+        edge(a, x, y - 1, w, border, true);
+        cell(a, x + 2, y - 1, 19, border, a->editing ? " Editor " : a->roleplay ? " Next action " : " Writing direction ");
+        edge(a, x, y + 1, w, border, false);
+    }
+    card_row(a, x, y, w, FIELD, border);
+    cell(a, x + 1, y, 4, style, a->editing ? "✎" : a->roleplay ? "›" : "❯");
     int width = w - 6;
     if (a->editing) {
-        cell(a, x + 4, y + 1, width, FIELD TXT,
+        cell(a, x + 4, y, width, FIELD TXT,
              "Editing manuscript   Ctrl+S save   Ctrl+Space select   Esc close");
         return;
     }
     if (w >= 67) {
-        right(a, x + w - 2, y + 1, 9, FIELD QUIET, "↵ send");
+        right(a, x + w - 2, y, 9, FIELD QUIET, "↵ send");
         width -= 9;
     }
     const char *s = str(&a->prompt);
@@ -588,20 +679,21 @@ static void composer(App *a, const Layout *l, int *cx, int *cy)
     const char *placeholder = width < 39 ? "Type / for commands" :
                               a->roleplay ? "What do you do?  / for commands" :
                                            "What should happen next?  / for commands";
-    cell(a, x + 4, y + 1, width, FIELD TXT, a->prompt.len ? s + start : "");
-    if (!a->prompt.len) cell(a, x + 4, y + 1, width, FIELD QUIET, placeholder);
+    cell(a, x + 4, y, width, FIELD TXT, a->prompt.len ? s + start : "");
+    if (!a->prompt.len) cell(a, x + 4, y, width, FIELD QUIET, placeholder);
     if (a->focus == COMPOSER) {
         *cx = x + 4 + used;
-        *cy = y + 1;
+        *cy = y;
     }
 }
 static void palette(App *a, const Layout *l)
 {
     if (!a->slash || a->focus != COMPOSER) return;
     int matches[COMMAND_MATCH_LIMIT], count = ui_command_matches(a, matches, COMMAND_MATCH_LIMIT);
-    int shown = minimum(count ? count : 1, minimum(7, maximum(1, a->rows - 12)));
+    int bottom = a->rows - (l->dense ? 4 : 6);
+    int shown = minimum(count ? count : 1, minimum(7, maximum(1, bottom - l->top - 1)));
     int first = clamp(a->command_cursor - shown + 1, 0, maximum(0, count - shown));
-    int x = l->main_x + 2, y = a->rows - 7 - shown, w = minimum(78, l->main - 4);
+    int x = l->main_x + 2, y = bottom - 1 - shown, w = minimum(78, l->main - 4);
     const char *border = a->roleplay ? RAIL LAV NORMAL : RAIL MINT NORMAL;
     card(a, x, y, w, shown + 2, border);
     cell(a, x + 2, y, w - 4, border, " Commands ");
@@ -628,7 +720,7 @@ static void frame(App *a)
     clear(&a->screen);
     styled(a, "\x1b[?25l" ROOT NORMAL "\x1b[2J\x1b[H");
     Layout l = layout(a);
-    if (a->cols < 35 || a->rows < 14) {
+    if (a->cols < 26 || a->rows < 10) {
         cell(a, 0, 0, a->cols, ROOT MINT BOLD, "Neutrino · enlarge terminal");
         return;
     }
@@ -637,10 +729,15 @@ static void frame(App *a)
     library(a, &l);
     detail(a, &l);
     int title_x = l.main_x + 3, x = l.main_x + 3, width = content_width(&l);
-    int y = l.top + 4, height = maximum(1, l.height - 5);
-    if (l.height < 7) { y = l.top + 2; height = maximum(1, a->rows - 5 - y); }
+    int y = l.top + (l.dense ? 2 : 4);
+    int height = maximum(1, l.height - (l.dense ? 2 : 5));
     int cx = -1, cy = -1;
-    if (a->view_panel) panel(a, &l, x, y, width, height);
+    if (l.library_only) {
+        /* The library replaces the reading pane on narrow or short terminals. */
+    } else if (a->view_panel && a->panel_neofetch) {
+        int start = l.top + (l.dense ? 1 : 3);
+        neofetch(a, &l, x, start, l.main - 6, height + y - start);
+    } else if (a->view_panel) panel(a, &l, x, y, width, height);
     else {
         breadcrumbs(a, &l, title_x);
         clipped_cell(a, title_x, l.top + 1, l.main - 6, ROOT TXT BOLD,
@@ -649,16 +746,17 @@ static void frame(App *a)
         if (a->roleplay) roleplay(a, &l, x, y, width, height);
         else manuscript(a, &l, x, y, width, height, &cx, &cy);
     }
-    if (l.height >= 7) {
+    if (!l.dense && !l.library_only) {
         const char *hint = a->editing ? "Ctrl+S save  ·  Esc close" :
             a->view_panel ? (a->panel_preview ? "F8 apply  ·  F9 reject  ·  ←/→ candidates  ·  Esc close" :
-                            "PgUp/PgDn scroll  ·  Esc close") :
+                            a->panel_neofetch ? "↑↓ scroll  ·  Auto-refresh  ·  Esc close" : "PgUp/PgDn scroll  ·  Esc close") :
             a->roleplay ? "/swipe alternate  ·  /branch history" : "F4 edit  ·  F5 continue  ·  PgUp/PgDn scroll";
         cell(a, title_x, a->rows - 7, l.main - 6, ROOT QUIET NORMAL, hint);
     }
     composer(a, &l, &cx, &cy);
     const char *state = a->status.len ? str(&a->status) : "Ready";
-    const char *keys = l.width >= 94 ? "F1 help   Ctrl+P commands   Ctrl+Q quit" :
+    const char *keys = l.dense && a->view_panel ? "Esc close" :
+                       l.width >= 94 ? "F1 help   Ctrl+P commands   Ctrl+Q quit" :
                        l.width >= 55 ? "Ctrl+P commands" : "F1 help";
     int reserve = (int)strlen(keys) + 3;
     cell(a, l.left + 2, a->rows - 2, l.width - reserve - 4, preview_busy(&a->preview) ? ROOT GOLD : ROOT DIM, state);

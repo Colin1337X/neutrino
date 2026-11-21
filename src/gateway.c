@@ -48,6 +48,12 @@ typedef struct {
     Route route;
     bool closing;
 } Client;
+typedef struct {
+    Client clients[CLIENTS];
+    int workers;
+    uint64_t last_provider_result;
+    bool provider_ok;
+} Gateway;
 
 static void close_socket(Socket s)
 {
@@ -82,7 +88,8 @@ static bool route_for(const char *name, Route *route)
     const char *key = env("NEUTRINO_API_KEY", "");
     const bool slots = !strcmp(env("NEUTRINO_LLAMA_SLOTS", ""), "1");
     *route = (Route){.endpoint = base, .key = key, .model = server_model(),
-        .options = {.slot = slots ? 0 : -1}, .lane = 0};
+        .options = {.slot = slots ? 0 : -1,
+                    .include_usage = !strcmp(env("NEUTRINO_STREAM_USAGE", ""), "1")}, .lane = 0};
     if (!strcmp(name, "narrator") ||
         (!strncmp(name, "narrator/", 9) && !strcmp(name + 9, route->model)))
         return *route->model != 0;
@@ -104,6 +111,7 @@ static bool route_for(const char *name, Route *route)
         route->endpoint = recall_endpoint;
         route->key = env("NEUTRINO_RECALL_API_KEY", "");
         route->options.slot = -1;
+        route->options.include_usage = false;
         route->lane = 2;
     }
     const char *recall_model = env("NEUTRINO_RECALL_MODEL", route->model);
@@ -114,6 +122,7 @@ static bool route_for(const char *name, Route *route)
             route->key = key;
             route->lane = slots ? 1 : 0;
             route->options.slot = slots ? 1 : -1;
+            route->options.include_usage = !strcmp(env("NEUTRINO_STREAM_USAGE", ""), "1");
             recall_model = server_model();
         } else if (strncmp(binding, "recall:", 7) || strcmp(binding + 7, recall_model)) {
             return false;
@@ -181,7 +190,35 @@ static bool local_host(const char *host, const char *end)
     return true;
 }
 
-static void parse_request(Client *c, const char *token)
+static void respond_status(Client *c, const Gateway *gateway)
+{
+    int active = 0, queued = 0;
+    for (int i = 0; i < CLIENTS; i++) {
+        if (gateway->clients[i].job) active++;
+        if (gateway->clients[i].messages) queued++;
+    }
+    bool pinned = !strcmp(env("NEUTRINO_LLAMA_SLOTS", ""), "1");
+    Json *status = cJSON_CreateObject();
+    set(status, "service", "neutrino");
+    set(status, "version", NEUTRINO_VERSION);
+    set(status, "model", server_model());
+    set(status, "provider", !gateway->last_provider_result ? "untested" : gateway->provider_ok ? "ok" : "failed");
+    if (gateway->last_provider_result)
+        put(status, "provider_age_s", cJSON_CreateNumber((double)((monotonic_ms() - gateway->last_provider_result) / 1000)));
+    integer(status, "active", active);
+    integer(status, "queued", queued);
+    integer(status, "workers", pinned ? 1 : gateway->workers);
+    put(status, "pinned_slots", cJSON_CreateBool(pinned));
+    char *body = cJSON_PrintUnformatted(status);
+    if (!body) abort();
+    format(&c->send, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+           "Cache-Control: no-store\r\nConnection: close\r\nContent-Length: %zu\r\n\r\n%s", strlen(body), body);
+    c->closing = true;
+    cJSON_free(body);
+    cJSON_Delete(status);
+}
+
+static void parse_request(Client *c, const char *token, const Gateway *gateway)
 {
     const char *s = str(&c->request), *headers_end = strstr(s, "\r\n\r\n");
     if (!headers_end) {
@@ -192,7 +229,10 @@ static void parse_request(Client *c, const char *token)
     if (offset > HEADER_LIMIT) { http_error(c, 431, "Headers Too Large"); return; }
     const char *line_end = strstr(s, "\r\n");
     const char path[] = "POST /v1/chat/completions HTTP/1.1";
-    if ((size_t)(line_end - s) != sizeof path - 1 || memcmp(s, path, sizeof path - 1)) {
+    const char status_path[] = "GET /v1/status HTTP/1.1";
+    bool status_request = (size_t)(line_end - s) == sizeof status_path - 1 &&
+                          !memcmp(s, status_path, sizeof status_path - 1);
+    if (!status_request && ((size_t)(line_end - s) != sizeof path - 1 || memcmp(s, path, sizeof path - 1))) {
         http_error(c, 404, "Not Found");
         return;
     }
@@ -228,6 +268,11 @@ static void parse_request(Client *c, const char *token)
     }
     if (!has_host) { http_error(c, 400, "Host Required"); return; }
     if (!authorized) { http_error(c, 401, "Unauthorized"); return; }
+    if (status_request) {
+        if (length || c->request.len != offset) http_error(c, 400, "Bad Request");
+        else respond_status(c, gateway);
+        return;
+    }
     if (!has_length) { http_error(c, 411, "Length Required"); return; }
     if (c->request.len < offset + length) return;
     if (c->request.len != offset + length || memchr(s + offset, 0, length)) {
@@ -273,7 +318,22 @@ static void event(Text *out, const char *field, const char *value)
     cJSON_Delete(body);
 }
 
-static void pump_client(Client *c, const char *token)
+static void event_metrics(Text *out, InferenceMetrics metrics)
+{
+    Json *body = cJSON_CreateObject(), *data = cJSON_CreateObject();
+    if (metrics.tokens_per_second > 0)
+        put(data, "tokens_per_second", cJSON_CreateNumber(metrics.tokens_per_second));
+    if (metrics.completion_tokens > 0) integer(data, "completion_tokens", metrics.completion_tokens);
+    if (metrics.has_ttft) put(data, "ttft_ms", cJSON_CreateNumber((double)metrics.ttft_ms));
+    put(body, "neutrino_metrics", data);
+    char *json = cJSON_PrintUnformatted(body);
+    if (!json) abort();
+    format(out, "data: %s\n\n", json);
+    cJSON_free(json);
+    cJSON_Delete(body);
+}
+
+static void pump_client(Client *c, const char *token, Gateway *gateway)
 {
     if (c->job) {
         size_t out = c->output.len, thought = c->thinking.len;
@@ -282,7 +342,12 @@ static void pump_client(Client *c, const char *token)
             if (out < c->output.len) event(&c->send, "content", c->output.data + out);
             if (thought < c->thinking.len) event(&c->send, "reasoning_content", c->thinking.data + thought);
             if (done) {
+                if (c->route.lane == 0) {
+                    gateway->last_provider_result = monotonic_ms();
+                    gateway->provider_ok = !c->error.len;
+                }
                 if (c->error.len) event(&c->send, "error", "");
+                else event_metrics(&c->send, inference_metrics(c->job));
                 append(&c->send, "data: [DONE]\n\n");
                 c->closing = true;
             }
@@ -305,7 +370,7 @@ static void pump_client(Client *c, const char *token)
                 memchr(buffer, 0, (size_t)n)) http_error(c, 400, "Bad Request");
             else {
                 append_n(&c->request, buffer, (size_t)n);
-                parse_request(c, token);
+                parse_request(c, token, gateway);
             }
         } else if (n == 0 || n > 0 || (n < 0 && !would_block())) {
             discard_socket(c);
@@ -391,7 +456,8 @@ int inference_server(int port, const volatile sig_atomic_t *stop)
     } else {
         printf("Neutrino server listening on http://127.0.0.1:%d/v1\n", port);
         fflush(stdout);
-        Client clients[CLIENTS] = {0};
+        Gateway gateway = {.workers = workers};
+        Client *clients = gateway.clients;
         for (int i = 0; i < CLIENTS; i++) clients[i].socket = BAD_SOCKET;
         while (!*stop) {
             Socket incoming = accept(listener, NULL, NULL);
@@ -404,7 +470,7 @@ int inference_server(int port, const volatile sig_atomic_t *stop)
                     clients[slot].touched = monotonic_ms();
                 }
             }
-            for (int i = 0; i < CLIENTS; i++) pump_client(&clients[i], token);
+            for (int i = 0; i < CLIENTS; i++) pump_client(&clients[i], token, &gateway);
             dispatch(clients, workers);
             pause_ms(12);
         }
