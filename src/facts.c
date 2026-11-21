@@ -638,7 +638,8 @@ static bool placement_object(const char *sentence, Text *name, Text *target)
     static const struct { const char *word, *relation; } prepositions[] = {
         {"inside", "in"}, {"within", "in"}, {"into", "in"}, {"in", "in"},
         {"onto", "on"}, {"on", "on"}, {"to", "to"}, {"against", "against"},
-        {"beneath", "under"}, {"underneath", "under"}, {"under", "under"}
+        {"beneath", "under"}, {"underneath", "under"}, {"under", "under"},
+        {"beside", "beside"}, {"next to", "beside"}
     };
     static const char *const vague[] = {"it", "them", "something", "anything", "everything", "nothing",
         "this", "that", "these", "those", "him", "her", "me", "us", "himself", "herself", "yourself"};
@@ -697,9 +698,9 @@ end:
 
 static bool attached_placement(const char *sentence, Text *name, Text *target)
 {
-    static const char *const states[] = {"is", "remains", "was", "resting", "settles"};
+    static const char *const states[] = {"is", "remains", "was", "resting", "settles", "rests"};
     static const char *const verbs[] = {"clipped", "tied", "fastened", "secured",
-        "attached", "clamped", "strapped", "hooked", "pinned", "resting", "buried", "settles"};
+        "attached", "clamped", "strapped", "hooked", "pinned", "resting", "buried", "settles", "rests", "placed"};
     static const char *const qualifiers[] = {"securely ", "firmly ", "perfectly ", "upright ", "flat ", "deep ", "carefully "};
     if (strpbrk(sentence, "?\"") || strstr(sentence, "“")) return false;
     Text clause = {0}, words = {0}, active = {0}, leading_subject = {0}, subject = {0};
@@ -725,7 +726,7 @@ static bool attached_placement(const char *sentence, Text *name, Text *target)
             else if (state == line && leading_subject.len) article = nullptr;
             else continue;
             const char *action = state + strlen(states[i]) + 1;
-            if (!strcmp(states[i], "resting") || !strcmp(states[i], "settles")) {
+            if (i >= 3) {
                 if (article) {
                     clear(&subject);
                     phrase(&subject, article, state);
@@ -744,8 +745,8 @@ static bool attached_placement(const char *sentence, Text *name, Text *target)
                 }
                 if (!*location) break;
                 clear(&active);
-                const char *verb = !strcmp(verbs[j], "resting") || !strcmp(verbs[j], "buried") ||
-                                   !strcmp(verbs[j], "settles") ? "placed" : verbs[j];
+                const char *verb = i >= 3 || !strcmp(verbs[j], "resting") || !strcmp(verbs[j], "buried")
+                    ? "placed" : verbs[j];
                 format(&active, "Someone %s ", verb);
                 if (article) append_n(&active, article, (size_t)(state - article));
                 else format(&active, "%s ", str(&leading_subject));

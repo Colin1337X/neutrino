@@ -478,6 +478,14 @@ int main(void)
         fputs("Retain explicit item locations in descriptions of visible props.\n", stderr); rc = 1;
     }
     cJSON_Delete(placements);
+    placements = compendium_placement_entries(nullptr, nullptr,
+        "The silver whistle rests against the railing. The red box is placed securely beside the lock.");
+    if (cJSON_GetArraySize(placements) != 2 ||
+        strcmp(js(cJSON_GetArrayItem(placements, 0), "description"), "The silver whistle rests against the railing.") ||
+        strcmp(js(cJSON_GetArrayItem(placements, 1), "name"), "red box")) {
+        fputs("Track directly observed locations using the narrator's actual relation.\n", stderr); rc = 1;
+    }
+    cJSON_Delete(placements);
     scene = compendium_scene_evidence("Sera grips the brass lantern and lifts the blue satchel. "
         "She supposes the wax seal might have broken.");
     if (cJSON_GetArraySize(scene) != 2 ||
