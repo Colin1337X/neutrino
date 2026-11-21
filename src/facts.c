@@ -748,13 +748,15 @@ Json *compendium_signal_evidence(const char *reply)
         if (word(line, "rings the brass bell") || word(line, "rang the brass bell") ||
             word(line, "strikes the brass bell") || word(line, "struck the brass bell") ||
             word(line, "brass bell striking it") ||
-            (word(line, "brass bell") && word(line, "striking the bell"))) label = "brass bell";
+            (word(line, "brass bell") && (word(line, "striking the bell") ||
+             word(line, "strikes the heavy brass") || word(line, "repeating the strike")))) label = "brass bell";
         else if (word(line, "rings the bell") || word(line, "rang the bell") ||
                  word(line, "strikes the bell") || word(line, "struck the bell") ||
                  word(line, "bell striking it") || word(line, "striking the bell") ||
                  word(line, "bell tolls") || word(line, "bell tolled")) label = "bell";
         else if (word(line, "flare rises") || word(line, "flare rose") || word(line, "flare floats") ||
-                 word(line, "flare drifts") || (word(line, "flare") &&
+                 word(line, "flare drifts") || word(line, "flare erupts") || word(line, "flare burns") ||
+                 word(line, "watches the flare") || word(line, "sees the flare") || (word(line, "flare") &&
                   (word(line, "now floats") || word(line, "descends toward")))) label = "flare";
         if (!label) continue;
         Json *fact = cJSON_CreateObject();

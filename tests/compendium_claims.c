@@ -211,6 +211,11 @@ int main(void)
         rc = 1;
     }
     cJSON_Delete(signals);
+    signals = compendium_signal_evidence("Iona grips the brass bell in her hand, the vibration shaking her trembling hands "
+        "as she strikes the heavy brass with a sharp, rhythmic motion, repeating the strike until the brass resonates clearly. "
+        "She watches the flare, the sudden bright white signal contrasting sharply with the murky water around the west gate.");
+    if (cJSON_GetArraySize(signals) != 2) { fputs("Witnessed strikes and visible flares must both file.\n", stderr); rc = 1; }
+    cJSON_Delete(signals);
     signals = compendium_signal_evidence("Iona's hands moved swiftly as she reached the brass bell, striking it once to summon "
         "the signal, and striking the bell again to complete the two-ring broadcast before stepping back to await the flare.");
     if (cJSON_GetArraySize(signals) != 1 || strcmp(js(cJSON_GetArrayItem(signals, 0), "name"), "brass bell")) {
