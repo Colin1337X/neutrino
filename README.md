@@ -46,6 +46,8 @@ Create a scene with `/scene /Folder/Book/Chapter/Scene`. In the editor, use **Ct
 
 `/batch /folder/book/chapter` opens the scenes under that path together in a read-only panel. Use `/batch /` for the whole workspace or a narrower path for large manuscripts.
 
+`/append TEXT` adds a paragraph to the current manuscript scene or scratchpad. For a scene, it saves the previous draft in revision history.
+
 In Manuscript, plain input supplies a direction for Continue. The writing palette has Continue, Rewrite, Expand, Describe, Draft, Brainstorm, Critique, Continuity, and Bible extraction. Up to three candidate requests run on worker threads. Review shows each candidate's status and keeps their original order as they finish. Compare them with the left and right arrows, then accept or reject. Describe offers selectable senses and multiple variants per sense via `/senses` and `/count`. Use `/insert` to add a detail after the target, or `/preview-save FILE` to keep a candidate separately. If the source has changed since generation, Neutrino blocks applying the candidate. Accepted extracts land as Bible drafts for manual promotion.
 
 Use `/play` from a scene to start a linked roleplay. The narrator receives the linked manuscript and shared story sources. Use `/story TITLE` to start independently, or `/import FILE` to start from a character card. A roleplay turn saves the player message, then streams the reply. `/swipe` generates a sibling reply. `/previous`, `/next`, and `/branch ID` navigate the tree. Use `/persona NAME | DESCRIPTION` for a player persona, `/lore FILE` for keyword-triggered sources, and `/preset FILE` for enabled prompt text. `/transcript /Folder/Book/Chapter/Scene` copies the active branch into a new manuscript scene.
@@ -53,6 +55,8 @@ Use `/play` from a scene to start a linked roleplay. The narrator receives the l
 Use `/rewind` to return to the previous narrator reply, `/rewind ID` to return to an ancestor, or `/rewind 0` to return to the start. Your next turn grows a branch from that point. `/search TEXT` finds literal, case-sensitive matches on the active visible path, newest first. Use `/branch ID` to open a match or revisit the original continuation. [rp-core roleplay guide](https://github.com/LeviTheWeasel/rp-core/blob/main/docs/USER-GUIDE.md)
 
 `/tails` lists visible branch ends with a short excerpt and their message IDs. Use `/branch ID` to open one.
+
+`/lore-test TEXT` checks the triggers and source budget for a proposed next player message. It uses the current branch and leaves the transcript alone.
 
 ## Rooms, inventory, and characters
 
@@ -65,6 +69,8 @@ Use `/npc NAME | DESCRIPTION` to place a character in the current room. `@Name M
 Use `/wear ITEM` for a carried article and `/remove ITEM` to take it off and keep it in your inventory. The active branch's worn items appear in `/world`, `/inspect`, and the narrator's world context.
 
 `/inventory` shows items on you and in reach. Use `/inventory held`, `/inventory worn`, or `/inventory nearby` to focus the list.
+
+`/who` lists the characters currently in the room and the names you can address.
 
 ## Serve the TUI over SSH
 
@@ -119,7 +125,7 @@ The dashboard reports median tokens per second and median upstream time to first
 
 Each completed narrator reply queues filing. The filing agent writes typed facts such as characters, places, items, events, and notes onto the reply that established them. Neutrino checks entries across types for verbatim repetitions and equivalent location, stranding, and concealment claims. It keeps unrecognized wording, conflicting state, and novel sentences alongside established facts. The historian compacts older turns into a cumulative recap. Recall combines relevant active entries with recent dialogue, the recap, and other story sources. Switching or swiping a branch changes the reply history and the memory entries visible to the narrator.
 
-When the filing agent returns an empty opening filing, Neutrino checks the narrator's prose for explicit object placements, stranded characters, and opening-time rules. A later empty filing can still recover an explicitly placed, previously unseen object. These records keep the narrator's original sentence and are marked `reply-evidence` in the workspace. Player cues provide context for filing, while direct evidence comes from the narrator's reply.
+The filing agent receives the latest narrator reply and relevant entries for deduplication. Each proposed filing must quote the latest reply and name an entity that appears in the supporting text. Short quotations expand to their source sentences so qualifications remain visible. If no opening filings pass the check, Neutrino looks for explicit object placements, stranded characters, and opening-time rules in the narrator's prose. A later empty filing can recover an explicitly placed, previously unseen object. These fallback records keep the original sentence and are marked `reply-evidence` in the workspace.
 
 Before accepting a filing, Neutrino can correct an item name when the narrator explicitly identifies a different concealed object. It files a named, titled person as a character if the reply supplies no explicit creature identity. Use `/memory refile ID` to run the current filing rules on an earlier reply.
 

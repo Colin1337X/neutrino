@@ -41,6 +41,7 @@ const Command commands[] = {
     {"map", " [destination]", "Show world links or the shortest route from this room"},
     {"inspect", " [name]", "Read details about the room, a nearby character, or an item"},
     {"inventory", " [held|worn|nearby]", "Browse items you hold, wear, or can reach"},
+    {"who", "", "Show characters currently in the room"},
     {"room", " NAME | DESCRIPTION", "Define a room"},
     {"connect", " ROOM | ROOM", "Link two rooms"},
     {"go", " ROOM", "Move through an exit"},
@@ -59,6 +60,7 @@ const Command commands[] = {
     {"narrate", " [direction]", "Continue roleplay without a player message"},
     {"persona", " name | description", "Set the player's persona"},
     {"lore", " file", "Attach a keyed lorebook to the current story"},
+    {"lore-test", " text", "Preview lore triggers for a possible next message"},
     {"preset", " file", "Attach enabled prompt text from a chat preset"},
     {"link", " /folder/book/chapter/scene", "Share manuscript and canon with this story"},
     {"transcript", " /folder/book/chapter/scene", "Copy the active conversation to a new scene"},
@@ -85,6 +87,7 @@ const Command commands[] = {
     {"find", " text", "Find literal text across the manuscript"},
     {"batch", " PATH", "Read scenes together from a folder, book, or chapter"},
     {"replace", " OLD | NEW", "Replace literal text in the current scene and save a revision"},
+    {"append", " text", "Add a paragraph to the manuscript and save a revision"},
     {"revisions", "", "Inspect saved drafts"},
     {"compare", " NUMBER", "Compare a saved draft with the current scene"},
     {"restore", " number", "Restore a prior draft and keep the current version"},
@@ -1383,6 +1386,43 @@ static void read_batch(App *a, const char *path)
     if (!shown) append(&a->info, "No manuscript scenes in this path.");
 }
 
+static void test_lore(App *a, const char *cue)
+{
+    if (!a->story || !a->roleplay) { status(a, "Open a roleplay story first."); return; }
+    if (!*cue) { status(a, "Use /lore-test TEXT."); return; }
+    show_info(a, "Lore trigger test");
+    Text context = {0};
+    bool fits = collect_context_with_cue(&a->ws, nullptr, a->story, number(a->story, "head"),
+                                         cue, &context, &a->info);
+    if (!a->info.len) append(&a->info, "No lore entries attached.\n");
+    if (!fits) append(&a->info, "\nRequired sources exceed the context budget.\n");
+    release(&context);
+}
+
+static void append_manuscript(App *a, const char *text)
+{
+    if (a->roleplay) { status(a, "Switch to Manuscript with F2 first."); return; }
+    if (!*text) { status(a, "Use /append TEXT."); return; }
+    const char *source = scene_text(&a->ws, a->scene);
+    size_t old_len = strlen(source), len = strlen(text);
+    bool newline = old_len && source[old_len - 1] != '\n';
+    if (old_len > EDIT_LIMIT || len + (newline ? 2 : old_len ? 1 : 0) > EDIT_LIMIT - old_len) {
+        status(a, "The result exceeds the manuscript limit.");
+        return;
+    }
+    Text result = {0};
+    append(&result, source);
+    if (old_len) append(&result, newline ? "\n\n" : "\n");
+    append(&result, text);
+    if (scene_edit(&a->ws, a->scene, str(&result), "append")) {
+        close_panel(a);
+        a->selected = false;
+        a->scroll = INT_MAX;
+        status(a, "Paragraph appended");
+    }
+    release(&result);
+}
+
 static void slash_command(App *a, char *line)
 {
     char *arg = line;
@@ -1396,7 +1436,7 @@ static void slash_command(App *a, char *line)
         return;
     }
     const char *const world_commands[] = {"world", "room", "connect", "go", "item",
-        "take", "drop", "wear", "remove", "npc", "weather", "say", "map", "inspect", "inventory"};
+        "take", "drop", "wear", "remove", "npc", "weather", "say", "map", "inspect", "inventory", "who"};
     for (size_t i = 0; i < sizeof world_commands / sizeof *world_commands; i++) {
         if (!strcmp(line, world_commands[i])) { world_command(a, line, arg); return; }
     }
@@ -1412,6 +1452,8 @@ static void slash_command(App *a, char *line)
     else if (!strcmp(line, "rewind")) rewind_story(a, arg);
     else if (!strcmp(line, "tails")) show_tails(a);
     else if (!strcmp(line, "batch")) read_batch(a, arg);
+    else if (!strcmp(line, "lore-test")) test_lore(a, arg);
+    else if (!strcmp(line, "append")) append_manuscript(a, arg);
     else if (!strcmp(line, "search")) search_story(a, arg);
     else if (!strcmp(line, "replace")) replace_scene_text(a, arg);
     else if (!strcmp(line, "quit")) quit(a);

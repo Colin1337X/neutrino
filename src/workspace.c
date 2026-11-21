@@ -894,7 +894,8 @@ static void collect_lore(const Json *book, const char *label, const char *recent
         }
     }
 }
-bool collect_context(const Workspace *ws, const Json *scene, const Json *story, int head, Text *out, Text *trace)
+bool collect_context_with_cue(const Workspace *ws, const Json *scene, const Json *story, int head,
+                              const char *cue, Text *out, Text *trace)
 {
     Json *rec, *field, *bible = at(ws->root, "bible"), *records = at(ws->root, "records");
     const char *path = scene ? js(scene, "path") : js(story, "scene");
@@ -953,12 +954,13 @@ bool collect_context(const Workspace *ws, const Json *scene, const Json *story, 
         if (pass == 0 && story) {
             Text recent = {0};
             Json *active = story_path(story, head), *node;
-            int skip = cJSON_GetArraySize(active) - 4;
+            int skip = cJSON_GetArraySize(active) - (cue ? 3 : 4);
             cJSON_ArrayForEach(node, active) {
                 if (skip-- > 0) continue;
                 append(&recent, js(node, "content"));
                 append(&recent, "\n");
             }
+            if (cue) append(&recent, cue);
             Json *card = at(story, "card");
             collect_lore(at(card, "character_book"), "Card lore", str(&recent), out, limit, trace);
             collect_lore(at(card, "book"), "Card book", str(&recent), out, limit, trace);
@@ -969,6 +971,10 @@ bool collect_context(const Workspace *ws, const Json *scene, const Json *story, 
         }
     }
     return fits;
+}
+bool collect_context(const Workspace *ws, const Json *scene, const Json *story, int head, Text *out, Text *trace)
+{
+    return collect_context_with_cue(ws, scene, story, head, nullptr, out, trace);
 }
 
 void workspace_demo(Workspace *ws)

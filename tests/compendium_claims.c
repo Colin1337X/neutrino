@@ -160,6 +160,27 @@ int main(void)
                                       "Captain Ember, a dragon, watches the bay.", &label);
     if (strcmp(type, "creature") || label.len) { fputs("Preserve explicit species evidence.\n", stderr); rc = 1; }
     release(&label);
+    Text quote = {0};
+    const char *narration = "Iona considers hiding the copper key, but leaves it on the console. She ties the silver whistle to the railing.";
+    if (compendium_filing_evidence(narration, "Iona hides the copper key in the red box.", &quote) ||
+        compendium_filing_evidence(narration, "Captain Mara is stranded on the west pier.", &quote) ||
+        compendium_filing_evidence(narration, "Iona presses the red button.", &quote)) {
+        fputs("Player-only or earlier-turn prose must not ground a filing.\n", stderr);
+        rc = 1;
+    }
+    if (!compendium_filing_evidence(narration, "hiding the copper key", &quote) ||
+        strcmp(str(&quote), "Iona considers hiding the copper key, but leaves it on the console.") ||
+        compendium_filing_label("Copper key hiding in the red box", str(&quote))) {
+        fputs("A quoted fragment must retain its qualifying sentence and ground its entity label.\n", stderr);
+        rc = 1;
+    }
+    if (!compendium_filing_evidence(narration, "ties the silver whistle to the railing", &quote) ||
+        strcmp(str(&quote), "She ties the silver whistle to the railing.") ||
+        !compendium_filing_label("Silver whistle", str(&quote))) {
+        fputs("An exact new action must retain its original supporting prose.\n", stderr);
+        rc = 1;
+    }
+    release(&quote);
     cJSON_Delete(batch);
     cJSON_Delete(known);
     return rc;

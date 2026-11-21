@@ -359,13 +359,8 @@ static bool opening_reply(const Json *story, const Json *reply)
 
 static Json *filing_prompt(const Json *story, int id)
 {
-    Json *reply = story_pick(story, id), *parent = story_pick(story, number(reply, "parent"));
+    Json *reply = story_pick(story, id);
     Text input = {0};
-    if (!strcmp(js(parent, "role"), "user")) {
-        append(&input, "Player context for resolving references only:\n");
-        excerpt(&input, js(parent, "content"), 1000);
-        append(&input, "\n\n");
-    }
     Json *existing = collect_entries(story, number(reply, "parent")), *record;
     if (existing->child) append(&input, "\n\nRelevant facts already filed:");
     int shown = 0;
@@ -382,11 +377,13 @@ static Json *filing_prompt(const Json *story, int id)
         append(&input, "\n\nThis is the opening reply. File concrete actions and durable states it actually establishes, "
             "including actions embedded in descriptive prose. File what the narrator actually depicts even if the player "
             "asked for something different. Do not file requested events that never happened in the reply.");
-    append(&input, "\n\nFile a new entity or action described above, even if the reply also repeats old facts. "
-        "A restatement alone is unchanged. If the latest reply established no new facts, output [].");
+    append(&input, "\n\nCopy the exact supporting sentence or consecutive sentences from this reply into description. "
+        "Do not paraphrase or add punctuation. Use a short entity name that appears in the quotation. "
+        "If no new fact has a verbatim quotation here, output [].");
     Json *messages = request("File durable facts newly established by the final assistant message. "
         "Ignore speculation. Preserve uncertainty when the story only suggests a fact. "
-        "Return only a JSON array of up to six objects with type, name and description. "
+        "Return only a JSON array of up to six objects with type, name and description, with description "
+        "copied verbatim from the latest reply. Previously filed entries are only for deduplication. "
         "Use one object per entity and choose the most specific type. Allowed types: "
         "character, place, item, event, note, faction, rule, relationship, plot, quest, creature. "
         "Use character for named people. Keep the entity named in the description aligned with the entry name. "
@@ -397,71 +394,77 @@ static Json *filing_prompt(const Json *story, int id)
     release(&input);
     return messages;
 }
-static Json *parse_filing(const Text *output, const Json *story, const Json *reply)
+static bool file_candidates(Json *result, const Json *known, const Json *answer, const Json *reply,
+                            bool fallback, int *index)
 {
-    Json *answer = json_answer(output), *item;
-    if (!cJSON_IsArray(answer) || cJSON_GetArraySize(answer) > 6) { cJSON_Delete(answer); return NULL; }
-    const bool opening_fallback = !answer->child && opening_reply(story, reply);
-    if (opening_fallback) {
-        cJSON_Delete(answer);
-        answer = compendium_opening_evidence(js(reply, "content"));
-    }
-    Json *result = cJSON_CreateArray();
-    Json *known = collect_entries(story, number(reply, "parent"));
-    int index = 0, anchor = number(reply, "id");
+    const int anchor = number(reply, "id");
+    const char *prose = js(reply, "content");
+    Json *item;
     cJSON_ArrayForEach(item, answer) {
         const char *type = js(item, "type"), *name = js(item, "name"), *description = js(item, "description");
-        if (!valid_kind(type) || !*name || strlen(name) > 160 || !*description || strlen(description) > 2400) {
-            cJSON_Delete(answer);
-            cJSON_Delete(result);
-            cJSON_Delete(known);
-            return NULL;
-        }
-        index++;
-        Text corrected = {0};
-        type = compendium_filing_identity(type, name, description, js(reply, "content"), &corrected);
+        if (!valid_kind(type) || !*name || strlen(name) > 160 || !*description || strlen(description) > 2400)
+            return false;
+        (*index)++;
+        Text corrected = {0}, evidence = {0}, novel = {0};
+        if (!compendium_filing_evidence(prose, description, &evidence)) continue;
+        type = compendium_filing_identity(type, name, description, prose, &corrected);
         if (corrected.len) name = str(&corrected);
-        if (duplicates_fact(result, type, name, description)) { release(&corrected); continue; }
-        Text novel = {0};
-        bool ambiguous = compendium_novel_claims(known, result, type, name, description, &novel);
-        bool partial = strcmp(description, str(&novel)) != 0;
-        description = str(&novel);
-        if (!novel.len || (!ambiguous && duplicates_fact(known, type, name, description)) ||
-            duplicates_fact(result, type, name, description)) {
-            release(&novel);
-            release(&corrected);
-            continue;
-        }
-        Json *entity = find_entity(result, type, name);
-        if (entity) {
-            const char *previous = js(entity, "description");
-            if (strlen(previous) + strlen(description) + 1 <= 2400) {
-                Text combined = {0};
-                format(&combined, "%s\n%s", previous, description);
-                set(entity, "description", str(&combined));
-                release(&combined);
+        if (compendium_filing_label(name, str(&evidence))) {
+            bool ambiguous = compendium_novel_claims(known, result, type, name, str(&evidence), &novel);
+            bool partial = strcmp(str(&evidence), str(&novel)) != 0;
+            description = str(&novel);
+            Text exact = {0};
+            if (novel.len && partial && !compendium_filing_evidence(prose, description, &exact))
+                description = str(&evidence);
+            if (novel.len &&
+                (ambiguous || !duplicates_fact(known, type, name, description)) &&
+                !duplicates_fact(result, type, name, description)) {
+                Json *entity = find_entity(result, type, name);
+                if (entity) {
+                    const char *previous = js(entity, "description");
+                    if (strlen(previous) + strlen(description) + 1 <= 2400) {
+                        Text combined = {0};
+                        format(&combined, "%s\n%s", previous, description);
+                        set(entity, "description", str(&combined));
+                        release(&combined);
+                    }
+                } else {
+                    char id[40];
+                    snprintf(id, sizeof id, "A%d.%d", anchor, *index);
+                    entity = entry(id, type, name, description);
+                    if (fallback) set(entity, "memorySource", "reply-evidence");
+                    cJSON_AddItemToArray(result, entity);
+                }
+                if (partial) put(entity, "memoryAppend", cJSON_CreateTrue());
             }
-            if (partial) put(entity, "memoryAppend", cJSON_CreateTrue());
-            release(&novel);
-            release(&corrected);
-            continue;
+            release(&exact);
         }
-        char id[40];
-        snprintf(id, sizeof id, "A%d.%d", anchor, index);
-        Json *fact = entry(id, type, name, description);
-        if (partial) put(fact, "memoryAppend", cJSON_CreateTrue());
-        if (opening_fallback) set(fact, "memorySource", "reply-evidence");
-        cJSON_AddItemToArray(result, fact);
         release(&novel);
+        release(&evidence);
         release(&corrected);
     }
+    return true;
+}
+static Json *parse_filing(const Text *output, const Json *story, const Json *reply)
+{
+    Json *answer = json_answer(output);
+    if (!cJSON_IsArray(answer) || cJSON_GetArraySize(answer) > 6) { cJSON_Delete(answer); return NULL; }
+    Json *result = cJSON_CreateArray();
+    Json *known = collect_entries(story, number(reply, "parent"));
+    int index = 0;
+    bool valid = file_candidates(result, known, answer, reply, false, &index);
     cJSON_Delete(answer);
-    if (!result->child) {
+    if (valid && !result->child && opening_reply(story, reply)) {
+        Json *fallback = compendium_opening_evidence(js(reply, "content"));
+        valid = file_candidates(result, known, fallback, reply, true, &index);
+        cJSON_Delete(fallback);
+    }
+    if (valid && !result->child) {
         Json *history = story_path(story, number(reply, "parent"));
         Text name = {0}, evidence = {0};
         if (compendium_placement_evidence(known, history, js(reply, "content"), &name, &evidence)) {
             char id[40];
-            snprintf(id, sizeof id, "A%d.%d", anchor, ++index);
+            snprintf(id, sizeof id, "A%d.%d", number(reply, "id"), ++index);
             Json *fact = entry(id, "item", str(&name), str(&evidence));
             set(fact, "memorySource", "reply-evidence");
             cJSON_AddItemToArray(result, fact);
@@ -471,6 +474,7 @@ static Json *parse_filing(const Text *output, const Json *story, const Json *rep
         cJSON_Delete(history);
     }
     cJSON_Delete(known);
+    if (!valid) { cJSON_Delete(result); return nullptr; }
     return result;
 }
 

@@ -280,6 +280,40 @@ static void copy_sentence(Text *out, const char *start, const char *end)
     append_n(out, start, (size_t)(end - start));
 }
 
+static bool word_byte(unsigned char c)
+{
+    return c >= 0x80 || isalnum(c) || c == '_';
+}
+
+/* Expand a verified quotation to its source sentences so a cropped clause
+   cannot lose its surrounding negation, uncertainty, or attribution. */
+bool compendium_filing_evidence(const char *reply, const char *quote, Text *evidence)
+{
+    const size_t length = strlen(quote);
+    if (!length) return false;
+    Text words = {0};
+    normalize_words(&words, quote);
+    bool phrase = strchr(str(&words), ' ') != nullptr;
+    release(&words);
+    if (!phrase) return false;
+    const char *match = reply;
+    while ((match = strstr(match, quote))) {
+        if ((match == reply || !word_byte((unsigned char)match[-1]) || !word_byte((unsigned char)*match)) &&
+            (!word_byte((unsigned char)match[length - 1]) || !word_byte((unsigned char)match[length]))) break;
+        match++;
+    }
+    if (!match) return false;
+    const char *start = reply, *end = sentence_end(start);
+    while (end <= match && *end) {
+        start = end;
+        end = sentence_end(start);
+    }
+    while (end < match + length && *end) end = sentence_end(end);
+    if (end - start > 2400) return false;
+    copy_sentence(evidence, start, end);
+    return evidence->len != 0;
+}
+
 static void compare_ledger(const Json *entries, const Claim *candidate, bool *matched, bool *conflict,
                            bool *known_role)
 {
@@ -373,6 +407,16 @@ static bool mentions(const char *text, const char *name)
     bool found = word(str(&words), name) != NULL;
     release(&words);
     return found;
+}
+bool compendium_filing_label(const char *name, const char *evidence)
+{
+    Text words = {0};
+    normalize_words(&words, name);
+    const char *label = str(&words);
+    if (!prefix(&label, "the ") && !prefix(&label, "a ")) prefix(&label, "an ");
+    bool grounded = *label && mentions(evidence, label);
+    release(&words);
+    return grounded;
 }
 
 static bool explicitly_nonhuman(const char *text, const char *name)

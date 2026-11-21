@@ -13,7 +13,7 @@
 
 typedef cJSON Json;
 typedef struct { char *data; size_t len, cap; } Text;
-#define NEUTRINO_VERSION "0.9.0"
+#define NEUTRINO_VERSION "0.10.0"
 #define FILE_LIMIT (32u * 1024u * 1024u)
 #define EDIT_LIMIT (2u * 1024u * 1024u)
 
@@ -29,6 +29,8 @@ bool compendium_novel_claims(const Json *known, const Json *batch, const char *t
 bool compendium_placement_evidence(const Json *known, const Json *history, const char *reply,
                                    Text *name, Text *evidence);
 Json *compendium_opening_evidence(const char *reply);
+bool compendium_filing_evidence(const char *reply, const char *quote, Text *evidence);
+bool compendium_filing_label(const char *name, const char *evidence);
 const char *compendium_filing_identity(const char *type, const char *name, const char *description,
                                        const char *reply, Text *corrected_name);
 char *copy(const char *value);
@@ -64,6 +66,8 @@ int story_push(Workspace *ws, Json *story, int parent, const char *role, const c
 Json *story_path(const Json *story, int head);
 void workspace_demo(Workspace *ws);
 bool collect_context(const Workspace *ws, const Json *scene, const Json *story, int head, Text *out, Text *trace);
+bool collect_context_with_cue(const Workspace *ws, const Json *scene, const Json *story, int head,
+                              const char *cue, Text *out, Text *trace);
 const char *scene_text(const Workspace *ws, const Json *scene);
 
 enum {

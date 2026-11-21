@@ -308,6 +308,23 @@ static void inspect_world(App *a, const char *name)
     cJSON_Delete(state);
 }
 
+static void room_roster(App *a)
+{
+    Json *state = world_state(a->story, number(a->story, "head"));
+    const char *room = js(state, "room");
+    app_info(a, "Who is here");
+    format(&a->info, "%s\n\n", *room ? room : "No current room");
+    Json *character;
+    int count = 0;
+    cJSON_ArrayForEach(character, at(state, "npc")) {
+        if (!*room || !equal_name(js(character, "room"), room)) continue;
+        format(&a->info, "%s\n%s\n\n", js(character, "name"), js(character, "text"));
+        count++;
+    }
+    append(&a->info, count ? "@NAME MESSAGE addresses a character here." : "No characters are present.");
+    cJSON_Delete(state);
+}
+
 static int map_index(const char *const rooms[], int count, const char *name)
 {
     for (int i = 0; i < count; i++)
@@ -404,6 +421,7 @@ void world_command(App *a, const char *verb, char *argument)
     if (!strcmp(verb, "map")) { world_map(a, trim(argument)); return; }
     if (!strcmp(verb, "inspect")) { inspect_world(a, trim(argument)); return; }
     if (!strcmp(verb, "inventory")) { inventory_panel(a, trim(argument)); return; }
+    if (!strcmp(verb, "who")) { room_roster(a); return; }
     if (preview_busy(&a->preview)) { app_status(a, "Finish the active reply before changing the world."); return; }
 
     bool room_cmd = !strcmp(verb, "room"), link_cmd = !strcmp(verb, "connect");
