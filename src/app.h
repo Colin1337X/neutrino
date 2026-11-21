@@ -23,13 +23,15 @@ typedef struct {
     char label[64];
     bool finished;
 } Candidate;
-enum { SIM_TOOL_LIMIT = 3, PHYSICS_ACOUSTIC_PATHS = 7 };
+enum { SIM_TOOL_LIMIT = 3, ACOUSTIC_BLOCKERS = 16, ACOUSTIC_ROOM_PATHS = 7,
+       PHYSICS_ACOUSTIC_PATHS = ACOUSTIC_ROOM_PATHS + 6 * ACOUSTIC_BLOCKERS };
 typedef enum { READING_NONE, READING_FLUID, READING_ACOUSTIC } ReadingKind;
 typedef struct {
     ReadingKind kind;
     double seconds, level_m, drained_l, remaining_l, flow_lps, initial_flow_lps;
-    struct { bool blocked; double delay_ms, level_db; } arrival[PHYSICS_ACOUSTIC_PATHS];
+    struct { bool blocked, faded; double delay_ms, level_db; } arrival[PHYSICS_ACOUSTIC_PATHS];
     int arrivals;
+    bool material_acoustics;
 } PhysicsReading;
 typedef struct {
     Operation op;

@@ -215,7 +215,9 @@ static const char tool_help[] =
     "tune: setting and numeric value. gravity (0.1–30 m/s²), outlet_coefficient (0.1–1), ambient_kelvin (150–400 K), wall_reflectivity (0–1).\n"
     "ray: origin, direction, min, max (three-number arrays in metres, min/max are box corners).\n"
     "rays: min, max, rays (array of origin/direction objects), backend (auto/cpu/gpu).\n"
-    "acoustic: min/max room corners, source, listener, optional blockers (array of min/max objects) and backend. Reports direct path and first wall echoes.\n"
+    "acoustic: min/max room corners, source, listener, optional blockers (min/max boxes) and backend. Reports direct path and reflections.\n"
+    "For acoustic material transmission set a blocker's material to {loss_db_per_m, reflectivity (0–1 amplitude)}. "
+    "Optional medium has loss_db_per_m and speed_m_s; min_level_db sets the relative cutoff.\n"
     "fluid: height (m), tank_area (m²), outlet_area (m²), seconds.\n"
     "gas: moles, volume (m³), leak (mol/s), seconds, optional kelvin (defaults to scene ambient).\n"
     "prop_load: qualitative scenery load. strength (fragile/ordinary/reinforced), load (light/steady/heavy).\n";

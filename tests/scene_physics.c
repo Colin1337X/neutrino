@@ -1,6 +1,7 @@
 #include "app.h"
 
 #include <float.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -150,6 +151,47 @@ static bool measurement_protocol(void)
     return ok;
 }
 
+static bool material_acoustics(void)
+{
+    const char *scene =
+        "{\"backend\":\"cpu\",\"min\":[0,0,0],\"max\":[10,8,4],"
+        "\"source\":[2,2,2],\"listener\":[8,2,2],"
+        "\"medium\":{\"loss_db_per_m\":1,\"speed_m_s\":300},\"blockers\":["
+        "{\"min\":[3,1,1],\"max\":[4,3,3],\"material\":{\"loss_db_per_m\":4,\"reflectivity\":0.6}},"
+        "{\"min\":[5,1,1],\"max\":[5.5,3,3],\"material\":{\"loss_db_per_m\":8,\"reflectivity\":0}},"
+        "{\"min\":[4,6,1],\"max\":[6,7,3],\"material\":{\"loss_db_per_m\":0,\"reflectivity\":0.5}}]}";
+    Json *args = cJSON_Parse(scene);
+    PhysicsReading reading;
+    Text result = {0}, prose = {0};
+    const double direct_level = -20 * log10(6) + 20 * log10(0.64) - 4.5 - 4 - 4;
+    const double echo_length = 10;
+    const double reflected_level = 20 * log10(0.5 / echo_length) - echo_length;
+    bool ok = physics_run_reading("acoustic", args, nullptr, &result, &reading) &&
+        reading.material_acoustics && reading.arrivals == ACOUSTIC_ROOM_PATHS + 1 &&
+        !reading.arrival[0].blocked && fabs(reading.arrival[0].delay_ms - 20) < 1e-9 &&
+        fabs(reading.arrival[0].level_db - direct_level) < 1e-9 &&
+        fabs(reading.arrival[ACOUSTIC_ROOM_PATHS].level_db - reflected_level) < 1e-9 &&
+        strstr(str(&result), "2 material traversals") && strstr(str(&result), "Object 3 Y-min echo");
+    put(args, "min_level_db", cJSON_CreateNumber(-25));
+    clear(&result);
+    ok = ok && physics_run_reading("acoustic", args, nullptr, &result, &reading) &&
+        reading.arrival[0].blocked && reading.arrival[0].faded &&
+        strstr(str(&result), "Direct stopped (audibility 0).");
+    physics_prose_readouts(&reading, 1, &prose);
+    ok = ok && strstr(str(&prose), "below the modeled audibility cutoff");
+    cJSON_Delete(args);
+    args = cJSON_Parse("{\"min\":[0,0,0],\"max\":[5,5,5],\"source\":[1,2,2],\"listener\":[2,2,2],"
+                       "\"medium\":{\"loss_db_per_m\":10},\"min_level_db\":-10}");
+    clear(&result);
+    ok = ok && physics_run_reading("acoustic", args, nullptr, &result, &reading) && reading.arrival[0].faded;
+    put(at(args, "medium"), "loss_db_per_m", cJSON_CreateNumber(-1));
+    ok = ok && !physics_run_reading("acoustic", args, nullptr, &result, &reading);
+    cJSON_Delete(args);
+    release(&result);
+    release(&prose);
+    return ok;
+}
+
 int main(int argc, char **argv)
 {
     const struct {
@@ -182,6 +224,10 @@ int main(int argc, char **argv)
     }
     if (!measurement_protocol()) {
         fputs("Saved narration must match typed fluid and acoustic readings and reject contradictory estimates.\n", stderr);
+        failures++;
+    }
+    if (!material_acoustics()) {
+        fputs("Material acoustics must split and attenuate paths and stop them at the modeled cutoff.\n", stderr);
         failures++;
     }
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {

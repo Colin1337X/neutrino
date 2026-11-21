@@ -3,6 +3,7 @@
 
 #include <float.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 static bool scalar(const Json *args, const char *key, double low, double high, double *value)
@@ -87,7 +88,7 @@ static bool ray(const Json *args, Text *out)
     return true;
 }
 
-enum { RAY_BATCH_MAX = 128, ACOUSTIC_BLOCKERS = 16, ACOUSTIC_PATHS = PHYSICS_ACOUSTIC_PATHS };
+enum { RAY_BATCH_MAX = 128 };
 typedef struct { double lo[3], hi[3]; } Box;
 typedef enum { BACKEND_AUTO, BACKEND_CPU, BACKEND_GPU, BACKEND_INVALID } Backend;
 
@@ -176,73 +177,197 @@ static void pack_segment(float *row, const double a[3], const double b[3], const
     for (int k = 0; k < 3; ++k) segment[k] = b[k] - a[k];
     pack_ray(row, a, segment, box);
 }
+
+typedef struct {
+    Box box;
+    bool has_material;
+    double loss_per_m, reflection, surface_loss;
+} AcousticObject;
+
+typedef struct {
+    double bounce[3], reflection;
+    int object, face;
+} AcousticPath;
+
+static bool reflection_point(AcousticPath *path, const Box *box, const double source[3], const double listener[3])
+{
+    int axis = path->face / 2;
+    double wall = path->face % 2 ? box->hi[axis] : box->lo[axis];
+    double from = source[axis] - wall, to = listener[axis] - wall;
+    if (path->object >= 0 && (path->face % 2 ? from <= 0 || to <= 0 : from >= 0 || to >= 0))
+        return false;
+    double fraction = to / (from + to);
+    for (int k = 0; k < 3; k++) {
+        path->bounce[k] = k == axis ? wall : listener[k] + fraction * (source[k] - listener[k]);
+        if (path->object >= 0 && (path->bounce[k] < box->lo[k] || path->bounce[k] > box->hi[k]))
+            return false;
+    }
+    return true;
+}
+
+static bool segment_interval(const Box *box, const double a[3], const double b[3], double *enter, double *exit)
+{
+    *enter = -INFINITY;
+    *exit = INFINITY;
+    for (int k = 0; k < 3; k++) {
+        double direction = b[k] - a[k];
+        if (direction == 0) {
+            if (a[k] <= box->lo[k] || a[k] >= box->hi[k]) return false;
+            continue;
+        }
+        double near = (box->lo[k] - a[k]) / direction, far = (box->hi[k] - a[k]) / direction;
+        *enter = fmax(*enter, fmin(near, far));
+        *exit = fmin(*exit, fmax(near, far));
+    }
+    return fmax(0, *enter) < fmin(1, *exit);
+}
+
+typedef struct { double fraction, rate_change, surface_loss; int count_change; } AcousticCrossing;
+
+static int crossing_order(const void *left, const void *right)
+{
+    const AcousticCrossing *a = left, *b = right;
+    return (a->fraction > b->fraction) - (a->fraction < b->fraction);
+}
+
+static bool carry_sound(const AcousticObject *objects, int count, int reflector,
+                        const double a[3], const double b[3], double gas_loss,
+                        double *budget, int *transmissions)
+{
+    AcousticCrossing crossings[2 * ACOUSTIC_BLOCKERS + 1];
+    int events = 0;
+    for (int i = 0; i < count; i++) {
+        const AcousticObject *obj = &objects[i];
+        double enter, exit;
+        if (i == reflector || !obj->has_material || !segment_interval(&obj->box, a, b, &enter, &exit))
+            continue;
+        crossings[events++] = (AcousticCrossing){fmax(0, enter), obj->loss_per_m,
+                                                enter >= 0 ? obj->surface_loss : 0, 1};
+        crossings[events++] = (AcousticCrossing){fmin(1, exit), -obj->loss_per_m,
+                                                exit <= 1 ? obj->surface_loss : 0, -1};
+        ++*transmissions;
+    }
+    crossings[events++] = (AcousticCrossing){.fraction = 1};
+    qsort(crossings, (size_t)events, sizeof crossings[0], crossing_order);
+    double previous = 0, rate = 0, length = separation(a, b);
+    int active = 0;
+    for (int i = 0; i < events; ++i) {
+        const AcousticCrossing *event = &crossings[i];
+        *budget -= (event->fraction - previous) * length * (active ? fmax(0, rate) : gas_loss);
+        *budget -= event->surface_loss;
+        if (*budget <= 0) return false;
+        previous = event->fraction;
+        rate += event->rate_change;
+        active += event->count_change;
+        if (!active) rate = 0;
+    }
+    return true;
+}
 static bool acoustic(const Json *args, const Json *settings, Text *out, PhysicsReading *reading)
 {
-    Box room, blockers[ACOUSTIC_BLOCKERS];
+    Box room;
+    AcousticObject blockers[ACOUSTIC_BLOCKERS] = {0};
     const Json *boxes = at(args, "blockers"), *item;
+    const Json *medium = at(args, "medium");
     int obstacles = cJSON_GetArraySize(boxes);
-    double source[3], listener[3], bounce[ACOUSTIC_PATHS-1][3];
+    double source[3], listener[3], gas_loss = 0, floor_db = -120;
+    double speed = sqrt(1.4 * 287.05 * setting(settings, AMBIENT_KELVIN));
+    bool material_mode = medium || at(args, "min_level_db");
     Backend selected = backend(args);
     if (selected == BACKEND_INVALID || obstacles > ACOUSTIC_BLOCKERS ||
         (boxes && !cJSON_IsArray(boxes)) || !read_box(args, &room) ||
         !vector(args, "source", source) || !vector(args, "listener", listener) ||
-        !strictly_inside(&room, source) || !strictly_inside(&room, listener)) return false;
+        !strictly_inside(&room, source) || !strictly_inside(&room, listener) ||
+        separation(source, listener) < 1e-6) return false;
+    if (medium && (!cJSON_IsObject(medium) || !scalar(medium, "loss_db_per_m", 0, 1e6, &gas_loss) ||
+                  (at(medium, "speed_m_s") && !scalar(medium, "speed_m_s", 1, 1e5, &speed)))) return false;
+    if (at(args, "min_level_db") && !scalar(args, "min_level_db", -300, 120, &floor_db)) return false;
     int i = 0;
-    cJSON_ArrayForEach(item, boxes)
-        if (!read_box(item, &blockers[i++])) return false;
-    double distances[ACOUSTIC_PATHS] = {separation(source, listener)};
-    const double reflection = setting(settings, WALL_REFLECTIVITY);
-    if (distances[0] < 1e-6) return false;
-    for (int face = 0; face < ACOUSTIC_PATHS - 1; ++face) {
-        int axis = face / 2;
-        double wall = face % 2 ? room.hi[axis] : room.lo[axis];
-        double image[3] = {source[0], source[1], source[2]};
-        image[axis] = 2 * wall - source[axis];
-        double fraction = (wall - listener[axis]) / (image[axis] - listener[axis]);
-        for (int k = 0; k < 3; ++k)
-            bounce[face][k] = listener[k] + fraction * (image[k] - listener[k]);
-        bounce[face][axis] = wall;
-        distances[face + 1] = separation(image, listener);
+    cJSON_ArrayForEach(item, boxes) {
+        AcousticObject *obj = &blockers[i++];
+        if (!read_box(item, &obj->box)) return false;
+        const Json *material = at(item, "material");
+        if (!material) continue;
+        if (!cJSON_IsObject(material) || !scalar(material, "loss_db_per_m", 0, 1e6, &obj->loss_per_m) ||
+            !scalar(material, "reflectivity", 0, 1, &obj->reflection)) return false;
+        for (int k = 0; k < 3; k++) if (obj->box.lo[k] == obj->box.hi[k]) return false;
+        obj->surface_loss = obj->reflection == 1 ? INFINITY : -10 * log1p(-obj->reflection * obj->reflection) / log(10);
+        obj->has_material = material_mode = true;
     }
-    enum { MAX_SEGMENTS = 1 + 2 * (ACOUSTIC_PATHS - 1), MAX_TESTS = MAX_SEGMENTS * ACOUSTIC_BLOCKERS };
+    const double reflection = setting(settings, WALL_REFLECTIVITY);
+    AcousticPath paths[PHYSICS_ACOUSTIC_PATHS] = {{.reflection = 1, .object = -1}};
+    int path_count = 1;
+    for (int obj = -1; obj < obstacles; ++obj) {
+        double ratio = obj < 0 ? reflection : blockers[obj].reflection;
+        if (ratio == 0) continue;
+        const Box *box = obj < 0 ? &room : &blockers[obj].box;
+        for (int face = 0; face < 6; ++face) {
+            AcousticPath path = {.reflection = ratio, .object = obj, .face = face};
+            if (reflection_point(&path, box, source, listener)) paths[path_count++] = path;
+        }
+    }
+    enum { MAX_SEGMENTS = 1 + 2 * (PHYSICS_ACOUSTIC_PATHS - 1), MAX_TESTS = MAX_SEGMENTS * ACOUSTIC_BLOCKERS };
     float rows[MAX_TESTS * RAY_VALUES], hits[MAX_TESTS];
     int path_of[MAX_TESTS];
     size_t total = 0;
-    for (int path = 0; path < ACOUSTIC_PATHS; ++path) {
-        if (path && reflection == 0) break;
+    for (int path = 0; path < path_count; ++path) {
         for (int b = 0; b < obstacles; ++b) {
-            const double *end = path ? bounce[path - 1] : listener;
-            pack_segment(rows + total * RAY_VALUES, source, end, &blockers[b]);
+            if (blockers[b].has_material) continue;
+            const double *end = path ? paths[path].bounce : listener;
+            pack_segment(rows + total * RAY_VALUES, source, end, &blockers[b].box);
             path_of[total++] = path;
             if (path) {
-                pack_segment(rows + total * RAY_VALUES, end, listener, &blockers[b]);
+                pack_segment(rows + total * RAY_VALUES, end, listener, &blockers[b].box);
                 path_of[total++] = path;
             }
         }
     }
     const char *engine = trace_batch(selected, rows, total, hits);
     if (!engine) { append(out, "OpenCL GPU unavailable for this session."); return true; }
-    bool blocked[ACOUSTIC_PATHS] = {0};
+    bool blocked[PHYSICS_ACOUSTIC_PATHS] = {0};
     for (size_t j = 0; j < total; ++j)
         if (hits[j] >= 0 && hits[j] < 1.0f) blocked[path_of[j]] = true;
-    const double speed = sqrt(1.4 * 287.05 * setting(settings, AMBIENT_KELVIN));
-    const char *const paths[] = {"Direct", "X-min echo", "X-max echo", "Y-min echo",
-        "Y-max echo", "Z-min echo", "Z-max echo"};
+    const char *const faces[] = {"X-min", "X-max", "Y-min", "Y-max", "Z-min", "Z-max"};
     format(out, "Acoustic paths (%s visibility, %.4g m/s). Levels relative to the direct source at 1 m.",
-           total ? engine : "no blocker tests", speed);
-    if (reading) reading->kind = READING_ACOUSTIC;
-    for (int path = 0; path < ACOUSTIC_PATHS; ++path) {
-        if (path && reflection == 0) break;
-        const double delay = 1000 * distances[path] / speed;
-        const double level = 20 * ((path ? log10(reflection) : 0) - log10(distances[path]));
+           total ? engine : material_mode ? "CPU material" : "no blocker tests", speed);
+    if (material_mode)
+        format(out, " Audibility is the margin above the modeled cutoff of %+.4g dB.", floor_db);
+    if (reading) {
+        reading->kind = READING_ACOUSTIC;
+        reading->material_acoustics = material_mode;
+    }
+    for (int path = 0; path < path_count; ++path) {
+        const AcousticPath *candidate = &paths[path];
+        const double *end = path ? candidate->bounce : listener;
+        double distance = separation(source, end) + (path ? separation(end, listener) : 0);
+        const double delay = 1000 * distance / speed;
+        double level = 20 * (log10(candidate->reflection) - log10(distance));
+        double budget = level - floor_db;
+        bool faded = false;
+        int transmissions = 0;
+        if (material_mode && !blocked[path]) {
+            faded = budget <= 0 || !carry_sound(blockers, obstacles, candidate->object, source, end,
+                                              gas_loss, &budget, &transmissions) ||
+                    (path && !carry_sound(blockers, obstacles, candidate->object, end, listener,
+                                         gas_loss, &budget, &transmissions));
+            level = faded ? floor_db : floor_db + budget;
+        }
         if (reading) {
             reading->arrivals++;
-            reading->arrival[path].blocked = blocked[path];
+            reading->arrival[path].blocked = blocked[path] || faded;
+            reading->arrival[path].faded = faded;
             reading->arrival[path].delay_ms = delay;
             reading->arrival[path].level_db = level;
         }
-        if (blocked[path]) format(out, "\n%s blocked.", paths[path]);
-        else format(out, "\n%s %.4g ms · %+.3g dB", paths[path], delay, level);
+        if (candidate->object >= 0) format(out, "\nObject %d %s echo", candidate->object + 1, faces[candidate->face]);
+        else if (path) format(out, "\n%s echo", faces[candidate->face]);
+        else append(out, "\nDirect");
+        if (blocked[path]) append(out, " blocked.");
+        else if (faded) append(out, " stopped (audibility 0).");
+        else {
+            format(out, " %.4g ms · %+.3g dB", delay, level);
+            if (material_mode) format(out, " · audibility %.4g dB · %d material traversals", budget, transmissions);
+        }
     }
     return true;
 }

@@ -314,13 +314,16 @@ void physics_prose_readouts(const PhysicsReading *readings, int count, Text *bod
                          "of %.5g meters and a final flow of %.5g liters per second.",
                    r->drained_l, r->seconds, r->level_m, r->flow_lps);
         } else if (r->kind == READING_ACOUSTIC) {
-            if (r->arrival[0].blocked) append(body, "\n\nThe acoustic reading shows that the direct path is blocked.");
+            if (r->arrival[0].faded) append(body, "\n\nThe direct sound falls below the modeled audibility cutoff.");
+            else if (r->arrival[0].blocked) append(body, "\n\nThe acoustic reading shows that the direct path is blocked.");
             else format(body, "\n\nThe acoustic reading puts the direct arrival at %.4g milliseconds and %+.3g decibels "
                               "relative to the source at one meter.", r->arrival[0].delay_ms, r->arrival[0].level_db);
             int first_echo = earliest_echo(r);
+            const char *echo = r->material_acoustics ? "modeled reflection" : "audible wall echo";
             if (first_echo >= 0)
-                format(body, " The first audible wall echo arrives at %.4g milliseconds and %+.3g decibels.",
-                       r->arrival[first_echo].delay_ms, r->arrival[first_echo].level_db);
+                format(body, " The first %s arrives at %.4g milliseconds and %+.3g decibels.",
+                       echo, r->arrival[first_echo].delay_ms, r->arrival[first_echo].level_db);
+            else if (r->material_acoustics) append(body, " No modeled reflection reaches the listener above the cutoff.");
             else append(body, " The reading shows no wall echo reaching the listener.");
         }
     }
