@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-int main(void)
+int main(int argc, char **argv)
 {
     const struct {
         const char *name, *json, *expected;
@@ -11,6 +11,14 @@ int main(void)
         {"ray", "{\"origin\":[0,0,0],\"direction\":[3,0,0],\"min\":[2,-1,-1],\"max\":[3,1,1]}", "hits the box at 2 m"},
         {"ray", "{\"origin\":[0,2,0],\"direction\":[1,0,0],\"min\":[2,-1,-1],\"max\":[3,1,1]}", "misses the box"},
         {"ray", "{\"origin\":[0,0,0],\"direction\":[0,0,0],\"min\":[2,-1,-1],\"max\":[3,1,1]}", nullptr},
+        {"rays", "{\"backend\":\"cpu\",\"min\":[2,-1,-1],\"max\":[3,1,1],\"rays\":["
+            "{\"origin\":[0,0,0],\"direction\":[3,0,0]},{\"origin\":[0,2,0],\"direction\":[1,0,0]}]}",
+            "CPU ray batch (2) hit distances in m: 2 miss"},
+        {"acoustic", "{\"min\":[0,0,0],\"max\":[10,8,4],\"source\":[2,2,2],\"listener\":[5,2,2]}",
+            "Direct 8.74"},
+        {"acoustic", "{\"min\":[0,0,0],\"max\":[10,8,4],\"source\":[2,2,2],\"listener\":[5,2,2],"
+            "\"blockers\":[{\"min\":[3,1,1],\"max\":[4,3,3]}],\"backend\":\"cpu\"}", "Direct blocked."},
+        {"acoustic", "{\"min\":[0,0,0],\"max\":[10,8,4],\"source\":[0,2,2],\"listener\":[5,2,2]}", nullptr},
         {"fluid", "{\"height\":1,\"tank_area\":1,\"outlet_area\":0,\"seconds\":10}", "drained 0 L"},
         {"fluid", "{\"height\":1,\"tank_area\":1,\"outlet_area\":0.01,\"seconds\":1000}", "drained 1000 L"},
         {"gas", "{\"moles\":10,\"volume\":1,\"kelvin\":300,\"leak\":0.2,\"seconds\":10}", "8 mol remaining"},
@@ -43,10 +51,36 @@ int main(void)
         fputs("The gas estimate must use scene ambient and reject invalid changes.\n", stderr);
         failures++;
     }
+    clear(&result);
+    Json *reflection = cJSON_Parse("{\"setting\":\"wall_reflectivity\",\"value\":0}");
+    Json *acoustic_args = cJSON_Parse(cases[4].json);
+    if (!physics_tune(settings, reflection) || !physics_run("acoustic", acoustic_args, settings, &result) ||
+        !strstr(str(&result), "Direct ") || strstr(str(&result), "echo")) {
+        fputs("A perfectly absorbing room must suppress the reflected paths.\n", stderr);
+        failures++;
+    }
+    cJSON_Delete(acoustic_args);
+    cJSON_Delete(reflection);
     release(&result);
     cJSON_Delete(args);
     cJSON_Delete(invalid);
     cJSON_Delete(tune);
     cJSON_Delete(settings);
+    if (argc > 1 && !strcmp(argv[1], "--gpu")) {
+        Json *batch = cJSON_Parse(cases[3].json);
+        set(batch, "backend", "gpu");
+        if (!physics_run("rays", batch, nullptr, &result) ||
+            !strstr(str(&result), "OpenCL GPU ray batch (2) hit distances in m: 2 miss")) failures++;
+        puts(str(&result));
+        clear(&result);
+        Json *room = cJSON_Parse(cases[5].json);
+        set(room, "backend", "gpu");
+        if (!physics_run("acoustic", room, nullptr, &result) ||
+            !strstr(str(&result), "OpenCL GPU visibility") || !strstr(str(&result), "Direct blocked.")) failures++;
+        puts(str(&result));
+        release(&result);
+        cJSON_Delete(room);
+        cJSON_Delete(batch);
+    }
     return failures != 0;
 }

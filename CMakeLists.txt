@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(neutrino VERSION 0.14.0 LANGUAGES C)
+project(neutrino VERSION 0.15.0 LANGUAGES C)
 
 if(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
     message(FATAL_ERROR "Neutrino requires C23. Use a C23-capable GCC or Clang, including clang-cl on Windows.")
@@ -18,7 +18,7 @@ else()
 endif()
 
 add_executable(neutrino src/main.c src/workspace.c src/terminal.c src/inference.c src/gateway.c src/memory.c src/facts.c src/world.c src/ui.c
-    src/simulation.c src/physics.c
+    src/simulation.c src/physics.c src/ray_gpu.c
     third_party/cjson/cJSON.c)
 target_include_directories(neutrino PRIVATE third_party/cjson)
 if(MSVC)
@@ -36,7 +36,7 @@ else()
     find_package(CURL REQUIRED)
     find_package(Threads REQUIRED)
     target_compile_definitions(neutrino PRIVATE _POSIX_C_SOURCE=200809L _XOPEN_SOURCE=700)
-    target_link_libraries(neutrino PRIVATE CURL::libcurl Threads::Threads m)
+    target_link_libraries(neutrino PRIVATE CURL::libcurl Threads::Threads m ${CMAKE_DL_LIBS})
 endif()
 install(TARGETS neutrino)
 
@@ -53,13 +53,13 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME compendium_claims COMMAND compendium_claims_test)
 
-    add_executable(scene_physics_test tests/scene_physics.c src/physics.c src/workspace.c third_party/cjson/cJSON.c)
+    add_executable(scene_physics_test tests/scene_physics.c src/physics.c src/ray_gpu.c src/workspace.c third_party/cjson/cJSON.c)
     target_include_directories(scene_physics_test PRIVATE src third_party/cjson)
     if(MSVC)
         target_compile_definitions(scene_physics_test PRIVATE _CRT_SECURE_NO_WARNINGS)
     elseif(NOT WIN32)
         target_compile_definitions(scene_physics_test PRIVATE _POSIX_C_SOURCE=200809L _XOPEN_SOURCE=700)
-        target_link_libraries(scene_physics_test PRIVATE m)
+        target_link_libraries(scene_physics_test PRIVATE m ${CMAKE_DL_LIBS})
     endif()
     add_test(NAME scene_physics COMMAND scene_physics_test)
 endif()

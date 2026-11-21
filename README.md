@@ -99,10 +99,19 @@ Use `/sim` for the available tool arguments. Player edits work with narrator too
 
 The included calculators are geometric ray–box intersection, a draining tank estimate and an ideal-gas room with a constant leak. They use SI inputs and execute locally. The narrator can stage a `tune` call to change the scene's gravity, tank outlet coefficient, or default gas temperature. Later calculations in the same reply use the staged settings. Accepted changes follow the reply's branch and show up in `/stats`. Players can use the same tool through `/sim`.
 
+`/sim` also provides batched ray–box intersections and geometric acoustics. Acoustics traces a direct path and one specular reflection per wall in a rectangular room. Axis-aligned blockers can occlude each path. The result reports arrival times and levels relative to the direct source at one metre. Ambient temperature sets the speed of sound, and the branch setting `wall_reflectivity` controls the reflected amplitude. This is a scene estimate with single-bounce paths.
+
 ```text
 /sim {"neutrino_tool":"tune","setting":"gravity","value":1.62}
+/sim {"neutrino_tool":"tune","setting":"wall_reflectivity","value":0.45}
+/sim {"neutrino_tool":"acoustic","min":[0,0,0],"max":[10,8,4],"source":[2,2,2],"listener":[5,2,2],"blockers":[{"min":[3,1,1],"max":[4,3,3]}]}
+/sim {"neutrino_tool":"rays","min":[2,-1,-1],"max":[3,1,1],"rays":[{"origin":[0,0,0],"direction":[1,0,0]}],"backend":"gpu"}
 /sim {"neutrino_tool":"prop_load","strength":"fragile","load":"heavy"}
 ```
+
+The ray batch and acoustic visibility tools accept `backend` values `auto`, `cpu`, and `gpu`. Automatic mode uses the CPU for small batches and tries a GPU for 32 or more intersection tests. The GPU backend loads the host's OpenCL runtime dynamically and falls back to the CPU in automatic mode when a GPU runtime is unavailable. There is no OpenCL build dependency. [Khronos OpenCL specification](https://registry.khronos.org/OpenCL/specs/unified/html/OpenCL_API.html)
+
+`/memory items` shows the active branch's filed props and their evidence. Multiple named props can be kept from a single sentence when the narrator establishes their actions or locations. Use `/inventory` for the player-controlled world inventory.
 
 `prop_load` gives a qualitative result for fictional props and scenery under load. It uses three descriptive levels of strength and load, with outcomes of holds, gives slightly, or breaks.
 

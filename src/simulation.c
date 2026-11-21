@@ -213,8 +213,10 @@ static const char tool_help[] =
     "injury: actor, part, kind, severity (mild/moderate/severe/critical).\n"
     "treat or heal: actor, part, kind.\n"
     "inventory: action (add/edit/take/drop), name, description for add/edit. Requires a defined room.\n"
-    "tune: setting and numeric value. gravity (0.1–30 m/s²), outlet_coefficient (0.1–1), ambient_kelvin (150–400 K).\n"
+    "tune: setting and numeric value. gravity (0.1–30 m/s²), outlet_coefficient (0.1–1), ambient_kelvin (150–400 K), wall_reflectivity (0–1).\n"
     "ray: origin, direction, min, max (three-number arrays in metres, min/max are box corners).\n"
+    "rays: min, max, rays (array of origin/direction objects), backend (auto/cpu/gpu).\n"
+    "acoustic: min/max room corners, source, listener, optional blockers (array of min/max objects) and backend. Reports direct path and first wall echoes.\n"
     "fluid: height (m), tank_area (m²), outlet_area (m²), seconds.\n"
     "gas: moles, volume (m³), leak (mol/s), seconds, optional kelvin (defaults to scene ambient).\n"
     "prop_load: qualitative scenery load. strength (fragile/ordinary/reinforced), load (light/steady/heavy).\n";
@@ -269,7 +271,8 @@ bool simulation_tool_reply(Preview *p, const char *body)
     if (p->tool_rounds >= TOOL_LIMIT) { release(&json); cJSON_Delete(op); return true; }
     p->tool_rounds++;
     Text result = {0};
-    if (!strcmp(tool, "ray") || !strcmp(tool, "fluid") || !strcmp(tool, "gas") || !strcmp(tool, "prop_load")) {
+    if (!strcmp(tool, "ray") || !strcmp(tool, "rays") || !strcmp(tool, "acoustic") ||
+        !strcmp(tool, "fluid") || !strcmp(tool, "gas") || !strcmp(tool, "prop_load")) {
         Json *state = preview_state(p);
         if (!physics_run(tool, op, at(state, "physics"), &result))
             append(&result, "Physics tool arguments rejected.");
