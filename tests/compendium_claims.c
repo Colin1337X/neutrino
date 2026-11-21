@@ -438,6 +438,24 @@ int main(void)
         fputs("Recover multiple narrated placements while excluding dialogue and uncertainty.\n", stderr); rc = 1;
     }
     cJSON_Delete(placements);
+    scene = compendium_scene_evidence("She lifts the heavy, dark blue satchel and steps over the threshold "
+        "where the brass compass rests. I pull the brass compass out of its leather sheath. "
+        "Sera wonders whether she can lift the violet wax seal from the cabinet.");
+    if (cJSON_GetArraySize(scene) != 2 ||
+        strcmp(js(cJSON_GetArrayItem(scene, 0), "name"), "heavy dark blue satchel") ||
+        strcmp(js(cJSON_GetArrayItem(scene, 1), "name"), "brass compass")) {
+        fputs("Recover witnessed handling of named props without pasting the destination or hypothetical actions into the item name.\n",
+              stderr); rc = 1;
+    }
+    cJSON_Delete(scene);
+    Text corrected_prop = {0};
+    const char *seal = "My violet wax seal, nestled within the leather, is still wrapped in its protective band.";
+    if (strcmp(compendium_filing_identity("event", "seal", seal, seal, &corrected_prop), "item") ||
+        strcmp(compendium_filing_identity("event", "seal", "The wax seal snapped.", "The wax seal snapped.",
+                                         &corrected_prop), "event")) {
+        fputs("A stationary prop condition belongs with the item, while an action remains an event.\n", stderr); rc = 1;
+    }
+    release(&corrected_prop);
     cJSON_Delete(batch);
     cJSON_Delete(known);
     return rc;
