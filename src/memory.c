@@ -348,6 +348,15 @@ Inference *memory_start_recall(const App *app, const Json *story, const Json *me
     return job;
 }
 
+static bool opening_reply(const Json *story, const Json *reply)
+{
+    Json *path = story_path(story, number(reply, "parent")), *node;
+    bool opening = true;
+    cJSON_ArrayForEach(node, path) if (!strcmp(js(node, "role"), "assistant")) { opening = false; break; }
+    cJSON_Delete(path);
+    return opening;
+}
+
 static Json *filing_prompt(const Json *story, int id)
 {
     Json *reply = story_pick(story, id), *parent = story_pick(story, number(reply, "parent"));
@@ -369,6 +378,10 @@ static Json *filing_prompt(const Json *story, int id)
     }
     format(&input, "\n\nLatest assistant reply (#%d), the evidence to file:\n", id);
     excerpt(&input, js(reply, "content"), 2400);
+    if (opening_reply(story, reply))
+        append(&input, "\n\nThis is the opening reply. File concrete actions and durable states it actually establishes, "
+            "including actions embedded in descriptive prose. File what the narrator actually depicts even if the player "
+            "asked for something different. Do not file requested events that never happened in the reply.");
     append(&input, "\n\nFile a new entity or action described above, even if the reply also repeats old facts. "
         "A restatement alone is unchanged. If the latest reply established no new facts, output [].");
     Json *messages = request("File durable facts newly established by the final assistant message. "
@@ -386,6 +399,11 @@ static Json *parse_filing(const Text *output, const Json *story, const Json *rep
 {
     Json *answer = json_answer(output), *item;
     if (!cJSON_IsArray(answer) || cJSON_GetArraySize(answer) > 6) { cJSON_Delete(answer); return NULL; }
+    const bool opening_fallback = !answer->child && opening_reply(story, reply);
+    if (opening_fallback) {
+        cJSON_Delete(answer);
+        answer = compendium_opening_evidence(js(reply, "content"));
+    }
     Json *result = cJSON_CreateArray();
     Json *known = collect_entries(story, number(reply, "parent"));
     int index = 0, anchor = number(reply, "id");
@@ -425,6 +443,7 @@ static Json *parse_filing(const Text *output, const Json *story, const Json *rep
         snprintf(id, sizeof id, "A%d.%d", anchor, index);
         Json *fact = entry(id, type, name, description);
         if (partial) put(fact, "memoryAppend", cJSON_CreateTrue());
+        if (opening_fallback) set(fact, "memorySource", "reply-evidence");
         cJSON_AddItemToArray(result, fact);
         release(&novel);
     }
@@ -646,7 +665,19 @@ static void list_entries(App *a)
     append(&a->info, "/memory new TYPE | NAME | DESCRIPTION\n"
                      "/memory edit ID | DESCRIPTION\n"
                      "/memory delete ID\n"
-                     "/memory status   /memory mode   /memory retry");
+                     "/memory show ID   /memory status   /memory mode");
+    cJSON_Delete(entries);
+}
+static void show_entry(App *a, const char *id)
+{
+    const int head = number(a->story, "head");
+    Json *entries = collect_entries(a->story, head);
+    const Json *item = find_entry(entries, id);
+    if (item) {
+        app_info(a, "Compendium entry");
+        format(&a->info, "%s · %s · %s\nActive on branch #%d\n\n%s\n", js(item, "id"),
+               js(item, "type"), js(item, "name"), head, js(item, "description"));
+    } else app_status(a, "Choose an active entry ID from /memory.");
     cJSON_Delete(entries);
 }
 
@@ -712,6 +743,7 @@ void memory_command(App *a, char *args)
     if (!rest) rest = "";
     while (isspace((unsigned char)*rest)) rest++;
     if (!*verb || !strcmp(verb, "list")) list_entries(a);
+    else if (!strcmp(verb, "show")) show_entry(a, rest);
     else if (!strcmp(verb, "status")) memory_status(a);
     else if (!strcmp(verb, "new") || !strcmp(verb, "edit") || !strcmp(verb, "delete")) manual(a, verb, rest);
     else if (!strcmp(verb, "mode")) {
@@ -758,5 +790,5 @@ void memory_command(App *a, char *args)
     } else if (!strcmp(verb, "recall")) {
         app_info(a, "Recall trace");
         append(&a->info, a->trace.len ? str(&a->trace) : "No model request has been sent in this session.");
-    } else app_status(a, "/memory list, new, edit, delete, mode, status, retry, refile, undo, on, off");
+    } else app_status(a, "/memory list, show, new, edit, delete, mode, status, retry, refile, undo, on, off");
 }

@@ -31,7 +31,8 @@ static bool simple(const char *s)
         "if", "unless", "until", "before", "after", "again", "still", "formerly",
         "yesterday", "tomorrow", "probably", "possibly", "maybe", "allegedly", "near",
         "now", "soon", "later", "without", "only", "might", "may", "will", "would",
-        "could", "should", "must", "seems", "apparently"};
+        "could", "should", "must", "seems", "apparently", "perhaps", "imagines",
+        "pretends", "hypothetically", "dreams"};
     for (size_t i = 0; i < sizeof qualifiers / sizeof *qualifiers; i++)
         if (word(s, qualifiers[i])) return false;
     return *s != 0;
@@ -86,7 +87,8 @@ static const char *action_at(const char *s, const char **verb, const char **acti
             const char *where = p + n + 1;
             if (strncmp(where, "in ", 3) && strncmp(where, "inside ", 7) &&
                 strncmp(where, "within ", 7) && strncmp(where, "on ", 3) &&
-                strncmp(where, "at ", 3)) continue;
+                strncmp(where, "at ", 3) && strncmp(where, "under ", 6) &&
+                strncmp(where, "beneath ", 8)) continue;
             *verb = copulas[i];
             *action = "located";
             return p;
@@ -118,7 +120,8 @@ static const char *location_at(const char *suffix, const char **place, const cha
 {
     static const struct { const char *word, *relation; } prepositions[] = {
         {"inside ", "in"}, {"within ", "in"}, {"in ", "in"},
-        {"on ", "on"}, {"upon ", "on"}, {"at ", "at"}
+        {"on ", "on"}, {"upon ", "on"}, {"at ", "at"},
+        {"under ", "under"}, {"beneath ", "under"}
     };
     for (const char *p = suffix; *p; p++) {
         if (p != suffix && p[-1] != ' ') continue;
@@ -441,4 +444,106 @@ bool compendium_placement_evidence(const Json *known, const Json *history, const
     }
     release(&sentence);
     return false;
+}
+
+/* Resolve only a locally named object in an explicit witnessed action. In
+   particular, never get a missing referent or location from the player's cue. */
+static bool witnessed_concealment(const char *sentence, Text *name)
+{
+    Text words = {0};
+    const char *end = strchr(sentence, ',');
+    Text leading = {0};
+    if (end) append_n(&leading, sentence, (size_t)(end - sentence));
+    normalize_words(&words, end ? str(&leading) : sentence);
+    const char *s = str(&words), *at = strstr(s, " watches the ");
+    const char *event = at ? strstr(at, " in her hands as she hides it ") : nullptr;
+    const char *subject_end = at ? strchr(at + sizeof " watches the " - 1, ' ') : nullptr;
+    if (event && simple(s)) {
+        const char *object = at + sizeof " watches the " - 1;
+        const char *verb = event;
+        while (verb > object && verb[-1] != ' ') verb--;
+        const char *place = nullptr, *relation = nullptr;
+        const char *where = event + sizeof " in her hands as she hides it " - 1;
+        if (subject_end && subject_end < verb && verb < event &&
+            location_at(where, &place, &relation, "hidden") == where &&
+            (title_is("tremble", verb, event) || title_is("shake", verb, event) ||
+             title_is("move", verb, event))) phrase(name, object, verb);
+    }
+    release(&leading);
+    release(&words);
+    return name->len > 0;
+}
+static bool opening_rule(const char *sentence, Text *name)
+{
+    Text words = {0};
+    normalize_words(&words, sentence);
+    char *opens = words.data ? strstr(words.data, " opens only at ") : nullptr;
+    if (opens) {
+        const char *when = opens + sizeof " opens only at " - 1;
+        bool exact = !strcmp(when, "low tide") || !strcmp(when, "high tide") ||
+                     !strcmp(when, "dawn") || !strcmp(when, "dusk") ||
+                     !strcmp(when, "noon") || !strcmp(when, "midnight");
+        *opens = 0;
+        if (exact && simple(str(&words))) phrase(name, str(&words), opens);
+    }
+    release(&words);
+    return name->len != 0;
+}
+
+Json *compendium_opening_evidence(const char *reply)
+{
+    Json *entries = cJSON_CreateArray();
+    Text sentence = {0}, lead = {0}, words = {0};
+    int count = 0;
+    for (const char *s = reply; *s && count < 6;) {
+        const char *end = sentence_end(s);
+        copy_sentence(&sentence, s, end);
+        Claim claim = {0};
+        Text name = {0};
+        const char *type = nullptr;
+        if (sentence.len <= 700 && !strchr(str(&sentence), '?')) {
+            clear(&words);
+            normalize_words(&words, str(&sentence));
+            const char *full = str(&sentence), *comma = strchr(full, ',');
+            const char *and = strstr(full, " and ");
+            const char *boundary = comma && (!and || comma < and) ? comma : and;
+            if (word(str(&words), "or") || word(str(&words), "imagines") ||
+                word(str(&words), "pretends") || word(str(&words), "perhaps") ||
+                word(str(&words), "hypothetically") || word(str(&words), "dreams")) boundary = nullptr;
+            copy_sentence(&lead, full, boundary ? boundary : full + sentence.len);
+            if (parse_claim(&claim, "", "", str(&lead), false)) {
+                if (!strcmp(claim.action, "stranded")) {
+                    type = "character";
+                    append(&name, str(&claim.subject));
+                } else if ((!strcmp(claim.action, "hidden") || !strcmp(claim.action, "stored")) &&
+                           strchr(str(&claim.object), ' ')) {
+                    type = "item";
+                    append(&name, str(&claim.object));
+                }
+            }
+            if (!type && (placement_object(str(&sentence), &name) ||
+                          witnessed_concealment(str(&sentence), &name))) type = "item";
+            if (!type && opening_rule(str(&lead), &name)) type = "rule";
+        }
+        if (type && name.len <= 160) {
+            Text fresh = {0};
+            compendium_novel_claims(entries, nullptr, type, str(&name), str(&sentence), &fresh);
+            if (fresh.len) {
+                Json *fact = cJSON_CreateObject();
+                set(fact, "type", type);
+                set(fact, "name", str(&name));
+                set(fact, "description", str(&fresh));
+                cJSON_AddItemToArray(entries, fact);
+                count++;
+            }
+            release(&fresh);
+        }
+        release(&name);
+        claim_release(&claim);
+        s = end;
+    }
+    release(&sentence);
+    release(&lead);
+    release(&words);
+    return entries;
 }

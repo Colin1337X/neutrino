@@ -42,6 +42,8 @@ The TUI reflows when the terminal resizes. On narrow or short terminals, **F3** 
 
 Create a scene with `/scene /Folder/Book/Chapter/Scene`. In the editor, use **Ctrl+S** to save and **Ctrl+Space** to anchor a selection. Move the caret to extend the selection, then save. The palette also accepts `/select all` or a pair of UTF-8 byte offsets. Saved scene edits and accepted candidates create revisions. Use `/replace OLD | NEW` for literal, case-sensitive replacement throughout the current scene. An empty replacement removes the matches. Use `/revisions` and `/restore NUMBER` to inspect and restore saved drafts. Use `/rewrite-preset` to list Xenon-inspired revision presets or apply one to the selection or scene with a direction such as `/rewrite-preset pacing Keep Iona's voice clipped`. [Xenon writing tools](https://github.com/Colin1337X/cherenkov/blob/codex/xenon/README.md#first-scene-and-writing-tools)
 
+`/compare NUMBER` shows the changed span of a saved draft beside the current text in the review panel. It identifies the starting line and keeps the scene available for `/restore NUMBER`.
+
 In Manuscript, plain input supplies a direction for Continue. The writing palette has Continue, Rewrite, Expand, Describe, Draft, Brainstorm, Critique, Continuity, and Bible extraction. Up to three candidate requests run on worker threads. Review shows each candidate's status and keeps their original order as they finish. Compare them with the left and right arrows, then accept or reject. Describe offers selectable senses and multiple variants per sense via `/senses` and `/count`. Use `/insert` to add a detail after the target, or `/preview-save FILE` to keep a candidate separately. If the source has changed since generation, Neutrino blocks applying the candidate. Accepted extracts land as Bible drafts for manual promotion.
 
 Use `/play` from a scene to start a linked roleplay. The narrator receives the linked manuscript and shared story sources. Use `/story TITLE` to start independently, or `/import FILE` to start from a character card. A roleplay turn saves the player message, then streams the reply. `/swipe` generates a sibling reply. `/previous`, `/next`, and `/branch ID` navigate the tree. Use `/persona NAME | DESCRIPTION` for a player persona, `/lore FILE` for keyword-triggered sources, and `/preset FILE` for enabled prompt text. `/transcript /Folder/Book/Chapter/Scene` copies the active branch into a new manuscript scene.
@@ -55,6 +57,8 @@ The roleplay world takes inspiration from Neko Agent's rooms, carried items, env
 Use `/npc NAME | DESCRIPTION` to place a character in the current room. `@Name MESSAGE` asks that character to respond through the configured narrator model. A character has to be present. `/say TEXT` records speech in the room without calling a model. `/world` shows the room, exits, inventory, and characters. `/world log` shows the branch's recent actions. Room definitions and exits belong to the story. Movement, inventory changes, speech, weather, and character placement follow the active branch. The narrator receives the current world state as context and `/trace` displays the state sent with the prompt. Only player commands change the world state. [Neko Agent module reference](https://github.com/GameDevFox/neko-agent/blob/0c5bc71/readme/MODULES.md)
 
 `/map` shows the current room, links, and unreachable rooms. `/map ROOM` shows the shortest route and the first `/go` command for that route. `/inspect` shows the current room's description, and `/inspect NAME` looks at a nearby item, carried item, or present character on the active branch. [Neko Agent play view](https://github.com/GameDevFox/neko-agent/blob/0c5bc71/readme/PLAYING.md)
+
+Use `/wear ITEM` for a carried article and `/remove ITEM` to take it off and keep it in your inventory. The active branch's worn items appear in `/world`, `/inspect`, and the narrator's world context.
 
 ## Serve the TUI over SSH
 
@@ -109,11 +113,12 @@ The dashboard reports median tokens per second and median upstream time to first
 
 Each completed narrator reply queues filing. The filing agent writes typed facts such as characters, places, items, events, and notes onto the reply that established them. Neutrino checks entries across types for verbatim repetitions and equivalent location, stranding, and concealment claims. It keeps unrecognized wording, conflicting state, and novel sentences alongside established facts. The historian compacts older turns into a cumulative recap. Recall combines relevant active entries with recent dialogue, the recap, and other story sources. Switching or swiping a branch changes the reply history and the memory entries visible to the narrator.
 
-When a filing pass yields no new entries, Neutrino can capture an explicitly placed, previously unseen object directly from the narrator's sentence. These item records keep the original sentence as evidence and are marked `reply-evidence` in the workspace.
+When the filing agent returns an empty opening filing, Neutrino checks the narrator's prose for explicit object placements, stranded characters, and opening-time rules. A later empty filing can still recover an explicitly placed, previously unseen object. These records keep the narrator's original sentence and are marked `reply-evidence` in the workspace. Player cues provide context for filing, while direct evidence comes from the narrator's reply.
 
 | Command | Action |
 | --- | --- |
 | `/memory` | List active entries and their IDs. |
+| `/memory show ID` | Read the full active entry for this branch. |
 | `/memory new TYPE \| NAME \| DESCRIPTION` | Add an entry on this branch. |
 | `/memory edit ID \| DESCRIPTION` and `/memory delete ID` | Edit or hide an entry from this point on the branch. |
 | `/memory mode [MODE]` | Show or set recall to `auto`, `prefetch`, `sync`, `lexical`, or `off`. |

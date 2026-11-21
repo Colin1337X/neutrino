@@ -45,6 +45,8 @@ const Command commands[] = {
     {"item", " NAME | DESCRIPTION", "Place an item in the current room"},
     {"take", " ITEM", "Pick up a nearby item"},
     {"drop", " ITEM", "Leave a carried item here"},
+    {"wear", " ITEM", "Put on an item you carry"},
+    {"remove", " ITEM", "Take off a worn item and keep carrying it"},
     {"npc", " NAME | DESCRIPTION", "Add a character in this room"},
     {"weather", " TEXT", "Set the weather on this branch"},
     {"say", " TEXT", "Speak in this room without generating a reply"},
@@ -81,6 +83,7 @@ const Command commands[] = {
     {"find", " text", "Find literal text across the manuscript"},
     {"replace", " OLD | NEW", "Replace literal text in the current scene and save a revision"},
     {"revisions", "", "Inspect saved drafts"},
+    {"compare", " NUMBER", "Compare a saved draft with the current scene"},
     {"restore", " number", "Restore a prior draft and keep the current version"},
     {"bible", "", "Inspect canon and draft entries"},
     {"canon", " type | name | description", "Add a book-scoped canon entry"},
@@ -1110,7 +1113,39 @@ static void view_revisions(App *a)
         format(&a->info, "%.160s\n\n", js(item, "content"));
     }
     if (!i) append(&a->info, "No earlier versions. Saved edits and accepted candidates create revisions.");
-    else append(&a->info, "/restore <number> restores a prior draft.");
+    else append(&a->info, "/compare NUMBER shows changes. /restore NUMBER restores a prior draft.");
+}
+static void compare_draft(App *a, const char *arg)
+{
+    if (!a->scene || a->roleplay) { status(a, "Open a manuscript scene first."); return; }
+    int n = parse_number(arg, 1, INT_MAX);
+    const Json *revision = n > 0 ? cJSON_GetArrayItem(at(a->scene, "revisions"), n - 1) : nullptr;
+    if (!revision) { status(a, "Use /revisions to find a draft number for /compare."); return; }
+    const char *old = js(revision, "content"), *current = scene_text(&a->ws, a->scene);
+    size_t left = 0, old_end = strlen(old), new_end = strlen(current);
+    show_info(a, "Compare draft");
+    format(&a->info, "Draft %d → current · %s\n\n", n, ui_scene_name(a));
+    if (!strcmp(old, current)) { append(&a->info, "No text changes."); return; }
+    while (left < old_end && left < new_end && old[left] == current[left]) left++;
+    while (old_end > left && new_end > left && old[old_end - 1] == current[new_end - 1]) { old_end--; new_end--; }
+    while (left && (((unsigned char)old[left] & 0xc0) == 0x80 ||
+                    ((unsigned char)current[left] & 0xc0) == 0x80)) left--;
+    while (((unsigned char)old[old_end] & 0xc0) == 0x80) old_end++;
+    while (((unsigned char)current[new_end] & 0xc0) == 0x80) new_end++;
+    int line = 1;
+    for (size_t i = 0; i < left; i++) if (old[i] == '\n') line++;
+    const char *const text[] = {old, current};
+    const char *const label[] = {"Saved draft", "Current draft"};
+    const size_t end[] = {old_end, new_end};
+    format(&a->info, "Changes start on line %d.\n\n", line);
+    for (size_t i = 0; i < 2; i++) {
+        format(&a->info, "%s · %zu changed bytes\n", label[i], end[i] - left);
+        size_t shown = end[i] - left > 4800 ? left + 4800 : end[i];
+        while (shown > left && ((unsigned char)text[i][shown] & 0xc0) == 0x80) shown--;
+        if (shown > left) append_n(&a->info, text[i] + left, shown - left);
+        else append(&a->info, "(empty)");
+        append(&a->info, shown < end[i] ? "\n… Further changes omitted.\n\n" : "\n\n");
+    }
 }
 static void replace_scene_text(App *a, char *arg)
 {
@@ -1298,7 +1333,7 @@ static void slash_command(App *a, char *line)
         return;
     }
     const char *const world_commands[] = {"world", "room", "connect", "go", "item",
-        "take", "drop", "npc", "weather", "say", "map", "inspect"};
+        "take", "drop", "wear", "remove", "npc", "weather", "say", "map", "inspect"};
     for (size_t i = 0; i < sizeof world_commands / sizeof *world_commands; i++) {
         if (!strcmp(line, world_commands[i])) { world_command(a, line, arg); return; }
     }
@@ -1433,6 +1468,7 @@ static void slash_command(App *a, char *line)
             status(a, budget ? "Context budget saved" : "Candidate count saved");
         }
     } else if (!strcmp(line, "revisions")) view_revisions(a);
+    else if (!strcmp(line, "compare")) compare_draft(a, arg);
     else if (!strcmp(line, "restore")) {
         int n = parse_number(arg, 1, INT_MAX);
         Json *rev = cJSON_GetArrayItem(at(a->scene, "revisions"), n - 1);

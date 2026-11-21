@@ -73,9 +73,19 @@ static void replay(Json *state, const Json *event)
         Json *item = named(at(state, "item"), name);
         if (item) {
             put(item, "carried", cJSON_CreateBool(!strcmp(type, "take")));
-            if (!strcmp(type, "drop")) set(item, "room", js(event, "room"));
+            if (!strcmp(type, "drop")) {
+                put(item, "worn", cJSON_CreateFalse());
+                set(item, "room", js(event, "room"));
+            }
         }
+    } else if (!strcmp(type, "wear") || !strcmp(type, "remove")) {
+        Json *item = named(at(state, "item"), name);
+        if (cJSON_IsTrue(at(item, "carried"))) put(item, "worn", cJSON_CreateBool(!strcmp(type, "wear")));
     }
+}
+static const char *item_state(const Json *item, const char *nearby)
+{
+    return cJSON_IsTrue(at(item, "worn")) ? "Worn" : cJSON_IsTrue(at(item, "carried")) ? "Carried" : nearby;
 }
 
 static Json *world_state(const Json *story, int head)
@@ -148,7 +158,7 @@ static void describe_world(const Json *story, const Json *state, Text *out)
     cJSON_ArrayForEach(item, at(state, "item")) {
         bool carried = cJSON_IsTrue(at(item, "carried"));
         if (carried || equal_name(js(item, "room"), room))
-            format(out, "%s: %s — %s\n", carried ? "Carried" : "Nearby", js(item, "name"), js(item, "text"));
+            format(out, "%s: %s — %s\n", item_state(item, "Nearby"), js(item, "name"), js(item, "text"));
     }
     cJSON_ArrayForEach(item, at(state, "npc"))
         if (equal_name(js(item, "room"), room))
@@ -242,7 +252,7 @@ static void world_panel(App *a, bool log)
     } else {
         describe_world(a->story, state, &a->info);
         if (!a->info.len) append(&a->info, "Create the starting room with /room NAME | DESCRIPTION.\n");
-        append(&a->info, "\n/room  /connect  /go  /item  /take  /drop  /npc  /weather  /say\n"
+        append(&a->info, "\n/room  /connect  /go  /item  /take  /drop  /wear  /remove  /npc\n"
                          "@Name MESSAGE addresses a character in this room.\n/world log shows branch activity. /map shows room links.");
     }
     cJSON_Delete(state);
@@ -263,7 +273,7 @@ static void inspect_world(App *a, const char *name)
     if (place || item_visible || character_visible) {
         app_info(a, "Inspect world");
         if (place) format(&a->info, "Room  %s\n%s\n\n", room, js(place, "text"));
-        if (item_visible) format(&a->info, "%s  %s\n%s\n\n", carried ? "Carried" : "Nearby item",
+        if (item_visible) format(&a->info, "%s  %s\n%s\n\n", item_state(item, "Nearby item"),
                                  js(item, "name"), js(item, "text"));
         if (character_visible) format(&a->info, "Present character  %s\n%s\n", js(character, "name"),
                                       js(character, "text"));
@@ -425,6 +435,12 @@ void world_command(App *a, const char *verb, char *argument)
         bool carried = cJSON_IsTrue(at(object, "carried")), taking = !strcmp(verb, "take");
         if (!object || (taking ? carried || !equal_name(room, js(object, "room")) : !carried))
             app_status(a, taking ? "That item is unavailable in this room." : "That item is outside your inventory.");
+        else add_event(a, world, verb, js(object, "name"), "", room);
+    } else if (!strcmp(verb, "wear") || !strcmp(verb, "remove")) {
+        Json *object = named(at(state, "item"), name);
+        bool wearing = !strcmp(verb, "wear"), worn = cJSON_IsTrue(at(object, "worn"));
+        if (!cJSON_IsTrue(at(object, "carried")) || wearing == worn)
+            app_status(a, wearing ? "Choose a carried item you are not wearing." : "Choose a worn item.");
         else add_event(a, world, verb, js(object, "name"), "", room);
     } else if (!strcmp(verb, "say") || !strcmp(verb, "weather")) {
         if (!*name || strlen(name) > 600) app_status(a, "Enter text up to 600 bytes.");

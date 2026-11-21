@@ -111,6 +111,31 @@ int main(void)
     }
     release(&prop);
     release(&evidence);
+    Json *opening = compendium_opening_evidence(
+        "Iona watches the copper key tremble in her hands as she hides it beneath the heavy wooden crate, "
+        "her breath caught in a tight knot. A solitary figure stands on the west pier, wearing a tattered white coat. "
+        "The red box on the far bank seems to pulse with a soft, rhythmic light.");
+    Json *first = cJSON_GetArrayItem(opening, 0);
+    if (cJSON_GetArraySize(opening) != 1 || strcmp(js(first, "name"), "copper key") ||
+        !strstr(js(first, "description"), "beneath the heavy wooden crate")) {
+        fputs("An empty opening filing must recover the witnessed key placement without inventing the red-box location.\n", stderr);
+        rc = 1;
+    }
+    cJSON_Delete(opening);
+    opening = compendium_opening_evidence("Iona hides the copper key in the red box. Captain Mara is stranded on the west pier. "
+                                          "The west gate opens only at low tide.");
+    if (cJSON_GetArraySize(opening) != 3) { fputs("Explicit opening facts were missed.\n", stderr); rc = 1; }
+    cJSON_Delete(opening);
+    opening = compendium_opening_evidence(
+        "Iona hides the copper key in the red box and waits for the tide to fall, knowing that the gate will remain shut until the water recedes. "
+        "Captain Mara is stranded on the west pier, waiting for the tide to rise enough to open the heavy gate and rescue her from the storm. "
+        "The west gate opens only at low tide, requiring her to keep the door ajar as the waves approach the pier.");
+    if (cJSON_GetArraySize(opening) != 3) { fputs("Opening facts embedded in compound sentences were missed.\n", stderr); rc = 1; }
+    cJSON_Delete(opening);
+    opening = compendium_opening_evidence("The water glimmers. Perhaps Captain Mara is stranded on the pier. "
+                                          "Iona imagines that she places a blue lantern on the desk.");
+    if (opening->child) { fputs("Atmosphere and speculation must not create opening entries.\n", stderr); rc = 1; }
+    cJSON_Delete(opening);
     cJSON_Delete(batch);
     cJSON_Delete(known);
     return rc;
