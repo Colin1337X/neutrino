@@ -342,6 +342,13 @@ int main(void)
     cJSON_Delete(scene);
     release(&pressed_name);
     release(&pressed_evidence);
+    if (!compendium_placement_evidence(nullptr, nullptr,
+        "She tosses the silver whistle into the water as she tries to secure it to the railing.",
+        &pressed_name, &pressed_evidence) || strcmp(str(&pressed_name), "silver whistle")) {
+        fputs("Preserve the completed whistle movement without assigning the attempted placement.\n", stderr); rc = 1;
+    }
+    release(&pressed_name);
+    release(&pressed_evidence);
     signals = compendium_signal_evidence("Iona repeats the rhythmic clinking of the brass bell against the dock, "
         "her trembling hands still gripping the striking mechanism as the station clock's second hand pauses mid-twist, "
         "indicating the time has shifted slightly. The red crate is now clear, and Captain Mara's distress signal is now "

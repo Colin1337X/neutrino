@@ -579,7 +579,7 @@ static bool placement_object(const char *sentence, Text *name, Text *target)
     static const char *const verbs[] = {"places", "puts", "sets", "slides", "ties", "fastens", "secures",
         "clamps", "clips", "attaches", "hooks", "hangs", "pins", "straps", "lashes",
         "placed", "tied", "fastened", "secured", "clamped", "clipped", "attached",
-        "press", "presses", "pressed"};
+        "press", "presses", "pressed", "drops", "dropped", "tosses", "tossed"};
     static const struct { const char *word, *relation; } prepositions[] = {
         {"inside", "in"}, {"within", "in"}, {"into", "in"}, {"in", "in"},
         {"onto", "on"}, {"on", "on"}, {"to", "to"}, {"against", "against"},
@@ -625,8 +625,9 @@ static bool placement_object(const char *sentence, Text *name, Text *target)
         if (!strcmp(str(name), vague[i])) clear(name);
     if (name->len > 100 || !strchr(str(name), ' ')) clear(name);
     if (name->len && target) {
+        const char *detail = word(destination, "as");
         format(target, "%s ", relation);
-        noun_phrase(target, destination, destination + strlen(destination));
+        noun_phrase(target, destination, detail && detail > destination ? detail : destination + strlen(destination));
     }
 end:
     release(&words);
