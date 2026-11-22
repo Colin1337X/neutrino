@@ -1,6 +1,7 @@
 #include "web.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static bool citation_check(void)
@@ -86,6 +87,45 @@ static bool automatic_research(void)
     return ok;
 }
 
+static bool wiktionary_grounding(void)
+{
+    const char *fixture =
+        "{\"en\":[{\"partOfSpeech\":\"Noun\",\"definitions\":["
+        "{\"definition\":\"A fortunate <b>discovery</b>.\",\"examples\":[\"An anecdote with a named speaker.\"]},"
+        "{\"definition\":\"Good fortune found by chance.\"}]}],"
+        "\"fr\":[{\"definitions\":[{\"definition\":\"Une définition française.\"}]}]}";
+    Json *senses = web_wiktionary_english_senses(fixture);
+    Json *report = cJSON_Parse("{\"engine\":\"Wiktionary\",\"query\":\"testword\",\"sources\":["
+                              "{\"title\":\"testword\",\"url\":\"https://en.wiktionary.org/wiki/testword\"}]}");
+    Json *entry = cJSON_GetArrayItem(at(report, "sources"), 0);
+    put(entry, "english_senses", senses);
+    char *wire = cJSON_PrintUnformatted(report);
+    if (!wire) abort();
+    bool ok = cJSON_GetArraySize(senses) == 2 && !strstr(wire, "anecdote") && !strstr(wire, "française");
+    Text reply = {0}, trace = {0};
+    append(&reply, "2\n");
+    ok = ok && web_ground_definition(wire, &reply, &trace) &&
+        strstr(str(&reply), "Good fortune found by chance. ([1](<https://en.wiktionary.org/wiki/testword>))") &&
+        strstr(str(&trace), "sense 2 selected by the narrator");
+    clear(&reply);
+    clear(&trace);
+    append(&reply, "An anecdote with a name assigned to the wrong person.");
+    ok = ok && web_ground_definition(wire, &reply, &trace) &&
+        strstr(str(&reply), "A fortunate discovery. ([1](<https://en.wiktionary.org/wiki/testword>))") &&
+        !strstr(str(&reply), "anecdote") && strstr(str(&trace), "invalid narrator selection");
+    clear(&trace);
+    ok = ok && web_ground_definition("{\"engine\":\"Wiktionary\",\"query\":\"different\","
+                                     "\"sources\":[{\"title\":\"different word\","
+                                     "\"url\":\"https://en.wiktionary.org/wiki/different_word\"}]}",
+                                     &reply, &trace) && !strstr(str(&reply), "https://") &&
+        strstr(str(&trace), "no verified English senses");
+    release(&reply);
+    release(&trace);
+    cJSON_free(wire);
+    cJSON_Delete(report);
+    return ok;
+}
+
 int main(void)
 {
     Text out = {0};
@@ -113,5 +153,7 @@ int main(void)
     if (!citations) fputs("Saved replies must preserve or supply exact research source URLs.\n", stderr);
     const bool automatic = automatic_research();
     if (!automatic) fputs("Automatic research routing or inline citations failed.\n", stderr);
-    return readable && fallback && bounded && citations && automatic ? 0 : 1;
+    const bool dictionary = wiktionary_grounding();
+    if (!dictionary) fputs("Dictionary replies must contain a sourced English sense without anecdotes.\n", stderr);
+    return readable && fallback && bounded && citations && automatic && dictionary ? 0 : 1;
 }

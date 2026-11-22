@@ -513,6 +513,63 @@ static bool crawl(const char *url, const char *query, const atomic_bool *cancel,
     return ok;
 }
 
+Json *web_wiktionary_english_senses(const char *json)
+{
+    Json *root = cJSON_ParseWithOpts(json, nullptr, true);
+    Json *senses = cJSON_CreateArray();
+    const Json *english = at(root, "en"), *group;
+    if (!cJSON_IsArray(english)) english = nullptr;
+    cJSON_ArrayForEach(group, english) {
+        const Json *definitions = at(group, "definitions"), *item;
+        if (!cJSON_IsArray(definitions)) continue;
+        cJSON_ArrayForEach(item, definitions) {
+            Text definition = {0}, part = {0};
+            web_readable_html(js(item, "definition"), &definition, 512);
+            if (definition.len && definition.len < 500) {
+                web_readable_html(js(group, "partOfSpeech"), &part, 48);
+                Json *sense = cJSON_CreateObject();
+                set(sense, "definition", str(&definition));
+                if (part.len) set(sense, "part_of_speech", str(&part));
+                cJSON_AddItemToArray(senses, sense);
+            }
+            release(&definition);
+            release(&part);
+            if (cJSON_GetArraySize(senses) >= 6) break;
+        }
+        if (cJSON_GetArraySize(senses) >= 6) break;
+    }
+    cJSON_Delete(root);
+    return senses;
+}
+
+static void crawl_dictionary(Json *result, const atomic_bool *cancel)
+{
+    const char *title = js(result, "title");
+    Text url = {0};
+    append(&url, "https://en.wiktionary.org/api/rest_v1/page/definition/");
+    encode(&url, title);
+    Document doc = {0};
+    if (download(str(&url), false, cancel, &doc)) {
+        Json *senses = web_wiktionary_english_senses(str(&doc.body));
+        if (senses->child) {
+            put(result, "english_senses", senses);
+            Text excerpt = {0};
+            const Json *sense;
+            int index = 0;
+            cJSON_ArrayForEach(sense, senses) {
+                format(&excerpt, "%d. %s\n", ++index, js(sense, "definition"));
+            }
+            set(result, "excerpt", str(&excerpt));
+            set(result, "definition_source", "Wiktionary structured definitions API");
+            release(&excerpt);
+        } else cJSON_Delete(senses);
+    }
+    if (!at(result, "english_senses")) set(result, "crawl", "Verified English definitions unavailable.");
+    release(&doc.body);
+    release(&doc.final_url);
+    release(&url);
+}
+
 static int days(const char *range)
 {
     if (!strcmp(range, "day")) return 1;
@@ -618,7 +675,8 @@ static void search(const char *query, const char *range, const char *only,
             set(result, "crawl", "Feed metadata only. Use the publisher's direct URL for page text.");
             continue;
         }
-        crawl(js(result, "url"), query, cancel, result);
+        if (!strcmp(js(result, "engine"), "Wiktionary")) crawl_dictionary(result, cancel);
+        else crawl(js(result, "url"), query, cancel, result);
         fetched++;
     }
 }
@@ -910,4 +968,47 @@ void web_cite_inline(const char *report, Text *reply, Text *trace)
         format(trace, "\nInline web citation supplied by Neutrino: %s\n", url);
     }
     cJSON_Delete(data);
+}
+
+bool web_ground_definition(const char *report, Text *reply, Text *trace)
+{
+    Json *data = cJSON_ParseWithOpts(report, nullptr, true);
+    if (strcmp(js(data, "engine"), "Wiktionary")) {
+        cJSON_Delete(data);
+        return false;
+    }
+    const Json *sources = at(data, "sources"), *source;
+    int index = 0;
+    cJSON_ArrayForEach(source, sources) {
+        ++index;
+        if (!strcmp(js(source, "title"), js(data, "query")) && *source_url(source)) break;
+    }
+    const Json *senses = at(source, "english_senses");
+    int count = cJSON_GetArraySize(senses);
+    if (!count) {
+        clear(reply);
+        append(reply, "I couldn’t verify an English definition for that exact term in Wiktionary.");
+        append(trace, "\nWiktionary returned no verified English senses for the exact headword.\n");
+        cJSON_Delete(data);
+        return true;
+    }
+    const char *choice = str(reply);
+    char *end;
+    long selected = strtol(choice, &end, 10);
+    bool valid = end != choice && selected >= 1 && selected <= count;
+    while (isspace((unsigned char)*end)) ++end;
+    valid = valid && !*end;
+    if (!valid) selected = 1;
+    const Json *sense = cJSON_GetArrayItem(senses, (int)selected - 1);
+    const char *part = js(sense, "part_of_speech");
+    clear(reply);
+    format(reply, "**%s**", js(source, "title"));
+    if (*part) format(reply, " (%s)", part);
+    format(reply, " — %s [[%d]]", js(sense, "definition"), index);
+    format(trace, "\nPublished Wiktionary English sense %ld %s\n%s\n",
+           selected, valid ? "selected by the narrator" : "used after an invalid narrator selection",
+           js(sense, "definition"));
+    cJSON_Delete(data);
+    web_cite_inline(report, reply, trace);
+    return true;
 }

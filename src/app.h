@@ -51,7 +51,7 @@ typedef struct {
     bool tool_prose_only, tool_prose_retry, tool_measurement_retry;
     Inference *recall_job;
     Inference *auto_research_job;
-    bool planning_research, inline_research, searched_web;
+    bool planning_research, inline_research, searched_web, definition_research;
 } Preview;
 
 enum { NEOFETCH_SAMPLES = 32 };

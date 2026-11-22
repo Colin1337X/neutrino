@@ -128,6 +128,8 @@ The ray batch and acoustic opaque-box visibility tests accept `backend` values `
 
 The narrator automatically checks factual questions for recent news, named real-world references, and word definitions. It searches before drafting the reply and attaches verified source URLs inline. `/trace` records the lookup decision, query, supplied evidence, and how each citation was added. Automatic lookups use the latest player message and expire after that reply. A manual lookup takes precedence. Set `NEUTRINO_AUTO_RESEARCH=0` in the TUI or SSH session environment to turn automatic lookups off.
 
+Dictionary lookups use the English definitions from Wiktionary’s structured API. For an automatic definition, the narrator selects a published sense and Neutrino writes its text with an inline entry link. If the selection is invalid, the first available sense is used. Etymology and quotations stay outside the definition evidence. [Wikimedia definition endpoint](https://www.mediawiki.org/wiki/Mobile_Content_Service)
+
 `/research <query>` combines Google News RSS, Hacker News, Wikipedia, and Wiktionary. Use `/research wiktionary <word>` for dictionary-only results from English Wiktionary. Add `hour`, `day`, `week`, `month`, or `year` before a general query for time-sensitive lookups. Dated searches omit encyclopedia and dictionary results. The hour filter requires a source timestamp within the last hour. The other date ranges use the search engines' filters. Coverage depends on what the engines have indexed.
 
 ```text

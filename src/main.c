@@ -337,7 +337,10 @@ static void add_research(const Preview *p, Text *system)
                        "Use only relevant evidence. Cite a factual claim with the exact HTTPS URL from its source. "
                        "Excerpt footnote numbers are not source links. "
                        "Feed headlines and snippets can be incomplete. If the sources do not establish a claim, say so.\n");
-    if (p->inline_research)
+    if (p->definition_research)
+        append(system, "This is a dictionary lookup. Select the published English sense that answers the "
+                       "question. Return just its number, such as 1. If no sense is available, say so.\n");
+    else if (p->inline_research)
         append(system, "Answer the latest factual question directly using the retrieved sources. Stay on the exact "
                        "subject asked about and give only facts supported by the evidence. Put a source marker like "
                        "[[1]] in the same sentence as the supported fact. Use only IDs from the supplied sources.\n");
@@ -626,7 +629,9 @@ static void messages_for_story(App *a, Json *messages)
             bool attached = simulation_acoustic_selection_prompt(p, &selection, content);
             if (p->inline_research) {
                 if (!attached) append(&selection, content);
-                append(&selection, "\n\nAnswer just this factual question in one or two sentences using the "
+                append(&selection, p->definition_research ?
+                       "\n\nReturn only the number of the relevant published English dictionary sense." :
+                       "\n\nAnswer just this factual question in one or two sentences using the "
                        "retrieved evidence. Put the corresponding [[source number]] immediately after the fact.");
             }
             messages_add(messages, last_role, attached || p->inline_research ? str(&selection) : content);
@@ -904,6 +909,7 @@ static bool launch_auto_search(App *a, const Json *request)
 {
     Preview *p = &a->preview;
     const char *engine = js(request, "engine");
+    p->definition_research = !strcmp(engine, "wiktionary");
     format(&p->auto_research_trace, "Query: %s\nLookup: %s\n", js(request, "value"),
            *engine ? engine : "recent news");
     p->searched_web = true;
@@ -912,7 +918,13 @@ static bool launch_auto_search(App *a, const Json *request)
     clear(&p->auto_research_thinking);
     p->auto_research_job = dispatch_web(a, "web-search", request);
     if (p->auto_research_job) status(a, "Researching current sources · Esc cancels");
-    else append(&p->auto_research_trace, "Could not start the gateway lookup.\n");
+    else {
+        append(&p->auto_research_trace, "Could not start the gateway lookup.\n");
+        if (p->definition_research) {
+            append(&p->research_data, "{\"engine\":\"Wiktionary\",\"sources\":[]}");
+            p->inline_research = true;
+        }
+    }
     return p->auto_research_job != nullptr;
 }
 
@@ -1070,7 +1082,13 @@ static bool update_generation(App *a)
                 append(&p->research_data, str(&p->auto_research_output));
                 p->inline_research = true;
                 format(&p->auto_research_trace, "%d sources returned at %s.\n", sources, js(data, "fetched_at"));
-            } else append(&p->auto_research_trace, "Lookup returned no usable sources.\n");
+            } else {
+                append(&p->auto_research_trace, "Lookup returned no usable sources.\n");
+                if (p->definition_research) {
+                    append(&p->research_data, "{\"engine\":\"Wiktionary\",\"sources\":[]}");
+                    p->inline_research = true;
+                }
+            }
             cJSON_Delete(data);
         }
         continue_narrator(a);
@@ -1142,7 +1160,8 @@ static bool update_generation(App *a)
                 return true;
             }
             record_generation(a, c);
-            if (p->inline_research) web_cite_inline(str(&p->research_data), &c->body, &a->trace);
+            if (p->inline_research && !web_ground_definition(str(&p->research_data), &c->body, &a->trace))
+                web_cite_inline(str(&p->research_data), &c->body, &a->trace);
             physics_prose_readouts(p->readings, p->reading_count, &c->body);
             if (!p->inline_research) web_cite_reply(str(&p->research_data), &c->body, &a->trace);
             int id = story_push(&a->ws, p->story, p->parent, "assistant", str(&c->body));
