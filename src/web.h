@@ -6,5 +6,6 @@
 
 void web_research(const char *mode, const Json *request, const atomic_bool *cancel, Text *out);
 void web_readable_html(const char *html, Text *out, size_t limit);
+void web_cite_reply(const char *report, Text *reply, Text *trace);
 
 #endif

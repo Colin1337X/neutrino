@@ -126,11 +126,12 @@ The ray batch and acoustic opaque-box visibility tests accept `backend` values `
 
 ## Headless web research
 
-`/research <query>` combines Google News RSS, Hacker News search, and Wikipedia OpenSearch. Add `hour`, `day`, `week`, `month`, or `year` before the query for time-sensitive lookups. Dated searches omit Wikipedia reference results. The hour filter requires a source timestamp within the last hour. The other date ranges use the search engines' filters. Coverage depends on what the engines have indexed.
+`/research <query>` combines Google News RSS, Hacker News, Wikipedia, and Wiktionary. Use `/research wiktionary <word>` for dictionary-only results from English Wiktionary. Add `hour`, `day`, `week`, `month`, or `year` before a general query for time-sensitive lookups. Dated searches omit encyclopedia and dictionary results. The hour filter requires a source timestamp within the last hour. The other date ranges use the search engines' filters. Coverage depends on what the engines have indexed.
 
 ```text
 /research hour Seoul transit announcements
 /research Steamed Hams origin
+/research wiktionary serendipity
 /read https://en.wikipedia.org/wiki/Steamed_Hams
 /trace
 /research clear
@@ -140,7 +141,7 @@ The gateway can also query an optional SearXNG instance. Set `NEUTRINO_SEARXNG_U
 
 The C headless reader fetches up to three direct pages per search and extracts readable text from HTML or plain text. It has no browser window and does not execute JavaScript. Google News links are presented as feed metadata. `/read` can fetch an available publisher URL directly. The public reader uses HTTPS, checks the remote address on each connection, and limits redirects and response size. An administrator can set `NEUTRINO_CA_BUNDLE` for libcurl builds that need an explicit CA bundle.
 
-Sources are shown with URLs, available dates, and excerpts. The latest successful lookup is available to the narrator in the same story or writing scene until replaced or cleared. It is session-local. `/trace` shows the research results and the exact prompt containing them. Search terms go to the configured engines. The gateway performs the network requests, including in SSH sessions.
+Sources are shown with URLs, available dates, and excerpts. The latest successful lookup is available to the narrator in the same story or writing scene until replaced or cleared. It is session-local. Each reply uses the set of sources available when generation began. If a saved roleplay reply contains no URL from that set, Neutrino adds up to three links under **Sources supplied for this reply**. `/trace` distinguishes links written by the narrator from links added on save. Search terms go to the configured engines. The gateway performs the network requests, including in SSH sessions.
 
 ## Serve the TUI over SSH
 

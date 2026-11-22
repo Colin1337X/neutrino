@@ -38,7 +38,7 @@ typedef struct {
     Json *scene, *story;
     Text source, messages_context, objective, lore_trace, memory_trace, recall_output, recall_error, recall_thinking;
     Text previous_reply, selection_trace;
-    Text world_context, speaker, tool_results, tool_feedback;
+    Text world_context, speaker, tool_results, tool_feedback, research_data;
     size_t start, end, insert_at;
     int version, parent, head;
     Candidate candidates[30];

@@ -411,9 +411,18 @@ static const char *array_string(const Json *array, int index)
 static void json_results(const char *body, const char *engine, Json *results)
 {
     Json *root = cJSON_ParseWithOpts(body, nullptr, true);
-    if (!strcmp(engine, "Wikipedia")) {
+    if (!strcmp(engine, "Wikipedia") || !strcmp(engine, "Wiktionary")) {
         const Json *titles = cJSON_GetArrayItem(root, 1), *urls = cJSON_GetArrayItem(root, 3);
-        for (int i = 0; i < 3 && i < cJSON_GetArraySize(urls); i++)
+        int first = 0, limit = cJSON_GetArraySize(urls);
+        if (limit > 3) limit = 3;
+        if (!strcmp(engine, "Wiktionary"))
+            for (int i = 0; i < limit; i++) {
+                if (strcmp(array_string(titles, i), array_string(root, 0))) continue;
+                first = i;
+                limit = i + 1;
+                break;
+            }
+        for (int i = first; i < limit; i++)
             add_result(results, engine, array_string(urls, i), array_string(titles, i), "", "");
     } else {
         bool searx = !strcmp(engine, "SearXNG");
@@ -551,17 +560,18 @@ static bool format_utc(time_t stamp, char iso[21])
     return strftime(iso, 21, "%Y-%m-%dT%H:%M:%SZ", &utc) == 20;
 }
 
-static void search(const char *query, const char *range, const atomic_bool *cancel, Json *results, Json *errors)
+static void search(const char *query, const char *range, bool dictionary,
+                   const atomic_bool *cancel, Json *results, Json *errors)
 {
     Text encoded = {0}, url = {0};
     encode(&encoded, query);
     const char *configured = env("NEUTRINO_SEARXNG_URL", "");
-    const char *const engines[] = {"SearXNG", "Google News RSS", "Wikipedia", "Hacker News"};
+    const char *const engines[] = {"SearXNG", "Google News RSS", "Wikipedia", "Wiktionary", "Hacker News"};
     bool hourly = !strcmp(range, "hour");
     int age = hourly ? 1 : days(range);
     time_t now = time(nullptr);
-    for (int i = 0; i < 4 && !cancelled(cancel); i++) {
-        if ((!i && !*configured) || (i == 2 && age)) continue;
+    for (int i = 0; i < 5 && !cancelled(cancel); i++) {
+        if ((dictionary && i != 3) || (!i && !*configured) || ((i == 2 || i == 3) && age)) continue;
         clear(&url);
         if (i == 0) {
             format(&url, "%s%sformat=json&q=%s", configured, strchr(configured, '?') ? "&" : "?", str(&encoded));
@@ -570,9 +580,9 @@ static void search(const char *query, const char *range, const atomic_bool *canc
             format(&url, "https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US%%3Aen&q=%s", str(&encoded));
             if (hourly) append(&url, "%20when%3A1h");
             else if (age) format(&url, "%%20when%%3A%dd", age);
-        } else if (i == 2) {
-            format(&url, "https://en.wikipedia.org/w/api.php?action=opensearch&namespace=0&limit=3&format=json&search=%s",
-                   str(&encoded));
+        } else if (i == 2 || i == 3) {
+            format(&url, "https://en.%s.org/w/api.php?action=opensearch&namespace=0&limit=%d&format=json&search=%s",
+                   i == 2 ? "wikipedia" : "wiktionary", i == 2 || dictionary ? 3 : 1, str(&encoded));
         } else {
             format(&url, "https://hn.algolia.com/api/v1/%s?tags=story&hitsPerPage=4&query=%s",
                    age ? "search_by_date" : "search", str(&encoded));
@@ -619,6 +629,7 @@ void web_research(const char *mode, const Json *request, const atomic_bool *canc
     put(report, "sources", results);
     put(report, "unavailable_engines", errors);
     const char *value = js(request, "value"), *range = js(request, "range");
+    bool dictionary = !strcmp(js(request, "engine"), "wiktionary");
     char fetched[21];
     if (format_utc(time(nullptr), fetched)) set(report, "fetched_at", fetched);
     if (!strcmp(mode, "web-read") && strlen(value) <= 1800 && url_allowed(value, false)) {
@@ -629,7 +640,8 @@ void web_research(const char *mode, const Json *request, const atomic_bool *canc
                (!*range || days(range) || !strcmp(range, "hour"))) {
         set(report, "query", value);
         if (*range) set(report, "range", range);
-        search(value, range, cancel, results, errors);
+        if (dictionary) set(report, "engine", "Wiktionary");
+        search(value, range, dictionary, cancel, results, errors);
         if (!results->child) set(report, "error", "No sources found for this query.");
     } else set(report, "error", "Use a search query up to 400 bytes, or an HTTPS source URL on port 443.");
     char *json = cJSON_PrintUnformatted(report);
@@ -637,4 +649,57 @@ void web_research(const char *mode, const Json *request, const atomic_bool *canc
     append(out, json);
     cJSON_free(json);
     cJSON_Delete(report);
+}
+
+static bool citation_url(const char *url)
+{
+    return !strncmp(url, "https://", 8) && url[8] && !strpbrk(url, " \t\r\n<>");
+}
+
+static bool reply_contains_url(const char *reply, const char *url)
+{
+    size_t n = strlen(url);
+    for (const char *p = reply; (p = strstr(p, url)); p += n) {
+        unsigned char next = (unsigned char)p[n];
+        if (next == '.' || next == ',') next = (unsigned char)p[n + 1];
+        if (!next || isspace(next) || strchr(">)\"]'`", next)) return true;
+    }
+    return false;
+}
+
+void web_cite_reply(const char *report, Text *reply, Text *trace)
+{
+    if (!*report) return;
+    Json *data = cJSON_ParseWithOpts(report, nullptr, true);
+    const Json *sources = at(data, "sources"), *source;
+    bool heading = false;
+    cJSON_ArrayForEach(source, sources) {
+        const char *url = js(source, "url"), *resolved = js(source, "resolved_url");
+        const char *used = citation_url(url) && reply_contains_url(str(reply), url) ? url :
+                           citation_url(resolved) && reply_contains_url(str(reply), resolved) ? resolved : nullptr;
+        if (!used) continue;
+        if (!heading) append(trace, "\nWeb citations in the narrator's reply\n");
+        heading = true;
+        format(trace, "%s\n", used);
+    }
+    if (!heading) {
+        int count = 0;
+        bool dated = *js(data, "range");
+        for (int pass = 0; pass < 2 && count < 3; pass++) {
+            cJSON_ArrayForEach(source, sources) {
+                const char *url = js(source, "resolved_url");
+                if (!citation_url(url)) url = js(source, "url");
+                bool preferred = dated ? *js(source, "source_date") : *js(source, "excerpt");
+                if (preferred != (pass == 0) || !citation_url(url) || reply_contains_url(str(reply), url)) continue;
+                if (!count++) {
+                    append(reply, "\n\nSources supplied for this reply\n");
+                    append(trace, "\nWeb citations appended because the narrator omitted source URLs\n");
+                }
+                format(reply, "- %s\n", url);
+                format(trace, "%s\n", url);
+                if (count == 3) break;
+            }
+        }
+    }
+    cJSON_Delete(data);
 }
