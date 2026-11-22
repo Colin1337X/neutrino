@@ -560,7 +560,7 @@ static bool format_utc(time_t stamp, char iso[21])
     return strftime(iso, 21, "%Y-%m-%dT%H:%M:%SZ", &utc) == 20;
 }
 
-static void search(const char *query, const char *range, bool dictionary,
+static void search(const char *query, const char *range, const char *only,
                    const atomic_bool *cancel, Json *results, Json *errors)
 {
     Text encoded = {0}, url = {0};
@@ -571,7 +571,7 @@ static void search(const char *query, const char *range, bool dictionary,
     int age = hourly ? 1 : days(range);
     time_t now = time(nullptr);
     for (int i = 0; i < 5 && !cancelled(cancel); i++) {
-        if ((dictionary && i != 3) || (!i && !*configured) || ((i == 2 || i == 3) && age)) continue;
+        if ((*only && strcmp(only, engines[i])) || (!i && !*configured) || ((i == 2 || i == 3) && age)) continue;
         clear(&url);
         if (i == 0) {
             format(&url, "%s%sformat=json&q=%s", configured, strchr(configured, '?') ? "&" : "?", str(&encoded));
@@ -582,7 +582,7 @@ static void search(const char *query, const char *range, bool dictionary,
             else if (age) format(&url, "%%20when%%3A%dd", age);
         } else if (i == 2 || i == 3) {
             format(&url, "https://en.%s.org/w/api.php?action=opensearch&namespace=0&limit=%d&format=json&search=%s",
-                   i == 2 ? "wikipedia" : "wiktionary", i == 2 || dictionary ? 3 : 1, str(&encoded));
+                   i == 2 ? "wikipedia" : "wiktionary", i == 2 || *only ? 3 : 1, str(&encoded));
         } else {
             format(&url, "https://hn.algolia.com/api/v1/%s?tags=story&hitsPerPage=4&query=%s",
                    age ? "search_by_date" : "search", str(&encoded));
@@ -629,7 +629,9 @@ void web_research(const char *mode, const Json *request, const atomic_bool *canc
     put(report, "sources", results);
     put(report, "unavailable_engines", errors);
     const char *value = js(request, "value"), *range = js(request, "range");
-    bool dictionary = !strcmp(js(request, "engine"), "wiktionary");
+    const char *engine = js(request, "engine");
+    const char *only = !strcmp(engine, "wiktionary") ? "Wiktionary" :
+                       !strcmp(engine, "wikipedia") ? "Wikipedia" : "";
     char fetched[21];
     if (format_utc(time(nullptr), fetched)) set(report, "fetched_at", fetched);
     if (!strcmp(mode, "web-read") && strlen(value) <= 1800 && url_allowed(value, false)) {
@@ -640,10 +642,17 @@ void web_research(const char *mode, const Json *request, const atomic_bool *canc
                (!*range || days(range) || !strcmp(range, "hour"))) {
         set(report, "query", value);
         if (*range) set(report, "range", range);
-        if (dictionary) set(report, "engine", "Wiktionary");
-        search(value, range, dictionary, cancel, results, errors);
+        if (*only) set(report, "engine", only);
+        search(value, range, only, cancel, results, errors);
+        if (!results->child && !strcmp(only, "Wikipedia") && !cancelled(cancel)) {
+            set(report, "engine", "General search");
+            search(value, range, "", cancel, results, errors);
+        }
         if (!results->child) set(report, "error", "No sources found for this query.");
     } else set(report, "error", "Use a search query up to 400 bytes, or an HTTPS source URL on port 443.");
+    Json *source;
+    int id = 0;
+    cJSON_ArrayForEach(source, results) integer(source, "id", ++id);
     char *json = cJSON_PrintUnformatted(report);
     if (!json) abort();
     append(out, json);
@@ -700,6 +709,205 @@ void web_cite_reply(const char *report, Text *reply, Text *trace)
                 if (count == 3) break;
             }
         }
+    }
+    cJSON_Delete(data);
+}
+Json *web_research_request(const char *kind, const char *query)
+{
+    if (!*query || strlen(query) > 160 || strpbrk(query, "\r\n\t?") || strstr(query, "://") ||
+        (strcmp(kind, "news") && strcmp(kind, "reference") && strcmp(kind, "dictionary"))) return nullptr;
+    Json *request = cJSON_CreateObject();
+    set(request, "value", query);
+    if (!strcmp(kind, "news")) set(request, "range", "day");
+    else set(request, "engine", !strcmp(kind, "dictionary") ? "wiktionary" : "wikipedia");
+    return request;
+}
+
+static bool cue_has(const char *cue, const char *word)
+{
+    return term_in_line(cue, cue + strlen(cue), word, strlen(word));
+}
+
+static Json *request_span(const char *kind, const char *start, size_t length)
+{
+    while (length && isspace((unsigned char)*start)) { ++start; --length; }
+    while (length && (isspace((unsigned char)start[length - 1]) ||
+                      strchr(".?!,;:", start[length - 1]))) --length;
+    char query[161];
+    if (!length || length >= sizeof query) return nullptr;
+    memcpy(query, start, length);
+    query[length] = 0;
+    return web_research_request(kind, query);
+}
+
+Json *web_auto_request(const char *cue, bool *consider)
+{
+    *consider = false;
+    size_t n = strlen(cue);
+    if (!n || n > 600 || strpbrk(cue, "\r\n") || strstr(cue, "neutrino_tool")) return nullptr;
+    char lower[601];
+    for (size_t i = 0; i <= n; ++i) lower[i] = (char)tolower((unsigned char)cue[i]);
+    bool lookup = cue_has(lower, "lookup") || cue_has(lower, "look up") || cue_has(lower, "research");
+    bool question = strchr(cue, '?') && (cue_has(lower, "what") || cue_has(lower, "who") ||
+        cue_has(lower, "when") || cue_has(lower, "where") || cue_has(lower, "which") ||
+        cue_has(lower, "why") || cue_has(lower, "how"));
+    bool dictionary = cue_has(lower, "define") || cue_has(lower, "wiktionary") || cue_has(lower, "dictionary") ||
+        (cue_has(lower, "word") && (cue_has(lower, "meaning") || cue_has(lower, "mean")));
+    bool news = cue_has(lower, "headlines") || cue_has(lower, "news") || cue_has(lower, "latest") ||
+        cue_has(lower, "recently") || cue_has(lower, "today");
+    bool reference = cue_has(lower, "meme") || cue_has(lower, "episode") || cue_has(lower, "film") ||
+        cue_has(lower, "movie") || cue_has(lower, "anime") || cue_has(lower, "song") ||
+        cue_has(lower, "game") || cue_has(lower, "reference") || cue_has(lower, "pop culture");
+    *consider = question || lookup || dictionary;
+    if (!*consider) return nullptr;
+    const char *kind = dictionary ? "dictionary" : news ? "news" : "reference";
+    if (dictionary || news || reference) {
+        const char *quoted = strchr(cue, '"');
+        char delimiter = '"';
+        if (!quoted) { quoted = strstr(cue, " '"); if (quoted) ++quoted; delimiter = '\''; }
+        const char *end = quoted ? strchr(quoted + 1, delimiter) : nullptr;
+        if (end) return request_span(kind, quoted + 1, (size_t)(end - quoted - 1));
+    }
+    if (dictionary) {
+        const char *term = strstr(lower, "word ");
+        if (term) term += 5;
+        else if ((term = strstr(lower, "define "))) term += 7;
+        if (term) {
+            const char *end = term;
+            while (word_byte((unsigned char)*end) || *end == '-') ++end;
+            if (end != term) return request_span(kind, cue + (term - lower), (size_t)(end - term));
+        }
+    }
+    if (news) {
+        const char *subject = strstr(lower, " about ");
+        if (subject) subject += 7;
+        else if ((subject = strstr(lower, " on "))) subject += 4;
+        if (subject) {
+            const char *end = strpbrk(subject, "?.!;");
+            return request_span(kind, cue + (subject - lower), end ? (size_t)(end - subject) : strlen(subject));
+        }
+    }
+    if (question && !news && !dictionary) {
+        const char *const creator_verbs[] = {" created ", " wrote ", " directed ", " developed ",
+                                             " published ", " recorded ", " voiced "};
+        for (size_t i = 0; i < sizeof creator_verbs / sizeof *creator_verbs; ++i) {
+            const char *subject = strstr(lower, creator_verbs[i]);
+            if (!subject) continue;
+            subject += strlen(creator_verbs[i]);
+            const char *end = strchr(subject, '?');
+            const char *named = cue + (subject - lower);
+            if (end && (reference || isupper((unsigned char)*named)))
+                return request_span("reference", named, (size_t)(end - subject));
+        }
+    }
+    return nullptr;
+}
+
+static const char *source_url(const Json *source)
+{
+    const char *url = js(source, "resolved_url");
+    if (!citation_url(url)) url = js(source, "url");
+    return citation_url(url) ? url : "";
+}
+
+static const Json *best_source(const Json *sources, const char *reply)
+{
+    const Json *best = nullptr, *source;
+    int best_score = -1;
+    const char *end = reply + strlen(reply);
+    cJSON_ArrayForEach(source, sources) {
+        if (!*source_url(source)) continue;
+        int score = *js(source, "excerpt") ? 2 : 0;
+        for (const char *p = js(source, "title"); *p;) {
+            while (*p && !word_byte((unsigned char)*p)) ++p;
+            const char *start = p;
+            while (word_byte((unsigned char)*p)) ++p;
+            if (p - start >= 5 && term_in_line(reply, end, start, (size_t)(p - start))) score += 3;
+        }
+        if (score > best_score) {
+            best = source;
+            best_score = score;
+        }
+    }
+    return best;
+}
+
+static bool already_inline(const char *text, const char *url)
+{
+    if (!reply_contains_url(text, url)) return false;
+    size_t n = strlen(url);
+    for (const char *match = text; (match = strstr(match, url)); match += n) {
+        const char *line = match;
+        while (line > text && line[-1] != '\n') --line;
+        while (line < match && strchr(" \t-*+", *line)) ++line;
+        if (*line == '[' || !strncmp(line, "Source:", 7) || !strncmp(line, "Reference:", 10)) continue;
+        for (const char *p = line; p < match; ++p)
+            if (isalnum((unsigned char)*p)) return true;
+    }
+    return false;
+}
+
+void web_cite_inline(const char *report, Text *reply, Text *trace)
+{
+    Json *data = cJSON_ParseWithOpts(report, nullptr, true);
+    const Json *sources = at(data, "sources"), *source;
+    Text revised = {0};
+    int linked = 0;
+    const char *start = str(reply), *scan = start, *marker;
+    while ((marker = strstr(scan, "[["))) {
+        scan = marker + 2;
+        char *end = nullptr;
+        long id = strtol(scan, &end, 10);
+        if (!isdigit((unsigned char)*scan) || strncmp(end, "]]", 2)) continue;
+        const Json *item = id > 0 && id <= cJSON_GetArraySize(sources) ?
+                           cJSON_GetArrayItem(sources, (int)id - 1) : nullptr;
+        const char *url = source_url(item);
+        append_n(&revised, start, (size_t)(marker - start));
+        if (*url) {
+            const char *line = marker;
+            while (line > str(reply) && (line[-1] == ' ' || line[-1] == '\t')) --line;
+            if (line > str(reply) && line[-1] == '\n') {
+                while (revised.len && isspace((unsigned char)revised.data[revised.len - 1]))
+                    revised.data[--revised.len] = 0;
+                if (revised.len) append(&revised, " ");
+            }
+            format(&revised, "([%ld](<%s>))", id, url);
+            format(trace, "\nInline web citation %ld resolved to %s\n", id, url);
+            linked++;
+        }
+        start = scan = end + 2;
+    }
+    append(&revised, start);
+    if (strcmp(str(&revised), str(reply))) {
+        release(reply);
+        *reply = revised;
+    } else release(&revised);
+    if (linked) { cJSON_Delete(data); return; }
+    cJSON_ArrayForEach(source, sources) {
+        const char *url = source_url(source);
+        const char *original = js(source, "url");
+        if ((*url && already_inline(str(reply), url)) ||
+            (citation_url(original) && already_inline(str(reply), original))) {
+            format(trace, "\nInline web citation written by narrator: %s\n",
+                   *url && already_inline(str(reply), url) ? url : original);
+            cJSON_Delete(data);
+            return;
+        }
+    }
+    const char *url = source_url(best_source(sources, str(reply)));
+    if (*url) {
+        Text cited = {0};
+        const char *body = str(reply), *first = body;
+        while (isspace((unsigned char)*first)) ++first;
+        const char *paragraph = strstr(first, "\n\n");
+        const char *end = paragraph ? paragraph : body + reply->len;
+        while (end > body && isspace((unsigned char)end[-1])) --end;
+        append_n(&cited, body, (size_t)(end - body));
+        format(&cited, " ([Reference](<%s>))", url);
+        append(&cited, end);
+        release(reply);
+        *reply = cited;
+        format(trace, "\nInline web citation supplied by Neutrino: %s\n", url);
     }
     cJSON_Delete(data);
 }

@@ -36,6 +36,9 @@ static const char filing_schema[] =
 static const char acoustic_selector_schema[] =
     "{\"type\":\"object\",\"properties\":{\"neutrino_tool\":{\"enum\":[\"acoustic\"]}},"
     "\"required\":[\"neutrino_tool\"],\"additionalProperties\":false}";
+static const char research_plan_schema[] =
+    "{\"type\":\"object\",\"properties\":{\"kind\":{\"enum\":[\"none\",\"news\",\"reference\",\"dictionary\"]},"
+    "\"query\":{\"type\":\"string\"}},\"required\":[\"kind\",\"query\"],\"additionalProperties\":false}";
 typedef struct {
     const char *endpoint, *key, *model, *web_mode;
     RequestOptions options;
@@ -116,6 +119,12 @@ static bool route_for(const char *name, Route *route)
     route->lane = slots ? 1 : 0;
     route->options.slot = slots ? 1 : -1;
     route->model = env("NEUTRINO_AGENT_MODEL", route->model);
+    if (!strcmp(name, "research-plan")) {
+        if (slots) route->options.json_schema = research_plan_schema;
+        route->options.max_tokens = 72;
+        route->options.timeout_ms = 18000;
+        return *route->model != 0;
+    }
     if (!strcmp(name, "file") || !strcmp(name, "history") || !strcmp(name, "bench-agent")) {
         route->options.max_tokens = !strcmp(name, "bench-agent") ? 1 : 1200;
         if (slots && !strcmp(name, "file")) route->options.json_schema = filing_schema;

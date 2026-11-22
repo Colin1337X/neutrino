@@ -38,6 +38,54 @@ static bool citation_check(void)
     return added && unchanged && backtick && empty;
 }
 
+static bool automatic_research(void)
+{
+    bool consider;
+    Json *news = web_auto_request("What are the latest headlines about climate talks?", &consider);
+    bool ok = consider && !strcmp(js(news, "range"), "day") && !strcmp(js(news, "value"), "climate talks");
+    Json *culture = web_auto_request("What is the \"Steamed Hams\" scene in the Simpsons episode?", &consider);
+    ok = ok && consider && !strcmp(js(culture, "engine"), "wikipedia") &&
+        !strcmp(js(culture, "value"), "Steamed Hams");
+    Json *dictionary = web_auto_request("What does the word \"serendipity\" mean?", &consider);
+    ok = ok && consider && !strcmp(js(dictionary, "engine"), "wiktionary") &&
+        !strcmp(js(dictionary, "value"), "serendipity");
+    Json *scene = web_auto_request("Iona steps behind the cabinet.", &consider);
+    ok = ok && !consider && !scene;
+    Json *creator = web_auto_request("Who originally created Dwarf Fortress?", &consider);
+    ok = ok && consider && !strcmp(js(creator, "engine"), "wikipedia") &&
+        !strcmp(js(creator, "value"), "Dwarf Fortress");
+    Json *invalid = web_research_request("dictionary", "who created Dwarf Fortress?");
+    ok = ok && !invalid;
+    cJSON_Delete(news);
+    cJSON_Delete(culture);
+    cJSON_Delete(dictionary);
+    cJSON_Delete(scene);
+    cJSON_Delete(creator);
+    cJSON_Delete(invalid);
+
+    const char *report = "{\"sources\":[{\"url\":\"https://example.org/news\"},"
+                         "{\"url\":\"https://example.org/ref\",\"title\":\"Hamburgers\",\"excerpt\":\"text\"}]}";
+    Text reply = {0}, trace = {0};
+    append(&reply, "Here is the news [[1]]. Ignore [[99]].");
+    web_cite_inline(report, &reply, &trace);
+    ok = ok && strstr(str(&reply), "news ([1](<https://example.org/news>)).") && !strstr(str(&reply), "[[") &&
+        strstr(str(&trace), "citation 1 resolved");
+    clear(&reply);
+    clear(&trace);
+    append(&reply, "He calls them steamed hams.\n\n[[2]]");
+    web_cite_inline(report, &reply, &trace);
+    ok = ok && !strcmp(str(&reply), "He calls them steamed hams. ([2](<https://example.org/ref>))");
+    clear(&reply);
+    clear(&trace);
+    append(&reply, "\n\nHe calls the hamburgers steamed hams.\n\nEnd.");
+    web_cite_inline(report, &reply, &trace);
+    ok = ok && strstr(str(&reply), "hams. ([Reference](<https://example.org/ref>))\n\nEnd.") &&
+        strstr(str(&trace), "supplied by Neutrino");
+    release(&reply);
+    release(&trace);
+    return ok;
+}
+
 int main(void)
 {
     Text out = {0};
@@ -63,5 +111,7 @@ int main(void)
     if (!readable || !fallback || !bounded) fputs("Headless reader extraction failed.\n", stderr);
     const bool citations = citation_check();
     if (!citations) fputs("Saved replies must preserve or supply exact research source URLs.\n", stderr);
-    return readable && fallback && bounded && citations ? 0 : 1;
+    const bool automatic = automatic_research();
+    if (!automatic) fputs("Automatic research routing or inline citations failed.\n", stderr);
+    return readable && fallback && bounded && citations && automatic ? 0 : 1;
 }

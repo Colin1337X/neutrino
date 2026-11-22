@@ -222,6 +222,18 @@ static const char *research_scope(const App *a)
     return a->scene ? js(a->scene, "path") : "scratchpad";
 }
 
+static Inference *dispatch_web(App *a, const char *mode, const Json *request)
+{
+    Json *messages = cJSON_CreateArray();
+    char *wire = cJSON_PrintUnformatted(request);
+    if (!wire) abort();
+    messages_add(messages, "user", wire);
+    Inference *job = app_inference(a, mode, messages);
+    cJSON_free(wire);
+    cJSON_Delete(messages);
+    return job;
+}
+
 static void start_research(App *a, const char *mode, const char *arg)
 {
     if (!strcmp(mode, "web-search") && !strcmp(arg, "clear")) {
@@ -250,17 +262,12 @@ static void start_research(App *a, const char *mode, const char *arg)
         }
     }
     if (!*arg) { status(a, "Give a web query or HTTPS page URL."); return; }
-    Json *request = cJSON_CreateObject(), *messages = cJSON_CreateArray();
+    Json *request = cJSON_CreateObject();
     set(request, "value", arg);
     set(request, "range", range);
     if (dictionary) set(request, "engine", "wiktionary");
-    char *wire = cJSON_PrintUnformatted(request);
-    if (!wire) abort();
-    messages_add(messages, "user", wire);
-    a->research_job = app_inference(a, mode, messages);
-    cJSON_free(wire);
+    a->research_job = dispatch_web(a, mode, request);
     cJSON_Delete(request);
-    cJSON_Delete(messages);
     if (!a->research_job) { status(a, "Could not reach the web research gateway."); return; }
     clear(&a->research_pending_scope);
     append(&a->research_pending_scope, research_scope(a));
@@ -330,6 +337,12 @@ static void add_research(const Preview *p, Text *system)
                        "Use only relevant evidence. Cite a factual claim with the exact HTTPS URL from its source. "
                        "Excerpt footnote numbers are not source links. "
                        "Feed headlines and snippets can be incomplete. If the sources do not establish a claim, say so.\n");
+    if (p->inline_research)
+        append(system, "Answer the latest factual question directly using the retrieved sources. Stay on the exact "
+                       "subject asked about and give only facts supported by the evidence. Put a source marker like "
+                       "[[1]] in the same sentence as the supported fact. Use only IDs from the supplied sources.\n");
+    else if (p->searched_web)
+        append(system, "The automatic web lookup returned no usable sources. Say when a current fact cannot be verified.\n");
 }
 
 static void show_neofetch(App *a)
@@ -611,7 +624,12 @@ static void messages_for_story(App *a, Json *messages)
             if (p->tool_prose_only) continue;
             Text selection = {0};
             bool attached = simulation_acoustic_selection_prompt(p, &selection, content);
-            messages_add(messages, last_role, attached ? str(&selection) : content);
+            if (p->inline_research) {
+                if (!attached) append(&selection, content);
+                append(&selection, "\n\nAnswer just this factual question in one or two sentences using the "
+                       "retrieved evidence. Put the corresponding [[source number]] immediately after the fact.");
+            }
+            messages_add(messages, last_role, attached || p->inline_research ? str(&selection) : content);
             release(&selection);
         } else messages_add(messages, last_role, content);
     }
@@ -694,6 +712,7 @@ static void cancel_preview(Preview *p)
 {
     p->stopped = true;
     if (p->recall_job) inference_cancel(p->recall_job);
+    if (p->auto_research_job) inference_cancel(p->auto_research_job);
     for (int i = 0; i < p->next; i++)
         if (p->candidates[i].job) inference_cancel(p->candidates[i].job);
     for (; p->next < p->count; p->next++) {
@@ -705,6 +724,11 @@ static void cancel_preview(Preview *p)
 
 static void release_preview(Preview *p)
 {
+    if (p->auto_research_job) inference_free(p->auto_research_job);
+    release(&p->auto_research_trace);
+    release(&p->auto_research_output);
+    release(&p->auto_research_error);
+    release(&p->auto_research_thinking);
     if (p->recall_job) inference_free(p->recall_job);
     for (size_t i = 0; i < sizeof p->candidates / sizeof *p->candidates; i++) {
         if (p->candidates[i].job) inference_free(p->candidates[i].job);
@@ -749,6 +773,7 @@ static void start_candidate(App *a, int index)
         if (p->world_context.len) format(&a->trace, "\nWorld state\n%s", str(&p->world_context));
         if (p->speaker.len) format(&a->trace, "Addressed character: %s\n", str(&p->speaker));
         if (p->tool_results.len) format(&a->trace, "\nNarrator tools\n%s", str(&p->tool_results));
+        if (p->auto_research_trace.len) format(&a->trace, "\nAutomatic web research\n%s", str(&p->auto_research_trace));
     }
     append(&a->trace, "\nMessages sent to the server (JSON, in order)\n\n");
     char *wire = cJSON_Print(messages);
@@ -875,6 +900,65 @@ static bool repeats_reply(const Preview *p, const Text *body)
     return exact || replay;
 }
 
+static bool launch_auto_search(App *a, const Json *request)
+{
+    Preview *p = &a->preview;
+    const char *engine = js(request, "engine");
+    format(&p->auto_research_trace, "Query: %s\nLookup: %s\n", js(request, "value"),
+           *engine ? engine : "recent news");
+    p->searched_web = true;
+    clear(&p->auto_research_output);
+    clear(&p->auto_research_error);
+    clear(&p->auto_research_thinking);
+    p->auto_research_job = dispatch_web(a, "web-search", request);
+    if (p->auto_research_job) status(a, "Researching current sources · Esc cancels");
+    else append(&p->auto_research_trace, "Could not start the gateway lookup.\n");
+    return p->auto_research_job != nullptr;
+}
+
+static bool begin_auto_research(App *a)
+{
+    Preview *p = &a->preview;
+    if (p->op != NARRATE || p->research_data.len || simulation_attached_acoustic_turn(p) ||
+        !strcmp(env("NEUTRINO_AUTO_RESEARCH", "1"), "0")) return false;
+    const Json *player = story_pick(p->story, p->parent);
+    if (strcmp(js(player, "role"), "user")) return false;
+    const char *cue = js(player, "content");
+    bool consider;
+    Json *request = web_auto_request(cue, &consider);
+    if (request) {
+        append(&p->auto_research_trace, "Matched a factual lookup in the latest player message.\n");
+        bool started = launch_auto_search(a, request);
+        cJSON_Delete(request);
+        return started;
+    }
+    if (!consider) return false;
+    Json *messages = cJSON_CreateArray();
+    messages_add(messages, "system", "Decide if the latest message asks for external factual research. "
+        "Return one JSON object with kind none, news, reference, or dictionary and a short query. "
+        "News is for recent real-world facts, reference for named real-world cultural works or people, "
+        "and dictionary for word meanings. Use none and an empty query for ordinary fictional action, dialogue, "
+        "invented information, or a question about the current scene. Extract only the named public subject "
+        "from the latest player message. Omit private information and surrounding roleplay. "
+        "For 'Who created Dwarf Fortress?' use kind reference and query Dwarf Fortress. "
+        "For 'Define ephemeral' use kind dictionary and query ephemeral. The query is the subject, without question wording.");
+    messages_add(messages, "user", cue);
+    p->auto_research_job = app_inference(a, "research-plan", messages);
+    cJSON_Delete(messages);
+    if (!p->auto_research_job) return false;
+    p->planning_research = true;
+    status(a, "Checking whether the reply needs research · Esc cancels");
+    return true;
+}
+
+static void continue_narrator(App *a)
+{
+    if (begin_recall(a)) return;
+    status(a, "Generating · Esc cancels");
+    a->preview.next = 1;
+    start_candidate(a, 0);
+}
+
 static void begin(App *a, Operation op, const char *objective, int parent, const char *speaker)
 {
     Preview *p = &a->preview;
@@ -943,18 +1027,55 @@ static void begin(App *a, Operation op, const char *objective, int parent, const
     p->open = true;
     if (!p->story) show_preview(a);
     memory_pause(a);
-    if (p->story && begin_recall(a)) return;
-    status(a, "Generating · Esc cancels");
     if (p->story) {
-        p->next = 1;
-        start_candidate(a, 0);
-    } else dispatch_writing(a);
+        if (!begin_auto_research(a)) continue_narrator(a);
+    } else {
+        status(a, "Generating · Esc cancels");
+        dispatch_writing(a);
+    }
 }
 
 static bool update_generation(App *a)
 {
     Preview *p = &a->preview;
     if (!preview_busy(p)) return false;
+    if (p->auto_research_job) {
+        if (!inference_read(p->auto_research_job, &p->auto_research_output, &p->auto_research_thinking,
+                            &p->auto_research_error)) return false;
+        inference_free(p->auto_research_job);
+        p->auto_research_job = nullptr;
+        if (p->stopped || p->head != number(p->story, "head")) {
+            p->open = false;
+            p->complete = true;
+            status(a, p->stopped ? "Generation cancelled" : "The active branch moved during research");
+            return true;
+        }
+        Json *data = p->auto_research_error.len ? nullptr :
+                     cJSON_ParseWithOpts(str(&p->auto_research_output), nullptr, true);
+        if (p->planning_research) {
+            p->planning_research = false;
+            Json *request = web_research_request(js(data, "kind"), js(data, "query"));
+            bool started = false;
+            if (request) {
+                append(&p->auto_research_trace, "The research planner selected an external lookup.\n");
+                started = launch_auto_search(a, request);
+            } else append(&p->auto_research_trace, data ? "The research planner selected no lookup.\n" :
+                                                          "The research planner returned no usable plan.\n");
+            cJSON_Delete(request);
+            cJSON_Delete(data);
+            if (started) return true;
+        } else {
+            int sources = cJSON_GetArraySize(at(data, "sources"));
+            if (sources && !*js(data, "error")) {
+                append(&p->research_data, str(&p->auto_research_output));
+                p->inline_research = true;
+                format(&p->auto_research_trace, "%d sources returned at %s.\n", sources, js(data, "fetched_at"));
+            } else append(&p->auto_research_trace, "Lookup returned no usable sources.\n");
+            cJSON_Delete(data);
+        }
+        continue_narrator(a);
+        return true;
+    }
     if (p->recalling) {
         if (!inference_read(p->recall_job, &p->recall_output, &p->recall_thinking, &p->recall_error)) return false;
         inference_free(p->recall_job);
@@ -1021,8 +1142,9 @@ static bool update_generation(App *a)
                 return true;
             }
             record_generation(a, c);
+            if (p->inline_research) web_cite_inline(str(&p->research_data), &c->body, &a->trace);
             physics_prose_readouts(p->readings, p->reading_count, &c->body);
-            web_cite_reply(str(&p->research_data), &c->body, &a->trace);
+            if (!p->inline_research) web_cite_reply(str(&p->research_data), &c->body, &a->trace);
             int id = story_push(&a->ws, p->story, p->parent, "assistant", str(&c->body));
             simulation_commit(a, p, id);
             Json *reply = story_pick(p->story, id);

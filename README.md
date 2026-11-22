@@ -126,6 +126,8 @@ The ray batch and acoustic opaque-box visibility tests accept `backend` values `
 
 ## Headless web research
 
+The narrator automatically checks factual questions for recent news, named real-world references, and word definitions. It searches before drafting the reply and attaches verified source URLs inline. `/trace` records the lookup decision, query, supplied evidence, and how each citation was added. Automatic lookups use the latest player message and expire after that reply. A manual lookup takes precedence. Set `NEUTRINO_AUTO_RESEARCH=0` in the TUI or SSH session environment to turn automatic lookups off.
+
 `/research <query>` combines Google News RSS, Hacker News, Wikipedia, and Wiktionary. Use `/research wiktionary <word>` for dictionary-only results from English Wiktionary. Add `hour`, `day`, `week`, `month`, or `year` before a general query for time-sensitive lookups. Dated searches omit encyclopedia and dictionary results. The hour filter requires a source timestamp within the last hour. The other date ranges use the search engines' filters. Coverage depends on what the engines have indexed.
 
 ```text

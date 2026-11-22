@@ -39,6 +39,7 @@ typedef struct {
     Text source, messages_context, objective, lore_trace, memory_trace, recall_output, recall_error, recall_thinking;
     Text previous_reply, selection_trace;
     Text world_context, speaker, tool_results, tool_feedback, research_data;
+    Text auto_research_trace, auto_research_output, auto_research_error, auto_research_thinking;
     size_t start, end, insert_at;
     int version, parent, head;
     Candidate candidates[30];
@@ -49,6 +50,8 @@ typedef struct {
     int tool_rounds, reading_count;
     bool tool_prose_only, tool_prose_retry, tool_measurement_retry;
     Inference *recall_job;
+    Inference *auto_research_job;
+    bool planning_research, inline_research, searched_web;
 } Preview;
 
 enum { NEOFETCH_SAMPLES = 32 };
@@ -64,7 +67,7 @@ typedef struct {
 
 static inline bool preview_busy(const Preview *preview)
 {
-    return preview->recall_job != nullptr || preview->active > 0;
+    return preview->recall_job != nullptr || preview->auto_research_job != nullptr || preview->active > 0;
 }
 typedef struct {
     Workspace ws;
