@@ -64,6 +64,8 @@ Use `/rewind` to return to the previous narrator reply, `/rewind ID` to return t
 
 `/note TEXT` sets a story-wide author's note in the narrator's system prompt. `/note` displays it and `/note off` clears it. The note controls narration and does not become filing evidence.
 
+When a narrator draft appears to stop mid-sentence, Neutrino requests one shorter draft. If the shorter draft also stops early, Neutrino saves through the last complete sentence when one is available. Otherwise the turn stays open for `/narrate`. The decision appears in `/trace`.
+
 ## Rooms, inventory, and characters
 
 The roleplay world takes inspiration from Neko Agent's rooms, carried items, environment, and addressed character replies. Create a room with `/room NAME | DESCRIPTION`. The first room is the starting point. Use `/connect ROOM | ROOM` to link rooms in both directions and `/go ROOM` to move through a link. Use `/item NAME | DESCRIPTION` to place a prop here, `/take NAME` to carry it, and `/drop NAME` to leave it in the current room. `/weather TEXT` sets the branch's conditions manually.
@@ -159,6 +161,8 @@ ssh -tt -p 2222 neutrino@127.0.0.1
 
 OpenSSH handles authentication and encryption. A forced command launches Neutrino on the host without a remote shell, SFTP, or forwarding. The SSH session disables arbitrary filename commands and changing the inference server. `/trace` remains available in the TUI. A workspace permits one writer, so a second connection to the same workspace reports a lock until the first closes. Use distinct workspace paths and OS accounts for separate users. The tested deployment uses Linux OpenSSH in WSL. [OpenSSH forced-command documentation](https://man.openbsd.org/sshd_config.5#ForceCommand)
 
+The TUI adapts to terminal resizes and caps its rendered viewport at 240 columns by 120 rows.
+
 See the [dependency audit](docs/DEPENDENCIES.md) for the build, runtime, and deployment inventories.
 
 ## Connect the inference server
@@ -189,6 +193,8 @@ Open the TUI in a second terminal. Its default server address is `http://127.0.0
 | `NEUTRINO_SERVER_TOKEN` | Optional credential between the TUI and Neutrino's server. Set it in both processes when enabled. |
 
 The server listens on loopback. To use a server on another machine, forward the port over SSH, for example `ssh -N -L 4783:127.0.0.1:4783 user@server`. The TUI still needs a connection to Neutrino's server. It has no provider credentials or provider endpoint to configure. Use `--serve --port PORT` to change the listener and `--server URL`, `NEUTRINO_SERVER`, or `/server URL` to change the client address. The slash command applies to the current TUI session. A reverse proxy must pass HTTP/1.1 with a loopback Host header and stream responses without buffering.
+
+The gateway gives clients five seconds to finish sending headers and twelve more seconds to finish sending the body after header validation. Unfinished headers and bodies each have a four-connection budget, separate from the sixteen requests that may be queued or running.
 
 Use `/neofetch` in a local or SSH session to see gateway availability, provider activity, model, routing, and active and queued requests. The dashboard refreshes every few seconds while open. Gateway status comes from the authenticated `GET /v1/status` endpoint. The provider row shows the outcome and age of the last observed request on the default provider lane.
 

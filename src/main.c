@@ -649,13 +649,16 @@ static void messages_for_story(App *a, Json *messages)
     else if (i == first) messages_add(messages, "user", "Begin the story.");
     else if (!strcmp(last_role, "assistant"))
         messages_add(messages, "user", "Continue the story from this moment.");
-    if (p->repeat_retry || (p->tool_feedback.len && !p->tool_prose_only)) {
+    if (p->repeat_retry || p->completion_retry || (p->tool_feedback.len && !p->tool_prose_only)) {
         Json *latest = messages->child->prev;
         Text revision = {0};
         append(&revision, js(latest, "content"));
         if (p->repeat_retry)
             append(&revision, "\n\nFor this reply, use new phrasing. When I ask a question, answer it directly "
                               "in character. Continue from what's already happened.");
+        if (p->completion_retry)
+            append(&revision, "\n\nGive a self-contained reply in one or two short, complete sentences. "
+                              "End the last sentence with punctuation.");
         if (p->tool_feedback.len && !p->tool_prose_only)
             append(&revision, "\n\nUse the completed tool results above and continue in plain story prose. "
                               "Request another tool only if a different calculation is still needed.");
@@ -750,6 +753,7 @@ static void release_preview(Preview *p)
     release(&p->recall_thinking);
     release(&p->recall_error);
     release(&p->previous_reply);
+    release(&p->complete_draft);
     release(&p->selection_trace);
     release(&p->world_context);
     release(&p->speaker);
@@ -772,6 +776,8 @@ static void start_candidate(App *a, int index)
     if (p->story) {
         format(&a->trace, "Story: %s · parent #%d\n", js(p->story, "title"), p->parent);
         if (p->repeat_retry) append(&a->trace, "Second attempt · discarded a repeat of the previous reply.\n");
+        if (p->completion_retry)
+            append(&a->trace, "Reply completion · requested a shorter draft after an unfinished sentence.\n");
         format(&a->trace, "\nLore decisions\n%s\nCompendium\n%s%s",
             p->lore_trace.len ? str(&p->lore_trace) : "No lore entries attached.\n",
             str(&p->memory_trace), str(&p->selection_trace));
@@ -1047,6 +1053,52 @@ static void begin(App *a, Operation op, const char *objective, int parent, const
     }
 }
 
+static bool finish_narrator_prose(App *a, Preview *p, Candidate *c)
+{
+    if (p->definition_research) return true;
+    size_t end = c->body.len;
+    const char *body = str(&c->body);
+    while (end && isspace((unsigned char)body[end - 1])) --end;
+    size_t complete = narrator_complete_prefix(body);
+    if (end && complete == end) {
+        if (p->completion_retry) append(&a->trace, "\nReply completion · shorter draft ended cleanly.\n");
+        return true;
+    }
+    if (complete) {
+        c->body.len = complete;
+        c->body.data[complete] = '\0';
+    }
+    if (!p->completion_retry) {
+        if (complete) {
+            append(&p->complete_draft, body);
+            p->complete_draft_metrics = c->metrics;
+        }
+        p->completion_retry = true;
+        if (p->tool_rounds) p->tool_prose_only = true;
+        clear(&c->body);
+        clear(&c->thinking);
+        status(a, "Finishing the reply · retrying");
+        start_candidate(a, 0);
+        return false;
+    }
+    if (!complete && p->complete_draft.len) {
+        clear(&c->body);
+        append(&c->body, str(&p->complete_draft));
+        c->metrics = p->complete_draft_metrics;
+        clear(&c->thinking);
+        complete = c->body.len;
+    }
+    if (!complete) {
+        append(&a->trace, "\nReply completion · no complete sentence to save.\n");
+        status(a, "The narrator did not finish a sentence. /narrate retries the uncompleted turn.");
+        p->complete = true;
+        return false;
+    }
+    p->trimmed_reply = true;
+    append(&a->trace, "\nReply completion · kept the text through the last complete sentence.\n");
+    return true;
+}
+
 static bool update_generation(App *a)
 {
     Preview *p = &a->preview;
@@ -1146,6 +1198,8 @@ static bool update_generation(App *a)
                 }
                 return true;
             }
+            p->trimmed_reply = false;
+            if (!finish_narrator_prose(a, p, c)) return true;
             if (repeats_reply(p, &c->body)) {
                 if (!p->repeat_retry) {
                     p->repeat_retry = true;
@@ -1173,7 +1227,8 @@ static bool update_generation(App *a)
             memory_schedule(a, p->story, id);
             p->open = false;
             if (a->roleplay && a->story == p->story) a->scroll = INT_MAX;
-            status(a, p->op == SWIPE ? "Alternate reply saved · /previous or /branch" : "Reply saved");
+            status(a, p->op == SWIPE ? "Alternate reply saved · /previous or /branch" :
+                   p->trimmed_reply ? "Reply saved through the last complete sentence" : "Reply saved");
             save(a);
         } else status(a, "The active branch moved. The reply is available in F7.");
     }

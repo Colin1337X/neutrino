@@ -25,7 +25,10 @@ typedef ssize_t Count;
 #define BAD_SOCKET (-1)
 #endif
 
-enum { CLIENTS = 16, HEADER_LIMIT = 16384, BODY_LIMIT = 16 * 1024 * 1024 };
+enum { READY_LIMIT = 16, HEADER_CLIENTS = 4, BODY_CLIENTS = 4,
+       CLIENTS = READY_LIMIT + HEADER_CLIENTS + BODY_CLIENTS,
+       HEADER_LIMIT = 16384, BODY_LIMIT = 16 * 1024 * 1024,
+       HEADER_TIMEOUT_MS = 5000, BODY_TIMEOUT_MS = 12000 };
 static const char filing_schema[] =
     "{\"type\":\"array\",\"maxItems\":6,\"items\":{\"type\":\"object\","
     "\"properties\":{\"type\":{\"enum\":[\"character\",\"place\",\"item\",\"event\",\"note\",\"faction\","
@@ -46,9 +49,9 @@ typedef struct {
 } Route;
 typedef struct {
     Socket socket;
-    uint64_t touched;
+    uint64_t touched, request_started;
     Text request, send, output, thinking, error;
-    size_t sent;
+    size_t sent, body_offset, body_length;
     Inference *job;
     Json *messages;
     Route route;
@@ -243,7 +246,12 @@ static void respond_status(Client *c, const Gateway *gateway)
     cJSON_Delete(status);
 }
 
-static void parse_request(Client *c, const char *token, const Gateway *gateway)
+static bool receiving_request(const Client *c)
+{
+    return c->socket != BAD_SOCKET && !c->closing && !c->messages && !c->job;
+}
+
+static void parse_headers(Client *c, const char *token, const Gateway *gateway)
 {
     const char *s = str(&c->request), *headers_end = strstr(s, "\r\n\r\n");
     if (!headers_end) {
@@ -299,10 +307,30 @@ static void parse_request(Client *c, const char *token, const Gateway *gateway)
         return;
     }
     if (!has_length) { http_error(c, 411, "Length Required"); return; }
-    if (c->request.len < offset + length) return;
+    if (c->request.len < offset + length) {
+        int bodies = 0;
+        for (int i = 0; i < CLIENTS; ++i)
+            if (receiving_request(&gateway->clients[i]) && gateway->clients[i].body_offset) ++bodies;
+        if (bodies >= BODY_CLIENTS) { http_error(c, 503, "Request Intake Busy"); return; }
+    }
+    c->body_offset = offset;
+    c->body_length = length;
+    c->request_started = monotonic_ms();
+}
+
+static void parse_request(Client *c, const char *token, const Gateway *gateway)
+{
+    if (!c->body_offset) parse_headers(c, token, gateway);
+    if (c->closing || !c->body_offset || c->request.len < c->body_offset + c->body_length) return;
+    size_t offset = c->body_offset, length = c->body_length;
+    const char *s = str(&c->request);
     if (c->request.len != offset + length || memchr(s + offset, 0, length)) {
         http_error(c, 400, "Bad Request"); return;
     }
+    int ready = 0;
+    for (int i = 0; i < CLIENTS; ++i)
+        if (gateway->clients[i].messages || gateway->clients[i].job) ++ready;
+    if (ready >= READY_LIMIT) { http_error(c, 503, "Gateway Busy"); return; }
     Json *body = cJSON_ParseWithOpts(s + offset, NULL, 1);
     Json *messages = at(body, "messages");
     if (!cJSON_IsArray(messages) || !messages->child || cJSON_GetArraySize(messages) > 512 ||
@@ -386,6 +414,11 @@ static void pump_client(Client *c, const char *token, Gateway *gateway)
         if (!c->job) reset_client(c);
         return;
     }
+    if (receiving_request(c) &&
+        monotonic_ms() - c->request_started >= (c->body_offset ? BODY_TIMEOUT_MS : HEADER_TIMEOUT_MS)) {
+        discard_socket(c);
+        return;
+    }
     if (!c->closing) {
         char buffer[8192];
         Count n = recv(c->socket, buffer, sizeof buffer, 0);
@@ -417,6 +450,27 @@ static void pump_client(Client *c, const char *token, Gateway *gateway)
     }
     if ((!c->job || c->sent < c->send.len) &&
         monotonic_ms() - c->touched > (c->messages ? 300000u : 30000u)) discard_socket(c);
+}
+
+static void accept_client(Gateway *gateway, Socket incoming)
+{
+    if (!nonblocking(incoming)) { close_socket(incoming); return; }
+    Client *free_slot = nullptr, *oldest_header = nullptr;
+    int headers = 0;
+    for (int i = 0; i < CLIENTS; ++i) {
+        Client *client = &gateway->clients[i];
+        if (client->socket == BAD_SOCKET && !client->job) free_slot = client;
+        else if (receiving_request(client) && !client->body_offset) {
+            ++headers;
+            if (!oldest_header || client->request_started < oldest_header->request_started)
+                oldest_header = client;
+        }
+    }
+    if (oldest_header && (!free_slot || headers >= HEADER_CLIENTS)) free_slot = oldest_header;
+    if (!free_slot) { close_socket(incoming); return; }
+    reset_client(free_slot);
+    free_slot->socket = incoming;
+    free_slot->request_started = free_slot->touched = monotonic_ms();
 }
 
 static void dispatch(Client clients[CLIENTS], int workers)
@@ -486,17 +540,9 @@ int inference_server(int port, const volatile sig_atomic_t *stop)
         Client *clients = gateway.clients;
         for (int i = 0; i < CLIENTS; i++) clients[i].socket = BAD_SOCKET;
         while (!*stop) {
-            Socket incoming = accept(listener, NULL, NULL);
-            if (incoming != BAD_SOCKET) {
-                int slot = 0;
-                while (slot < CLIENTS && (clients[slot].socket != BAD_SOCKET || clients[slot].job)) slot++;
-                if (slot == CLIENTS || !nonblocking(incoming)) close_socket(incoming);
-                else {
-                    clients[slot].socket = incoming;
-                    clients[slot].touched = monotonic_ms();
-                }
-            }
             for (int i = 0; i < CLIENTS; i++) pump_client(&clients[i], token, &gateway);
+            Socket incoming = accept(listener, NULL, NULL);
+            if (incoming != BAD_SOCKET) accept_client(&gateway, incoming);
             dispatch(clients, workers);
             pause_ms(12);
         }

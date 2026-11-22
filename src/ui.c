@@ -843,6 +843,7 @@ void ui_draw(App *a)
 }
 void ui_dump(App *a, int cols, int rows)
 {
+    bound_terminal_viewport(&cols, &rows);
     a->cols = cols;
     a->rows = rows;
     frame(a);

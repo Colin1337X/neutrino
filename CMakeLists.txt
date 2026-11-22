@@ -19,7 +19,7 @@ endif()
 
 find_package(CURL 7.62 REQUIRED)
 add_executable(neutrino src/main.c src/workspace.c src/terminal.c src/inference.c src/gateway.c src/memory.c src/facts.c src/world.c src/ui.c src/web.c
-    src/simulation.c src/physics.c src/measurements.c src/ray_gpu.c
+    src/simulation.c src/physics.c src/measurements.c src/ray_gpu.c src/prose.c
     third_party/cjson/cJSON.c)
 target_include_directories(neutrino PRIVATE third_party/cjson)
 target_link_libraries(neutrino PRIVATE CURL::libcurl)
@@ -43,6 +43,10 @@ install(TARGETS neutrino)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(reply_completion_test tests/reply_completion.c src/prose.c)
+    target_include_directories(reply_completion_test PRIVATE src third_party/cjson)
+    add_test(NAME reply_completion COMMAND reply_completion_test)
+
     add_executable(compendium_claims_test tests/compendium_claims.c src/facts.c src/workspace.c
         third_party/cjson/cJSON.c)
     target_include_directories(compendium_claims_test PRIVATE src third_party/cjson)

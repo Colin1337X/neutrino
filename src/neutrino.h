@@ -88,6 +88,13 @@ enum {
 bool terminal_open(void);
 void terminal_close(void);
 void terminal_size(int *cols, int *rows);
+static inline void bound_terminal_viewport(int *cols, int *rows)
+{
+    enum { MAX_VIEWPORT_COLUMNS = 240, MAX_VIEWPORT_ROWS = 120 };
+    if (*cols > MAX_VIEWPORT_COLUMNS) *cols = MAX_VIEWPORT_COLUMNS;
+    if (*rows > MAX_VIEWPORT_ROWS) *rows = MAX_VIEWPORT_ROWS;
+}
+size_t narrator_complete_prefix(const char *text);
 int terminal_key(int timeout);
 void terminal_write(const char *data, size_t length);
 size_t utf_next(const char *s, size_t length, size_t pos);

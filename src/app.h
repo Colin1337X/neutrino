@@ -38,13 +38,15 @@ typedef struct {
     Json *scene, *story;
     Text source, messages_context, objective, lore_trace, memory_trace, recall_output, recall_error, recall_thinking;
     Text previous_reply, selection_trace;
+    Text complete_draft;
+    InferenceMetrics complete_draft_metrics;
     Text world_context, speaker, tool_results, tool_feedback, research_data;
     Text auto_research_trace, auto_research_output, auto_research_error, auto_research_thinking;
     size_t start, end, insert_at;
     int version, parent, head;
     Candidate candidates[30];
     int count, current, next, active;
-    bool open, reasoning, stopped, complete, recalling, repeat_retry;
+    bool open, reasoning, stopped, complete, recalling, repeat_retry, completion_retry, trimmed_reply;
     Json *memory_picks, *tool_pending, *tool_requests;
     PhysicsReading readings[SIM_TOOL_LIMIT];
     int tool_rounds, reading_count;

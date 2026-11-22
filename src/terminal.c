@@ -57,6 +57,7 @@ void terminal_size(int *cols, int *rows)
     }
     *cols = last_width ? last_width : 80;
     *rows = last_height ? last_height : 24;
+    bound_terminal_viewport(cols, rows);
 }
 static int decode_key(KEY_EVENT_RECORD key)
 {
@@ -154,6 +155,7 @@ void terminal_size(int *cols, int *rows)
     ioctl(STDOUT_FILENO, TIOCGWINSZ, &size);
     *cols = size.ws_col ? size.ws_col : 80;
     *rows = size.ws_row ? size.ws_row : 24;
+    bound_terminal_viewport(cols, rows);
 }
 static int byte_key(int timeout)
 {
