@@ -73,6 +73,8 @@ typedef struct {
     bool panel_preview, panel_neofetch, selected, ssh_session;
     Focus focus;
     Text screen, prompt, edit, info, status, trace, server_address;
+    Text research_scope, research_pending_scope, research_data, research_reply;
+    Inference *research_job;
     char info_title[96];
     size_t cursor, caret, mark, selection_a, selection_b;
     int cols, rows, scroll, scroll_max, panel_scroll, rail_cursor, rail_offset, command_cursor;

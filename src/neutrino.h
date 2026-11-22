@@ -111,6 +111,7 @@ Inference *inference_start(const char *endpoint, const char *key, const char *mo
                            const Json *messages);
 Inference *inference_request(const char *endpoint, const char *key, const char *model,
                              const Json *messages, RequestOptions options);
+Inference *inference_web(const char *mode, const Json *messages);
 bool inference_read(Inference *job, Text *out, Text *reasoning, Text *error);
 Inference *inference_probe(const char *endpoint, const char *key);
 InferenceMetrics inference_metrics(Inference *job);

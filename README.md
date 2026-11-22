@@ -4,13 +4,15 @@ A native C terminal workspace for writing fiction and playing it out. Manuscript
 
 ## Build and open
 
-Use a UTF-8, VT-capable terminal. Build with CMake 3.25 or later and a compiler that reports final C23 support, such as GCC 15.2 or the Clang driver in Zig 0.15.2. Release and RelWithDebInfo use `-O3`. Windows uses WinHTTP. Linux and macOS need the libcurl development package and POSIX threads. cJSON is bundled under its own [license](third_party/cjson/LICENSE).
+Use a UTF-8, VT-capable terminal. Build with CMake 3.25 or later and a compiler that reports final C23 support, such as GCC 15.2 or the Clang driver in Zig 0.15.2. Release and RelWithDebInfo use `-O3`. All builds need HTTPS-capable libcurl development files. Windows uses WinHTTP for model inference. Linux and macOS use POSIX threads. cJSON is bundled under its own [license](third_party/cjson/LICENSE).
 
 ```powershell
-# Windows, with Zig 0.15.2 on PATH
+# Windows, with Zig 0.15.2 on PATH and the x64 curl development archive extracted
+$curl = 'C:\path\to\curl-win64-mingw'
 New-Item -ItemType Directory -Force build | Out-Null
 $sources = (Get-ChildItem src/*.c).FullName
-zig cc -target x86_64-windows-gnu -std=c23 -O3 -municode -Ithird_party/cjson $sources third_party/cjson/cJSON.c -lwinhttp -lws2_32 -o build/neutrino.exe
+zig cc -target x86_64-windows-gnu -std=c23 -O3 -municode -Ithird_party/cjson "-I$curl/include" $sources third_party/cjson/cJSON.c "$curl/lib/libcurl.dll.a" -lwinhttp -lws2_32 -o build/neutrino.exe
+Copy-Item "$curl/bin/libcurl-x64.dll" build/
 .\build\neutrino.exe --demo
 ```
 
@@ -121,6 +123,24 @@ The ray batch and acoustic opaque-box visibility tests accept `backend` values `
 `/memory items` shows the active branch's filed props and their evidence. Multiple named props can be kept from a single sentence when the narrator establishes their actions or locations. Use `/inventory` for the player-controlled world inventory.
 
 `prop_load` gives a qualitative result for fictional props and scenery under load. It uses three descriptive levels of strength and load, with outcomes of holds, gives slightly, or breaks.
+
+## Headless web research
+
+`/research <query>` combines Google News RSS, Hacker News search, and Wikipedia OpenSearch. Add `hour`, `day`, `week`, `month`, or `year` before the query for time-sensitive lookups. Dated searches omit Wikipedia reference results. The hour filter requires a source timestamp within the last hour. The other date ranges use the search engines' filters. Coverage depends on what the engines have indexed.
+
+```text
+/research hour Seoul transit announcements
+/research Steamed Hams origin
+/read https://en.wikipedia.org/wiki/Steamed_Hams
+/trace
+/research clear
+```
+
+The gateway can also query an optional SearXNG instance. Set `NEUTRINO_SEARXNG_URL` on the gateway to its complete `/search` URL and enable JSON output on that instance. The built-in engines work without a SearXNG service. [SearXNG Search API](https://docs.searxng.org/dev/search_api.html) · [Hacker News Search API](https://hn.algolia.com/api) · [MediaWiki OpenSearch](https://www.mediawiki.org/wiki/API:Opensearch)
+
+The C headless reader fetches up to three direct pages per search and extracts readable text from HTML or plain text. It has no browser window and does not execute JavaScript. Google News links are presented as feed metadata. `/read` can fetch an available publisher URL directly. The public reader uses HTTPS, checks the remote address on each connection, and limits redirects and response size. An administrator can set `NEUTRINO_CA_BUNDLE` for libcurl builds that need an explicit CA bundle.
+
+Sources are shown with URLs, available dates, and excerpts. The latest successful lookup is available to the narrator in the same story or writing scene until replaced or cleared. It is session-local. `/trace` shows the research results and the exact prompt containing them. Search terms go to the configured engines. The gateway performs the network requests, including in SSH sessions.
 
 ## Serve the TUI over SSH
 

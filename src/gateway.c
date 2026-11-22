@@ -37,7 +37,7 @@ static const char acoustic_selector_schema[] =
     "{\"type\":\"object\",\"properties\":{\"neutrino_tool\":{\"enum\":[\"acoustic\"]}},"
     "\"required\":[\"neutrino_tool\"],\"additionalProperties\":false}";
 typedef struct {
-    const char *endpoint, *key, *model;
+    const char *endpoint, *key, *model, *web_mode;
     RequestOptions options;
     int lane;
 } Route;
@@ -93,6 +93,11 @@ static bool route_for(const char *name, Route *route)
     *route = (Route){.endpoint = base, .key = key, .model = server_model(),
         .options = {.slot = slots ? 0 : -1,
                     .include_usage = !strcmp(env("NEUTRINO_STREAM_USAGE", ""), "1")}, .lane = 0};
+    if (!strcmp(name, "web-search") || !strcmp(name, "web-read")) {
+        route->lane = 3;
+        route->web_mode = !strcmp(name, "web-search") ? "web-search" : "web-read";
+        return true;
+    }
     if (!strcmp(name, "narrator") ||
         (!strncmp(name, "narrator/", 9) && !strcmp(name + 9, route->model)))
         return *route->model != 0;
@@ -358,7 +363,7 @@ static void pump_client(Client *c, const char *token, Gateway *gateway)
                     gateway->provider_ok = !c->error.len;
                 }
                 if (c->error.len) event(&c->send, "error", "");
-                else event_metrics(&c->send, inference_metrics(c->job));
+                else if (!c->route.web_mode) event_metrics(&c->send, inference_metrics(c->job));
                 append(&c->send, "data: [DONE]\n\n");
                 c->closing = true;
             }
@@ -407,7 +412,7 @@ static void pump_client(Client *c, const char *token, Gateway *gateway)
 
 static void dispatch(Client clients[CLIENTS], int workers)
 {
-    int active[3] = {0};
+    int active[4] = {0};
     for (int i = 0; i < CLIENTS; i++)
         if (clients[i].job) active[clients[i].route.lane]++;
     /* Players go ahead of agents waiting for a shared provider slot. */
@@ -418,7 +423,8 @@ static void dispatch(Client clients[CLIENTS], int workers)
             int limit = r->options.slot >= 0 || r->lane != 0 ? 1 : workers;
             if (!c->messages || active[r->lane] >= limit ||
                 ((pass == 0) != (c->route.options.max_tokens == 0 || c->route.options.max_tokens == 1))) continue;
-            c->job = inference_request(r->endpoint, r->key, r->model, c->messages, r->options);
+            c->job = r->web_mode ? inference_web(r->web_mode, c->messages) :
+                inference_request(r->endpoint, r->key, r->model, c->messages, r->options);
             cJSON_Delete(c->messages);
             c->messages = NULL;
             c->touched = monotonic_ms();

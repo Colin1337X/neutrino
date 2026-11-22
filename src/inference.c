@@ -1,4 +1,5 @@
 #include "neutrino.h"
+#include "web.h"
 
 #include <stdio.h>
 #include <limits.h>
@@ -7,13 +8,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <curl/curl.h>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winhttp.h>
 #include <process.h>
 #else
-#include <curl/curl.h>
 #include <pthread.h>
 #endif
 
@@ -39,6 +40,8 @@ void pause_ms(unsigned ms)
 
 struct Inference {
     char *url, *key, *body;
+    Json *web_request;
+    const char *web_mode;
     int timeout_ms;
     Text out, reasoning, error;
     InferenceMetrics metrics;
@@ -315,6 +318,19 @@ static void *worker(void *arg)
 #endif
 {
     Inference *j = arg;
+    if (j->web_mode) {
+        Text result = {0};
+        web_research(j->web_mode, j->web_request, &j->cancel, &result);
+        lock(j);
+        j->out = result;
+        j->done = true;
+        unlock(j);
+#ifdef _WIN32
+        return 0;
+#else
+        return nullptr;
+#endif
+    }
     Response r = {.job = j, .start = monotonic_ms()};
     long status = 0;
     bool ok = transfer(j, &r, &status);
@@ -386,19 +402,55 @@ static char *request_body(const char *model, const Json *messages, RequestOption
     return json;
 }
 
+static bool initialize_http(void)
+{
+    static bool curl_ready;
+    if (!curl_ready) curl_ready = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
+    return curl_ready;
+}
+
+static Inference *new_job(void)
+{
+    Inference *j = calloc(1, sizeof(*j));
+    if (!j) abort();
+    atomic_init(&j->cancel, false);
+    return j;
+}
+
+static Inference *launch_job(Inference *j)
+{
+#ifdef _WIN32
+    InitializeSRWLock(&j->lock);
+    j->thread = (HANDLE)_beginthreadex(NULL, 0, worker, j, 0, NULL);
+    j->started = j->thread != NULL;
+#else
+    if (pthread_mutex_init(&j->lock, NULL)) abort();
+    j->started = pthread_create(&j->thread, NULL, worker, j) == 0;
+#endif
+    if (j->started) return j;
+    inference_free(j);
+    return NULL;
+}
+
+Inference *inference_web(const char *mode, const Json *messages)
+{
+    if (!initialize_http()) return nullptr;
+    const Json *message = cJSON_GetArrayItem(messages, 0);
+    Inference *j = new_job();
+    j->web_request = cJSON_ParseWithOpts(js(message, "content"), nullptr, true);
+    j->web_mode = mode;
+    return launch_job(j);
+}
+
 static Inference *start_request(const char *endpoint, const char *key, const char *model,
                                 const Json *messages, RequestOptions options, bool probe, bool from_gateway)
 {
     if ((strncmp(endpoint, "http://", 7) && strncmp(endpoint, "https://", 8)) ||
         strpbrk(endpoint, "\r\n?#") || strpbrk(key, "\r\n") || (!probe && !*model)) return NULL;
 #ifndef _WIN32
-    static bool curl_ready;
-    if (!curl_ready) curl_ready = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
-    if (!curl_ready) return NULL;
+    if (!initialize_http()) return NULL;
 #endif
-    Inference *j = calloc(1, sizeof(*j));
-    if (!j) abort();
-    atomic_init(&j->cancel, false);
+    Inference *j = new_job();
     j->probe = probe;
     j->from_gateway = from_gateway;
     Text url = {0};
@@ -415,17 +467,7 @@ static Inference *start_request(const char *endpoint, const char *key, const cha
     j->key = copy(key);
     j->timeout_ms = options.timeout_ms;
     if (!probe) j->body = request_body(model, messages, options);
-#ifdef _WIN32
-    InitializeSRWLock(&j->lock);
-    j->thread = (HANDLE)_beginthreadex(NULL, 0, worker, j, 0, NULL);
-    j->started = j->thread != NULL;
-#else
-    if (pthread_mutex_init(&j->lock, NULL)) abort();
-    j->started = pthread_create(&j->thread, NULL, worker, j) == 0;
-#endif
-    if (j->started) return j;
-    inference_free(j);
-    return NULL;
+    return launch_job(j);
 }
 Inference *inference_request(const char *endpoint, const char *key, const char *model,
                              const Json *messages, RequestOptions options)
@@ -481,6 +523,7 @@ void inference_free(Inference *j)
     free(j->url);
     free(j->key);
     cJSON_free(j->body);
+    cJSON_Delete(j->web_request);
     release(&j->out);
     release(&j->reasoning);
     release(&j->error);
