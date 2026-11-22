@@ -6,28 +6,27 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define ROOT "\x1b[48;2;13;17;25m"
-#define RAIL "\x1b[48;2;19;25;36m"
-#define FIELD "\x1b[48;2;23;31;44m"
-#define PICK "\x1b[48;2;28;57;59m"
-#define PLUM "\x1b[48;2;46;38;65m"
-#define TXT "\x1b[38;2;223;231;238m"
-#define DIM "\x1b[38;2;156;171;190m"
-#define QUIET "\x1b[38;2;128;144;165m"
-#define LINE "\x1b[38;2;63;77;97m"
-#define MINT "\x1b[38;2;125;231;203m"
-#define LAV "\x1b[38;2;196;178;249m"
-#define GOLD "\x1b[38;2;245;190;131m"
+#define ROOT "\x1b[48;2;15;19;23m"
+#define RAIL "\x1b[48;2;21;26;30m"
+#define FIELD "\x1b[48;2;30;36;41m"
+#define PICK "\x1b[48;2;29;56;54m"
+#define PLUM "\x1b[48;2;54;43;29m"
+#define TXT "\x1b[38;2;236;232;220m"
+#define DIM "\x1b[38;2;173;184;180m"
+#define QUIET "\x1b[38;2;144;159;155m"
+#define LINE "\x1b[38;2;58;72;74m"
+#define MINT "\x1b[38;2;147;227;204m"
+#define AMBER "\x1b[38;2;246;200;139m"
+#define GOLD "\x1b[38;2;252;215;155m"
 #define BOLD "\x1b[1m"
 #define NORMAL "\x1b[22m"
 
 typedef struct {
-    int left, width, top, height, rail, main, main_x, detail, detail_x;
+    int left, width, top, height, rail, main, main_x, detail, detail_x, input_y, content_end;
     bool dense, library_only;
 } Layout;
 typedef struct { size_t start, end; } Row;
 typedef struct { Row *items; int count, capacity; } Rows;
-typedef struct { Text text; Rows rows; } RenderText;
 
 static int minimum(int a, int b) { return a < b ? a : b; }
 static int maximum(int a, int b) { return a > b ? a : b; }
@@ -35,14 +34,16 @@ static int clamp(int value, int low, int high) { return minimum(maximum(value, l
 static Layout layout(const App *a)
 {
     Layout l = {0};
-    l.width = minimum(a->cols, 152);
+    l.width = minimum(a->cols, 164);
     l.left = (a->cols - l.width) / 2;
-    l.dense = a->rows < 18;
-    l.top = l.dense ? 3 : 6;
-    l.height = a->rows - l.top - (l.dense ? 3 : 6);
+    l.dense = a->rows < 19 || l.width < 54;
+    l.top = l.dense ? 2 : 3;
+    l.input_y = a->rows - (l.dense ? 2 : 3);
+    l.content_end = l.input_y - (l.dense ? 0 : 2);
+    l.height = a->rows - l.top - 1;
     bool show_sides = !a->compact && !l.dense && !(a->view_panel && a->panel_neofetch);
-    if (show_sides && l.width >= 74) l.rail = clamp(l.width / 5, 24, 30);
-    if (show_sides && l.width >= 108 && l.height >= 12) l.detail = clamp(l.width / 5, 23, 28);
+    if (show_sides && l.width >= 80) l.rail = clamp(l.width / 5, 22, 29);
+    if (show_sides && !a->view_panel && l.width >= 120) l.detail = clamp(l.width / 6, 23, 28);
     if (a->focus == LIBRARY && !l.rail) {
         l.rail = l.width;
         l.library_only = true;
@@ -212,7 +213,9 @@ static int row_of(const Rows *r, size_t pos)
     }
     return lo;
 }
-static int content_width(const Layout *l) { return maximum(8, minimum(86, l->main - 8)); }
+static int content_width(const Layout *l) { return maximum(8, minimum(78, l->main - (l->dense ? 4 : 8))); }
+
+static int content_x(const Layout *l) { return l->main_x + (l->main - content_width(l)) / 2; }
 size_t ui_move_editor(const App *a, int delta)
 {
     Layout l = layout(a);
@@ -280,37 +283,38 @@ int ui_command_matches(const App *a, int *results, int cap)
 
 static void header(App *a, const Layout *l)
 {
-    cell(a, l->left + 2, l->dense ? 0 : 1, l->width - 4,
-         a->roleplay ? ROOT LAV BOLD : ROOT MINT BOLD, "◈  NEUTRINO");
-}
-static void header_tabs(App *a, const Layout *l)
-{
-    if (l->width >= 34)
-        right(a, l->left + l->width - 2, l->dense ? 0 : 1, 22, ROOT QUIET NORMAL,
-              a->demo ? "DEMO WORKSPACE" : a->ssh_session ? "SSH WORKSPACE" : "LOCAL WORKSPACE");
-    int x = l->left + 2;
-    int y = l->dense ? 1 : 3;
-    if (l->width < 36)
-        cell(a, x, y, l->width - 4, a->roleplay ? ROOT LAV BOLD : ROOT MINT BOLD,
-             a->roleplay ? "Roleplay   F2 switch" : "Manuscript   F2 switch");
-    else {
-        cell(a, x, y, 15, a->roleplay ? ROOT DIM NORMAL : PICK MINT BOLD,
-             a->roleplay ? "   Manuscript  " : " ◆ Manuscript  ");
-        cell(a, x + 16, y, 14, a->roleplay ? PLUM LAV BOLD : ROOT DIM NORMAL,
-             a->roleplay ? " ◆ Roleplay  " : "   Roleplay  ");
-        if (l->width >= 62) right(a, l->left + l->width - 2, y, 28, ROOT QUIET NORMAL, "F2 switch mode");
+    const int y = l->dense ? 0 : 1;
+    const int x = l->left + (l->dense ? 1 : 2);
+    for (int row = 0; row <= y; ++row) paint(a, l->left, row, l->width, RAIL);
+    cell(a, x, y, 12, RAIL TXT BOLD, "▰ Neutrino");
+    if (l->width >= 48) {
+        cell(a, x + 15, y, 14, a->roleplay ? RAIL DIM NORMAL : PICK MINT BOLD, "  Manuscript  ");
+        cell(a, x + 30, y, 12, a->roleplay ? PLUM AMBER BOLD : RAIL DIM NORMAL, "  Roleplay  ");
+    } else {
+        cell(a, x + 12, y, l->width - 13, a->roleplay ? PLUM AMBER BOLD : PICK MINT BOLD,
+             a->roleplay ? " Roleplay " : " Manuscript ");
     }
-    if (!l->library_only) rule(a, l->left + 1, l->dense ? 2 : 4, l->width - 2, ROOT LINE NORMAL);
+    if (l->width >= 71)
+        right(a, l->left + l->width - 2, y, 24, a->ssh_session ? RAIL MINT NORMAL : RAIL QUIET NORMAL,
+              a->demo ? "Demo workspace" : a->ssh_session ? "SSH workspace" : "Local workspace");
+    else if (a->ssh_session && (l->width >= 58 || (l->width >= 36 && l->width < 48)))
+        right(a, l->left + l->width - 2, y, 4, RAIL MINT NORMAL, "SSH");
+    if (l->width >= 53 && l->width < 90) cell(a, x + 44, y, 2, RAIL QUIET NORMAL, "F2");
+    rule(a, l->left, l->top - 1, l->width, RAIL LINE NORMAL);
 }
+
 static void library(App *a, const Layout *l)
 {
     if (!l->rail || l->height < 4) return;
-    int x = l->left + 1, width = l->rail - 2;
-    int height = l->height - (l->dense ? 1 : 0);
-    card(a, x, l->top - 1, width, height + 2, a->focus == LIBRARY ?
-         (a->roleplay ? RAIL LAV NORMAL : RAIL MINT NORMAL) : RAIL LINE NORMAL);
-    cell(a, x + 2, l->top, width - 4, RAIL TXT BOLD, a->roleplay ? "Stories" : "Manuscript library");
-    int capacity = maximum(1, height - 3), count = ui_library_size(a);
+    int x = l->left, width = l->rail - (l->library_only ? 0 : 1);
+    for (int row = 0; row < l->height; ++row) {
+        paint(a, x, l->top + row, width, RAIL);
+        if (!l->library_only) cell(a, x + width, l->top + row, 1, RAIL LINE NORMAL, "│");
+    }
+    cell(a, x + 2, l->top, width - 4, RAIL TXT BOLD, a->roleplay ? "Stories" : "Library");
+    if (width >= 17 && a->focus != LIBRARY)
+        right(a, x + width - 2, l->top, 2, RAIL QUIET NORMAL, "F3");
+    int capacity = maximum(1, l->height - 3), count = ui_library_size(a);
     if (a->rail_cursor >= a->rail_offset + capacity) a->rail_offset = a->rail_cursor - capacity + 1;
     if (a->rail_cursor < a->rail_offset) a->rail_offset = a->rail_cursor;
     int y = l->top + 2;
@@ -319,15 +323,15 @@ static void library(App *a, const Layout *l)
         const char *name = a->roleplay ? js(item, "title") : item ? js(item, "name") : "Scratchpad";
         bool active = item == (a->roleplay ? a->story : a->scene);
         bool cursor = a->focus == LIBRARY && i == a->rail_cursor;
-        const char *style = active || cursor ? (a->roleplay ? PLUM LAV : PICK MINT) : RAIL DIM;
-        paint(a, x + 1, y, width - 2, style);
-        cell(a, x + 2, y, 2, style, cursor ? "›" : active ? "◆" : "·");
-        clipped_cell(a, x + 4, y, width - 5, style, name);
+        const char *style = active || cursor ? (a->roleplay ? PLUM AMBER : PICK MINT) : RAIL DIM;
+        paint(a, x, y, width, style);
+        cell(a, x + 1, y, 1, style, cursor ? "▸" : active ? "▏" : " ");
+        clipped_cell(a, x + 3, y, width - 4, style, name);
     }
     if (!count) cell(a, x + 2, y, width - 4, RAIL QUIET, "No stories yet");
-    if (height >= 4)
-        cell(a, x + 2, l->top + height - 1, width - 4, RAIL QUIET NORMAL,
-             a->focus == LIBRARY ? "↑↓ select  ↵ open" : "F3 browse library");
+    if (a->focus == LIBRARY)
+        cell(a, x + 2, l->top + l->height - 1, width - 4, RAIL QUIET NORMAL,
+             "↑↓ Select  Enter Open");
 }
 static int word_count(const char *s)
 {
@@ -343,65 +347,70 @@ static int word_count(const char *s)
 static void detail(App *a, const Layout *l)
 {
     if (!l->detail || l->height < 4) return;
-    int x = l->detail_x, y = l->top, w = l->detail - 3;
-    card(a, x, y - 1, l->detail - 1, l->height + 2, RAIL LINE NORMAL);
-    x += 2;
-    w -= 2;
-    cell(a, x, y, w, RAIL TXT BOLD, "Inspector");
+    int x = l->detail_x + 3, y = l->top, w = l->detail - 5;
+    for (int row = 0; row < l->height; ++row) {
+        paint(a, l->detail_x, y + row, l->detail, RAIL);
+        cell(a, l->detail_x, y + row, 1, RAIL LINE NORMAL, "│");
+    }
+    cell(a, x, y, w, RAIL TXT BOLD, "Context");
     if (l->height < 12) return;
     char stat[80];
-    cell(a, x, y + 2, w, RAIL QUIET NORMAL, a->roleplay ? "ACTIVE PATH" : "DRAFT");
+    cell(a, x, y + 2, w, RAIL QUIET NORMAL, a->roleplay ? "Story history" : "Draft");
     if (a->roleplay) {
         int messages = cJSON_GetArraySize(at(a->story, "nodes"));
-        snprintf(stat, sizeof stat, "#%d  ·  %d message%s", number(a->story, "head"), messages,
-                 messages == 1 ? "" : "s");
+        snprintf(stat, sizeof stat, "#%d / %d stored", number(a->story, "head"), messages);
     }
     else snprintf(stat, sizeof stat, "%d words  ·  rev %d", word_count(a->editing ?
                   str(&a->edit) : scene_text(&a->ws, a->scene)), number(a->scene, "version"));
     cell(a, x, y + 3, w, RAIL TXT, stat);
     if (a->roleplay && *js(a->story, "scene")) {
         const char *path = js(a->story, "scene");
-        cell(a, x, y + 5, w, RAIL QUIET, "LINKED SCENE");
-        cell(a, x, y + 6, w, RAIL TXT, strrchr(path, '/') ? strrchr(path, '/') + 1 : path);
+        cell(a, x, y + 5, w, RAIL QUIET, "Linked scene");
+        clipped_cell(a, x, y + 6, w, RAIL TXT, strrchr(path, '/') ? strrchr(path, '/') + 1 : path);
     } else if (a->roleplay) {
         Text room = {0};
         const char *name = world_room(a->story, number(a->story, "head"), &room);
         if (*name) {
-            cell(a, x, y + 5, w, RAIL QUIET, "CURRENT ROOM");
-            cell(a, x, y + 6, w, RAIL TXT, name);
+            cell(a, x, y + 5, w, RAIL QUIET, "Room");
+            clipped_cell(a, x, y + 6, w, RAIL TXT, name);
         }
         release(&room);
     } else if (a->selected) {
         snprintf(stat, sizeof stat, "%zu bytes selected", a->selection_b - a->selection_a);
         cell(a, x, y + 5, w, RAIL MINT, stat);
     }
-    cell(a, x, y + 8, w, RAIL QUIET, "MODEL");
-    cell(a, x, y + 9, w, RAIL TXT, ui_model(a));
+    cell(a, x, y + 8, w, RAIL QUIET, "Model");
+    clipped_cell(a, x, y + 9, w, RAIL TXT, ui_model(a));
     if (l->height > 16) {
         int n = cJSON_GetArraySize(at(a->ws.root, "bible"));
         rule(a, x, y + 11, w, RAIL LINE NORMAL);
-        snprintf(stat, sizeof stat, "F10 Story Bible (%d)", n);
-        cell(a, x, y + 12, w, RAIL TXT, a->roleplay ? "/memory  Compendium" : stat);
+        snprintf(stat, sizeof stat, "F10 Story Bible %d", n);
+        clipped_cell(a, x, y + 12, w, RAIL TXT, a->roleplay ? "/memory Compendium" : stat);
         cell(a, x, y + 13, w, RAIL TXT, a->roleplay ? "/trace   Prompt" : "F6   Context");
         cell(a, x, y + 14, w, RAIL TXT, a->roleplay ? "/world   Room" : "/revisions History");
     }
 }
-static void breadcrumbs(App *a, const Layout *l, int x)
+static void reading_context(App *a, const Layout *l, int x, int width)
 {
     Text crumb = {0};
     if (a->roleplay) {
         const char *character = js(at(a->story, "card"), "name");
-        append(&crumb, *character ? character : "ROLEPLAY");
-        if (*js(a->story, "scene")) append(&crumb, "  /  linked manuscript");
+        Text room = {0};
+        const char *place = world_room(a->story, number(a->story, "head"), &room);
+        if (*character) append(&crumb, character);
+        if (*place) format(&crumb, "%s%s", crumb.len ? " · " : "", place);
+        if (!crumb.len && a->story) append(&crumb, "Story transcript");
+        release(&room);
     } else if (a->scene) {
         const char *path = js(a->scene, "path");
         const char *end = strrchr(path, '/');
-        for (const char *s = path + 1; s < end; s++) {
+        for (const char *s = path + 1; end && s < end; s++) {
             if (*s == '/') append(&crumb, "  /  ");
             else append_n(&crumb, s, 1);
         }
-    } else append(&crumb, "MANUSCRIPT");
-    clipped_cell(a, x, l->top, l->main - 7, ROOT QUIET NORMAL, str(&crumb));
+    }
+    if (a->editing) append(&crumb, crumb.len ? " · Editing" : "Editing");
+    if (crumb.len) clipped_cell(a, x, l->top + 1, width, ROOT QUIET NORMAL, str(&crumb));
     release(&crumb);
 }
 
@@ -447,7 +456,7 @@ static void manuscript(App *a, const Layout *l, int x, int y, int width, int hei
     if (!*s && !a->editing) {
         if (height < 3) {
             cell(a, x, y, width, ROOT MINT, "F4 edit  ·  /draft generate");
-            a->scroll = 0;
+            a->scroll = a->scroll_max = 0;
             return;
         }
         if (a->scene) {
@@ -459,7 +468,7 @@ static void manuscript(App *a, const Layout *l, int x, int y, int width, int hei
             if (height >= 4) cell(a, x, y + 3, width, ROOT TXT, "/scene      Create a manuscript scene");
             if (height >= 5) cell(a, x, y + 4, width, ROOT TXT, "/import     Bring in a project, session or character");
         }
-        a->scroll = 0;
+        a->scroll = a->scroll_max = 0;
         return;
     }
     Rows rows = wrap(s, strlen(s), width);
@@ -495,18 +504,24 @@ static void roleplay_rows(App *a, Text *body)
         const char *name = player ? (*persona ? persona : "You") : (*character ? character : "Narrator");
         if (!player && *js(node, "speaker")) name = js(node, "speaker");
         const char *addressed = player ? js(node, "addressed") : "";
+        if (body->len) append(body, "\n\n");
         format(body, "%s  %s%s%s  ·  #%d\n", player ? "›" : "◆", name,
                *addressed ? " → " : "", addressed, number(node, "id"));
         append(body, js(node, "content"));
-        append(body, "\n\n");
+        while (body->len && (body->data[body->len - 1] == '\n' || body->data[body->len - 1] == '\r'))
+            body->data[--body->len] = 0;
     }
     Preview *p = &a->preview;
     if (preview_busy(p) && p->story && p->story == a->story) {
+        if (body->len) append(body, "\n\n");
+        const char *state = p->auto_research_job ? (p->planning_research ? "checking sources" : "researching") :
+                            p->recalling ? "recalling memory" : p->definition_research ? "selecting a definition" : "responding";
         format(body, "◆  %s  ·  %s\n", p->speaker.len ? str(&p->speaker) : *character ? character : "Narrator",
-               p->recalling ? "recalling memory" : "responding");
+               state);
         const char *draft = str(&p->candidates[0].body);
         while (isspace((unsigned char)*draft)) draft++;
-        if (!simulation_enabled(p->story) || (*draft != '{' && strncmp(draft, "```json", 7)))
+        if (!p->definition_research && (!simulation_enabled(p->story) ||
+            (*draft != '{' && strncmp(draft, "[{", 2) && strncmp(draft, "```json", 7))))
             append(body, str(&p->candidates[0].body));
     }
     cJSON_Delete(path);
@@ -527,7 +542,7 @@ static void roleplay(App *a, const Layout *l, int x, int y, int width, int heigh
     for (int i = line; i < minimum(rows.count, line + height); i++) {
         Row r = rows.items[i];
         const char *s = body.data + r.start;
-        const char *style = !strncmp(s, "◆  ", 5) ? ROOT LAV BOLD :
+        const char *style = !strncmp(s, "◆  ", 5) ? ROOT AMBER BOLD :
                             !strncmp(s, "›  ", 5) ? ROOT MINT BOLD : ROOT TXT NORMAL;
         position(a, x, y + i - line);
         styled(a, style);
@@ -551,22 +566,21 @@ static void panel(App *a, const Layout *l, int x, int y, int width, int height)
                 !p->candidates[i].error.len) ready++;
         snprintf(label, sizeof label, "%s  ·  %d of %d ready",
                  p->reasoning ? "Reasoning" : "Candidate review", ready, p->count);
-        cell(a, x, l->top, width, ROOT QUIET NORMAL, label);
+        cell(a, x, l->top, width, ROOT TXT BOLD, label);
         const char *state = c->job ? "Streaming" : c->error.len ? "Interrupted" :
                             !c->finished ? "Queued" : c->body.len ? "Ready" : "Empty";
         snprintf(label, sizeof label, "%d/%d  %s  ·  %s", p->current + 1, p->count, c->label, state);
-        cell(a, x, l->top + 1, width, c->job ? ROOT GOLD BOLD : ROOT TXT BOLD, label);
+        if (!l->dense) cell(a, x, l->top + 1, width, c->job ? ROOT GOLD BOLD : ROOT DIM NORMAL, label);
         if (p->reasoning) append(&text, c->thinking.len ? str(&c->thinking) : "The provider has supplied no reasoning.");
         else if (c->body.len) append(&text, str(&c->body));
         else append(&text, c->job ? "Waiting for the model…" :
                     !c->finished ? "Waiting for a worker…" : "No text received.");
         if (c->error.len) format(&text, "\n\n%s", str(&c->error));
     } else {
-        cell(a, x, l->top, width, ROOT MINT NORMAL, "WORKSPACE");
-        cell(a, x, l->top + 1, width, ROOT TXT BOLD, a->info_title);
+        clipped_cell(a, x, l->top, width, ROOT TXT BOLD, a->info_title);
         append(&text, str(&a->info));
     }
-    if (y > l->top + 2) rule(a, x, l->top + 2, width, ROOT LINE NORMAL);
+    rule(a, x, y - 1, width, ROOT LINE NORMAL);
     Rows rows = wrap(str(&text), text.len, width);
     a->panel_scroll = clamp(a->panel_scroll, 0, maximum(0, rows.count - height));
     draw_lines(a, str(&text), rows, a->panel_scroll, x, y, width, height, 0, 0);
@@ -585,6 +599,14 @@ static double median(double samples[], int count)
     qsort(samples, (size_t)count, sizeof *samples, compare_sample);
     return (samples[(count - 1) / 2] + samples[count / 2]) / 2;
 }
+static void metric(App *a, int x, int y, int width, const char *label, const char *value, const char *detail)
+{
+    for (int row = 0; row < 3; ++row) paint(a, x, y + row, width, FIELD);
+    clipped_cell(a, x + 2, y, width - 4, FIELD DIM NORMAL, label);
+    clipped_cell(a, x + 2, y + 1, width - 4, FIELD MINT BOLD, value);
+    clipped_cell(a, x + 2, y + 2, width - 4, FIELD QUIET NORMAL, detail);
+}
+
 static void neofetch(App *a, const Layout *l, int x, int y, int width, int height)
 {
     const Neofetch *neo = &a->neo;
@@ -593,23 +615,39 @@ static void neofetch(App *a, const Layout *l, int x, int y, int width, int heigh
     const char *gateway_style = server ? ROOT MINT BOLD : neo->error.len ? ROOT GOLD BOLD : ROOT DIM BOLD;
     cell(a, x, l->top, width, ROOT TXT BOLD, "Neofetch");
     if (width >= 28) right(a, x + width, l->top, 13, gateway_style, gateway);
-    if (y > l->top + 1) rule(a, x, l->top + 1, width, ROOT LINE NORMAL);
+    rule(a, x, y - 1, width, ROOT LINE NORMAL);
+    double rates[NEOFETCH_SAMPLES], ttfts[NEOFETCH_SAMPLES];
+    int rate_count = 0, ttft_count = 0;
+    for (int i = 0; i < neo->count; i++) {
+        InferenceMetrics sample = neo->samples[i];
+        if (sample.tokens_per_second > 0) rates[rate_count++] = sample.tokens_per_second;
+        if (sample.has_ttft) ttfts[ttft_count++] = (double)sample.ttft_ms;
+    }
+    bool tiles = width >= 56 && height >= 13;
+    if (tiles) {
+        int half = (width - 2) / 2;
+        char rate[48] = "—", ttft[48] = "—", rate_detail[32], ttft_detail[32];
+        if (rate_count) snprintf(rate, sizeof rate, "%.1f tok/s", median(rates, rate_count));
+        if (ttft_count) snprintf(ttft, sizeof ttft, "%.0f ms", median(ttfts, ttft_count));
+        snprintf(rate_detail, sizeof rate_detail, "%d measured", rate_count);
+        snprintf(ttft_detail, sizeof ttft_detail, "%d measured", ttft_count);
+        metric(a, x, y, half, "Median throughput", rate, rate_detail);
+        metric(a, x + half + 2, y, width - half - 2, "Median time to first token", ttft, ttft_detail);
+        y += 4;
+        height -= 4;
+    }
     const char *const mark[] = {
-        "          *         ",
-        "     .  ))|((  .    ",
-        "          |         ",
-        "         /|\\        ",
-        "        /-+-\\       ",
-        "       /  |  \\      ",
-        "      /---+---\\     ",
-        "     /____|____\\    ",
-        "   ~~~  ~~~  ~~~    ",
+        "       .----.       ",
+        "    .-'      '-.    ",
+        " .-+------------+-. ",
+        "(  |      +     |  )",
+        " '-+------------+-' ",
+        "    '-.______.-'    ",
     };
-    if (width >= 61 && height >= 8) {
+    if (width >= 65 && height >= 8) {
         const int art_rows = (int)(sizeof mark / sizeof *mark);
         for (int row = 0; row < minimum(art_rows, height); row++)
-            cell(a, x, y + row, 20, row == 0 ? ROOT GOLD BOLD :
-                 a->roleplay ? ROOT LAV BOLD : ROOT MINT BOLD, mark[row]);
+            cell(a, x, y + row, 20, row == 3 ? ROOT AMBER BOLD : ROOT MINT NORMAL, mark[row]);
         x += 24;
         width -= 24;
     }
@@ -626,19 +664,14 @@ static void neofetch(App *a, const Layout *l, int x, int y, int width, int heigh
         if (cJSON_IsTrue(at(server, "pinned_slots"))) append(&body, "Routing  Pinned llama.cpp slots\n");
         else format(&body, "Workers  %d on the default provider\n", number(server, "workers"));
     } else if (neo->error.len) format(&body, "%s\n", str(&neo->error));
-    double rates[NEOFETCH_SAMPLES], ttfts[NEOFETCH_SAMPLES];
-    int rate_count = 0, ttft_count = 0;
-    for (int i = 0; i < neo->count; i++) {
-        InferenceMetrics sample = neo->samples[i];
-        if (sample.tokens_per_second > 0) rates[rate_count++] = sample.tokens_per_second;
-        if (sample.has_ttft) ttfts[ttft_count++] = (double)sample.ttft_ms;
+    if (!tiles) {
+        append(&body, "\nSession performance\n");
+        if (rate_count)
+            format(&body, "Median tok/s  %.1f · %d measured\n", median(rates, rate_count), rate_count);
+        else format(&body, "Median tok/s  %s\n", neo->count ? "Unavailable" : "Waiting for a generation");
+        if (ttft_count) format(&body, "Median TTFT  %.0f ms · %d measured\n", median(ttfts, ttft_count), ttft_count);
+        else append(&body, "Median TTFT  Unavailable\n");
     }
-    append(&body, "\nSession performance\n");
-    if (rate_count)
-        format(&body, "Median tok/s  %.1f · %d measured\n", median(rates, rate_count), rate_count);
-    else format(&body, "Median tok/s  %s\n", neo->count ? "Unavailable" : "Waiting for a generation");
-    if (ttft_count) format(&body, "Median TTFT  %.0f ms · %d measured\n", median(ttfts, ttft_count), ttft_count);
-    else append(&body, "Median TTFT  Unavailable\n");
     format(&body, "Sample window  %d/%d completed\n\n", neo->count, NEOFETCH_SAMPLES);
     format(&body, "Terminal  %d×%d · %s\nClient  %s · %s\n", a->cols, a->rows,
            a->roleplay ? "Roleplay" : "Manuscript", NEUTRINO_VERSION, a->ssh_session ? "SSH" : "Local");
@@ -662,30 +695,47 @@ static void neofetch(App *a, const Layout *l, int x, int y, int width, int heigh
     release(&body);
 }
 
-static void composer(App *a, const Layout *l, int *cx, int *cy)
+static void composer(App *a, const Layout *l, const Rows *wrapped, int *cx, int *cy)
 {
-    int x = l->left + 1, y = a->rows - (l->dense ? 3 : 4), w = l->width - 2;
-    const char *accent = a->roleplay ? ROOT LAV NORMAL : ROOT MINT NORMAL;
-    const char *border = a->focus == COMPOSER ? accent : ROOT LINE NORMAL;
-    const char *style = a->focus == COMPOSER ? (a->roleplay ? FIELD LAV BOLD : FIELD MINT BOLD) : FIELD DIM NORMAL;
+    int x = content_x(l) - 1, y = l->input_y, w = content_width(l) + 2;
+    const char *accent = a->roleplay ? FIELD AMBER BOLD : FIELD MINT BOLD;
+    const char *style = a->focus == COMPOSER || a->editing ? accent : FIELD QUIET NORMAL;
     if (!l->dense) {
-        edge(a, x, y - 1, w, border, true);
-        cell(a, x + 2, y - 1, 19, border, a->editing ? " Editor " : a->roleplay ? " Next action " : " Writing direction ");
-        edge(a, x, y + 1, w, border, false);
+        cell(a, x + 1, y - 1, w - 2, ROOT DIM NORMAL,
+             a->editing ? "Editing manuscript" : a->roleplay ? "Next action" : "Writing direction");
+        if (w >= 37 && !a->editing)
+            right(a, x + w - 1, y - 1, 22, ROOT QUIET NORMAL,
+                  a->roleplay ? "Enter Send" : "F4 Edit   Enter Send");
     }
-    card_row(a, x, y, w, FIELD, border);
-    cell(a, x + 1, y, 4, style, a->editing ? "✎" : a->roleplay ? "›" : "❯");
-    int width = w - 6;
+    paint(a, x, y, w, FIELD);
+    cell(a, x, y, 1, style, "▏");
+    cell(a, x + 1, y, 2, style, a->editing ? "✎" : "›");
+    int width = w - 5;
     if (a->editing) {
-        cell(a, x + 4, y, width, FIELD TXT,
-             "Editing manuscript   Ctrl+S save   Ctrl+Space select   Esc close");
+        clipped_cell(a, x + 3, y, width, FIELD TXT NORMAL,
+                     "Ctrl+S Save   Ctrl+Space Select   Esc Close");
         return;
     }
-    if (w >= 67) {
-        right(a, x + w - 2, y, 9, FIELD QUIET, "↵ send");
-        width -= 9;
-    }
     const char *s = str(&a->prompt);
+    if (wrapped->count > 1) {
+        int line = row_of(wrapped, a->cursor);
+        int lines = minimum(3, wrapped->count);
+        int first = clamp(line - lines + 1, 0, wrapped->count - lines);
+        for (int i = 0; i < lines; ++i) {
+            if (i) paint(a, x, y + i, w, FIELD);
+            if (i) cell(a, x, y + i, 1, style, "▏");
+            Row row = wrapped->items[first + i];
+            position(a, x + 3, y + i);
+            styled(a, FIELD TXT NORMAL);
+            display(a, s + row.start, row.end - row.start, width);
+        }
+        if (a->focus == COMPOSER) {
+            size_t offset = wrapped->items[line].start;
+            *cx = x + 3 + minimum(width, display_width(s + offset, a->cursor - offset));
+            *cy = y + line - first;
+        }
+        return;
+    }
     size_t start = 0;
     int used = 0;
     for (size_t i = a->cursor; i;) {
@@ -695,13 +745,12 @@ static void composer(App *a, const Layout *l, int *cx, int *cy)
         used += glyph;
         i = prev;
     }
-    const char *placeholder = width < 39 ? "Type / for commands" :
-                              a->roleplay ? "What do you do?  / for commands" :
-                                           "What should happen next?  / for commands";
-    cell(a, x + 4, y, width, FIELD TXT, a->prompt.len ? s + start : "");
-    if (!a->prompt.len) cell(a, x + 4, y, width, FIELD QUIET, placeholder);
+    const char *placeholder = width < 31 ? "Write or type /" :
+                              a->roleplay ? "What do you do?" : "What should happen next?";
+    cell(a, x + 3, y, width, a->prompt.len ? FIELD TXT NORMAL : FIELD QUIET NORMAL,
+         a->prompt.len ? s + start : placeholder);
     if (a->focus == COMPOSER) {
-        *cx = x + 4 + used;
+        *cx = x + 3 + used;
         *cy = y;
     }
 }
@@ -709,26 +758,27 @@ static void palette(App *a, const Layout *l)
 {
     if (!a->slash || a->focus != COMPOSER) return;
     int matches[COMMAND_MATCH_LIMIT], count = ui_command_matches(a, matches, COMMAND_MATCH_LIMIT);
-    int bottom = a->rows - (l->dense ? 4 : 6);
-    int shown = minimum(count ? count : 1, minimum(7, maximum(1, bottom - l->top - 1)));
+    int bottom = l->input_y - 1;
+    int shown = minimum(count ? count : 1, minimum(8, maximum(1, bottom - l->top - 2)));
     int first = clamp(a->command_cursor - shown + 1, 0, maximum(0, count - shown));
-    int x = l->main_x + 2, y = bottom - 1 - shown, w = minimum(78, l->main - 4);
-    const char *border = a->roleplay ? RAIL LAV NORMAL : RAIL MINT NORMAL;
+    int x = content_x(l) - 1, y = bottom - 1 - shown, w = content_width(l) + 2;
+    const char *border = a->roleplay ? RAIL AMBER NORMAL : RAIL MINT NORMAL;
     card(a, x, y, w, shown + 2, border);
     cell(a, x + 2, y, w - 4, border, " Commands ");
     if (w >= 52) right(a, x + w - 2, y, 24, border, " ↑↓ select  Esc close ");
     for (int i = 0; i < shown; i++) {
         int n = first + i;
-        const char *bg = n == a->command_cursor && count ? PICK : RAIL;
+        bool focused = n == a->command_cursor && count;
+        const char *bg = focused ? (a->roleplay ? PLUM : PICK) : RAIL;
         paint(a, x + 1, y + i + 1, w - 2, bg);
         if (count) {
             const Command *cmd = &commands[matches[n]];
             Text name = {0};
             format(&name, "/%s", cmd->name);
             cell(a, x + 2, y + i + 1, minimum(18, w - 3),
-                 n == a->command_cursor ? PICK MINT BOLD : RAIL TXT NORMAL, str(&name));
+                 focused ? (a->roleplay ? PLUM AMBER BOLD : PICK MINT BOLD) : RAIL TXT NORMAL, str(&name));
             if (w > 34) cell(a, x + 20, y + i + 1, w - 22,
-                n == a->command_cursor ? PICK TXT NORMAL : RAIL DIM NORMAL, cmd->summary);
+                focused ? (a->roleplay ? PLUM TXT NORMAL : PICK TXT NORMAL) : RAIL DIM NORMAL, cmd->summary);
             release(&name);
         } else cell(a, x + 2, y + i + 1, w - 4, RAIL DIM, "No matching commands");
     }
@@ -743,43 +793,45 @@ static void frame(App *a)
         cell(a, 0, 0, a->cols, ROOT MINT BOLD, "Neutrino · enlarge terminal");
         return;
     }
+    Rows prompt = {0};
+    if (!l.dense && !l.library_only && !a->editing && a->prompt.len) {
+        prompt = wrap(str(&a->prompt), a->prompt.len, content_width(&l) - 3);
+        l.input_y -= minimum(3, prompt.count) - 1;
+        l.content_end = l.input_y - 2;
+    }
     header(a, &l);
-    header_tabs(a, &l);
     library(a, &l);
     detail(a, &l);
-    int title_x = l.main_x + 3, x = l.main_x + 3, width = content_width(&l);
-    int y = l.top + (l.dense ? 2 : 4);
-    int height = maximum(1, l.height - (l.dense ? 2 : 5));
+    int x = content_x(&l), width = content_width(&l);
+    int y = l.top + (l.dense ? 2 : 3);
+    int height = maximum(1, l.content_end - y);
     int cx = -1, cy = -1;
     if (l.library_only) {
         /* The library replaces the reading pane on narrow or short terminals. */
     } else if (a->view_panel && a->panel_neofetch) {
-        int start = l.top + (l.dense ? 1 : 3);
-        neofetch(a, &l, x, start, l.main - 6, height + y - start);
+        neofetch(a, &l, x, y, width, height);
     } else if (a->view_panel) panel(a, &l, x, y, width, height);
     else {
-        breadcrumbs(a, &l, title_x);
-        clipped_cell(a, title_x, l.top + 1, l.main - 6, ROOT TXT BOLD,
+        clipped_cell(a, x, l.top, width, ROOT TXT BOLD,
                      a->roleplay ? ui_story_name(a) : ui_scene_name(a));
-        if (y > l.top + 2) rule(a, x, l.top + 2, width, ROOT LINE NORMAL);
+        if (!l.dense) reading_context(a, &l, x, width);
+        rule(a, x, y - 1, width, ROOT LINE NORMAL);
         if (a->roleplay) roleplay(a, &l, x, y, width, height);
         else manuscript(a, &l, x, y, width, height, &cx, &cy);
     }
-    if (!l.dense && !l.library_only) {
-        const char *hint = a->editing ? "Ctrl+S save  ·  Esc close" :
-            a->view_panel ? (a->panel_preview ? "F8 apply  ·  F9 reject  ·  ←/→ candidates  ·  Esc close" :
-                            a->panel_neofetch ? "↑↓ scroll  ·  Auto-refresh  ·  Esc close" : "PgUp/PgDn scroll  ·  Esc close") :
-            a->roleplay ? "/swipe alternate  ·  /branch history" : "F4 edit  ·  F5 continue  ·  PgUp/PgDn scroll";
-        cell(a, title_x, a->rows - 7, l.main - 6, ROOT QUIET NORMAL, hint);
-    }
-    composer(a, &l, &cx, &cy);
+    if (!l.library_only) composer(a, &l, &prompt, &cx, &cy);
+    free(prompt.items);
     const char *state = a->status.len ? str(&a->status) : "Ready";
-    const char *keys = l.dense && a->view_panel ? "Esc close" :
-                       l.width >= 94 ? "F1 help   Ctrl+P commands   Ctrl+Q quit" :
-                       l.width >= 55 ? "Ctrl+P commands" : "F1 help";
-    int reserve = (int)strlen(keys) + 3;
-    cell(a, l.left + 2, a->rows - 2, l.width - reserve - 4, preview_busy(&a->preview) ? ROOT GOLD : ROOT DIM, state);
-    right(a, l.left + l.width - 2, a->rows - 2, reserve, ROOT QUIET NORMAL, keys);
+    const char *keys = a->focus == LIBRARY ? "Esc Close" : a->editing ? "Esc Close" :
+                       a->view_panel ? (l.width >= 72 && a->panel_preview ? "←→ Candidates   F8 Apply   F9 Reject   Esc Close" :
+                                        l.width >= 54 ? "PgUp/PgDn Scroll   Esc Close" : "Esc Close") :
+                       l.width >= 90 ? "F2 Mode   F3 Library   Ctrl+P Commands" :
+                       l.width >= 53 ? "F3 Library   Ctrl+P Commands" : "F1 Help";
+    int reserve = display_width(keys, strlen(keys)) + 3;
+    paint(a, l.left, a->rows - 1, l.width, RAIL);
+    clipped_cell(a, l.left + 2, a->rows - 1, l.width - reserve - 3,
+                 preview_busy(&a->preview) || a->research_job ? RAIL GOLD NORMAL : RAIL DIM NORMAL, state);
+    right(a, l.left + l.width - 2, a->rows - 1, reserve, RAIL QUIET NORMAL, keys);
     palette(a, &l);
     styled(a, ROOT TXT NORMAL);
     if (cx >= 0 && cy >= 0) editor_cursor(a, cx, cy);

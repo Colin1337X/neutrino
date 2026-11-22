@@ -25,7 +25,7 @@ cmake --build build
 
 The demo opens an original manuscript and a connected roleplay story. It runs in memory. For persistent work, start without `--demo`. Neutrino saves to `.neutrino.json` in the working directory by default. Use `--workspace FILE` or `NEUTRINO_WORKSPACE` for a different file. A sidecar lock prevents two Neutrino processes from writing to the same workspace. `--snapshot` prints a static ANSI frame for inspection.
 
-The TUI reflows when the terminal resizes. On narrow or short terminals, **F3** opens the library in place of the reading pane. Short terminals also use a single-line composer. Use `/focus` to hide the side panes at any width.
+The TUI centers a reading column and reflows when the terminal resizes. Wider terminals show the library and context beside it. On narrow or short terminals, **F3** opens the library in place of the reading pane. The composer expands to three lines when there is room and scrolls on one line in compact terminals. Use `/focus` to hide the side panes at any width.
 
 ## Use the workspace
 
