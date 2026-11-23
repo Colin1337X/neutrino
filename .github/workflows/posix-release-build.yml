@@ -1,0 +1,123 @@
+name: Build Linux and macOS release archives
+on:
+  push:
+    branches: [build/posix-release-archives]
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.platform.id }} batch ${{ matrix.batch }}
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 22
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - {id: linux-x64, runner: ubuntu-24.04}
+          - {id: linux-arm64, runner: ubuntu-24.04-arm}
+          - {id: macos-x64, runner: macos-15-intel}
+          - {id: macos-arm64, runner: macos-15}
+        batch: [0, 1, 2]
+    env:
+      PLATFORM: ${{ matrix.platform.id }}
+      BATCH: ${{ matrix.batch }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install and check native build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          probe="$RUNNER_TEMP/neutrino-c23.c"
+          printf '%s\n' '#include <stddef.h>' 'int main(void) { void *p = nullptr; return p != nullptr; }' > "$probe"
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends clang-20 libcurl4-openssl-dev
+            compiler="$(command -v clang-20)"
+          else
+            compiler="$(xcrun --find clang)"
+            if ! "$compiler" -std=c23 -fsyntax-only "$probe" 2>/dev/null; then
+              if command -v gcc-15 >/dev/null; then
+                compiler="$(command -v gcc-15)"
+              else
+                HOMEBREW_NO_AUTO_UPDATE=1 brew install llvm@21
+                compiler="$(brew --prefix llvm@21)/bin/clang"
+              fi
+            fi
+          fi
+          "$compiler" -std=c23 -fsyntax-only "$probe"
+          echo "CC=$compiler" >> "$GITHUB_ENV"
+          "$compiler" --version
+          cmake --version
+      - name: Build and test tagged release sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/neutrino-release-archives"
+          mkdir -p "$out"
+          args=(-G Ninja -DCMAKE_BUILD_TYPE=Release -DCURL_NO_CURL_CMAKE=ON)
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            sdk="$(xcrun --sdk macosx --show-sdk-path)"
+            args+=("-DCMAKE_OSX_SYSROOT=$sdk" -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 "-DCURL_INCLUDE_DIR=$sdk/usr/include" "-DCURL_LIBRARY=$sdk/usr/lib/libcurl.tbd")
+            runtime="macOS 15 or later with system libcurl"
+          else
+            multiarch="$(gcc -print-multiarch)"
+            args+=("-DCURL_INCLUDE_DIR=/usr/include/$multiarch" "-DCURL_LIBRARY=/usr/lib/$multiarch/libcurl.so")
+            runtime="Built on Ubuntu 24.04. Requires glibc and libcurl.so.4."
+          fi
+
+          git tag --list 'v0.*' 'build-0*' --sort=version:refname |
+            awk -v batch="$BATCH" '(NR - 1) % 3 == batch' |
+            while IFS= read -r tag; do
+              [[ "$tag" =~ ^(v0\.[0-9]+\.[0-9]+\.[0-9]+|build-0[0-9]{2})$ ]]
+              revision="$(git rev-parse "$tag^{commit}")"
+              work="$RUNNER_TEMP/neutrino-$tag"
+              src="$work/source"
+              bin="$work/build"
+              pkg="$work/package"
+              mkdir -p "$src" "$pkg/licenses"
+              git archive "$revision" | tar -x -C "$src"
+              echo "::group::$tag ($revision)"
+              cmake -S "$src" -B "$bin" "${args[@]}"
+              cmake --build "$bin" --parallel 3
+              ctest --test-dir "$bin" --output-on-failure
+              "$bin/neutrino" --version | tee "$work/version"
+              "$bin/neutrino" --demo --snapshot > "$work/demo.txt"
+              grep -qi neutrino "$work/demo.txt"
+              file "$bin/neutrino"
+              if [[ "$RUNNER_OS" == macOS ]]; then
+                otool -L "$bin/neutrino" | tee "$work/dependencies"
+                awk 'NR > 1 && $1 !~ /^\/usr\/lib\// && $1 !~ /^\/System\/Library\// { exit 1 }' "$work/dependencies"
+                grep -q /usr/lib/libcurl "$work/dependencies"
+              else
+                ldd "$bin/neutrino" | tee "$work/dependencies"
+                if grep -q 'not found' "$work/dependencies"; then exit 1; fi
+                grep -q libcurl.so.4 "$work/dependencies"
+              fi
+              install -m 755 "$bin/neutrino" "$pkg/neutrino"
+              cp "$src/LICENSE" "$pkg/LICENSE"
+              cp "$src/third_party/cjson/LICENSE" "$pkg/licenses/cJSON.txt"
+              {
+                printf '%s\n' "Release $tag" "GitHub source commit $revision" "Platform $PLATFORM" "$runtime"
+                cat "$work/version"
+                "$CC" --version | sed -n '1p'
+                printf '%s\n' "Release build, native test suite and demo smoke checks passed."
+              } > "$pkg/build-info.txt"
+              cp "$work/dependencies" "$pkg/dependencies.txt"
+              package="neutrino-$tag-$PLATFORM.tar.gz"
+              tar -czf "$out/$package" -C "$pkg" LICENSE licenses neutrino build-info.txt dependencies.txt
+              (cd "$out" && shasum -a 256 "$package" > "$package.sha256")
+              echo "::endgroup::"
+            done
+          test "$(find "$out" -name '*.tar.gz' | wc -l | tr -d ' ')" = 11
+      - name: Upload verified build archives
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: neutrino-${{ matrix.platform.id }}-${{ matrix.batch }}
+          path: ${{ runner.temp }}/neutrino-release-archives/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
