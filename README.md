@@ -83,7 +83,7 @@ When a narrator draft appears to stop mid-sentence, Neutrino requests one shorte
 
 The roleplay world takes inspiration from Neko Agent's rooms, carried items, environment, and addressed character replies. Create a room with `/room NAME | DESCRIPTION`. The first room is the starting point. Use `/connect ROOM | ROOM` to link rooms in both directions and `/go ROOM` to move through a link. Use `/item NAME | DESCRIPTION` to place a prop here, `/take NAME` to carry it, and `/drop NAME` to leave it in the current room. `/weather TEXT` sets the branch's conditions manually.
 
-Use `/npc NAME | DESCRIPTION` to place a character in the current room. `@Name MESSAGE` asks that character to respond through the configured narrator model. A character has to be present. `/say TEXT` records speech in the room without calling a model. `/world` shows the room, exits, inventory, and characters. `/world log` shows the branch's recent actions. Room definitions and exits belong to the story. Movement, inventory changes, speech, weather, and character placement follow the active branch. The narrator receives the current world state as context and `/trace` displays the state sent with the prompt. Only player commands change the world state. [Neko Agent module reference](https://github.com/GameDevFox/neko-agent/blob/0c5bc71/readme/MODULES.md)
+Use `/npc NAME | DESCRIPTION` to place a character in the current room. `@Name MESSAGE` asks that character to respond through the configured narrator model. A character has to be present. `/say TEXT` records speech in the room without calling a model. `/world` shows the room, exits, inventory, and characters. `/world log` shows the branch's recent actions. New rooms, exits, movements, inventory, weather, and character placement follow the active branch. Existing workspace room and exit definitions remain the shared starting map. [Neko Agent module reference](https://github.com/GameDevFox/neko-agent/blob/0c5bc71/readme/MODULES.md)
 
 `/map` shows the current room, links, and unreachable rooms. `/map ROOM` shows the shortest route and the first `/go` command for that route. `/inspect` shows the current room's description, and `/inspect NAME` looks at a nearby item, carried item, or present character on the active branch. [Neko Agent play view](https://github.com/GameDevFox/neko-agent/blob/0c5bc71/readme/PLAYING.md)
 
@@ -112,11 +112,56 @@ Use `/sim` for the available tool arguments. Player edits work with narrator too
 /sim {"neutrino_tool":"inventory","action":"edit","name":"signal lamp","description":"Brass lamp with a cracked lens."}
 ```
 
-`/stats on` allows the narrator to request up to three tools before a prose reply. The narrator can send one JSON tool object or group read-only physics requests in a JSON array. The TUI validates each request and returns its result in the next prompt. State and inventory edits are staged until the reply is accepted and follow that reply's branch. Cancelling or exhausting the tool limit without prose discards staged changes. `/trace` includes requests and results. With tools off, Neutrino omits tracked state from the prompt and pauses automatic clock advancement.
+`/stats on` lets the narrator choose tools when the results affect the scene, even when the player describes an action without naming a tool. The narrator can use up to 12 operations before prose, or group a larger setup into one ordered plan. Neutrino validates the requests and returns observations to the narrator. Edits follow the reply's branch and save with accepted prose. Cancelling the reply discards staged edits. `/trace` includes requests and results. With tools off, Neutrino omits tracked state from the prompt and pauses automatic clock advancement.
 
-For dependent narrator actions, use an object with an `actions` array. Operations run in array order against a staged copy of the scene. Each calculation sees only changes that precede it. If a step has invalid arguments or an unmet prerequisite, the entire sequence is discarded and `/trace` identifies the failed step. A valid sequence commits its changes when the narrator reply saves.
+The narrator can create, edit, and remove map features and entities with `world`, manage carried and worn objects with `inventory`, and set or advance time with `set_time`, `auto_time`, and `advance`. `world_inspect` lists rooms, exits, characters, and items in pages. Saved scenarios can grow across replies. The tool budget, context window, and individual solver bounds still govern each calculation.
+
+For dependent narrator actions, use an object with an `actions` array. Operations run in order against a staged copy of the scene. Add `"continue":true` beside `actions` to let the narrator use the results to select another tool. If a step fails, the sequence is discarded and `/trace` identifies the failed step.
 
 To run the same sequence directly, paste its JSON after `/sim`. The panel shows each result, and a valid sequence applies its changes to the current branch immediately.
+
+### Headless 3D room
+
+The narrator can create multiple named 3D layouts with `scene_room`, list them using `scene_catalog`, and switch layouts with `scene_select`. Geometry uses axis-aligned boxes in metres with Z up. Reusing an object's name updates it within the active layout. Each branch inherits its ancestor's edits. `scene_inspect` pages through saved objects, and room raycasts traverse all saved objects in batches. For sound and light queries in layouts with more than 16 objects, supply `include` with the object names to evaluate. The 3D layouts are separate from the story's navigation map.
+
+```text
+/sim {"neutrino_tool":"scene_room","min":[0,0,0],"max":[8,5,4]}
+/sim {"neutrino_tool":"scene_place","name":"Divider","kind":"wall","min":[2.5,1,0],"max":[3,4,4]}
+/sim {"neutrino_tool":"scene_rays","origin":[1,2,2],"count":4096,"backend":"cpu"}
+/sim {"neutrino_tool":"scene_acoustic","source":[1,2,2],"listener":[5,2,2]}
+```
+
+Raycasts report the first surface each ray hits. Use `directions` for specific rays or `count` for a spherical sample. Acoustic queries reuse the saved geometry. Geometry blocks sound by default. Set an object's `material` with `loss_db_per_m` and `reflectivity` to model attenuation, transmission, and reflection. The room supports geometric queries without a renderer or rigid-body dynamics.
+
+### 3D physics evaluation
+
+| Tool | Model |
+| --- | --- |
+| `elastic3d` | Homogeneous cuboid under three normal loads, or a slender cantilever with axial and transverse load. Reports small deformation and stress. |
+| `softbody3d` | Spring-linked 3D lattice at a requested node count. Supports a pinned base or free motion, initial velocity, a gravity vector, damping, and compliant spring projection. |
+| `trajectory3d` | Free flight in 3D with scene gravity, constant wind, and optional linear drag. |
+| `thermal3d` | Heating and cooling, optional fixed-volume ideal gas pressure, and optional analytical 3D conduction modes in a cuboid. |
+| `ignition3d` | Fictional ignition and cooldown at a 3D site. Reports activation and reset using dimensionless values and simulation ticks. |
+| `flow3d` | A 3D liquid tracer or low-speed gas concentration. Select the reduced model or a bounded incompressible Navier–Stokes calculation. |
+| `scene_light` | Direct and single-bounce paths, inverse-square spreading, material transmission, gas extinction, and arrival time. |
+
+`flow3d` defaults to `"method":"reduced"`. It moves a Gaussian tracer through a constant wind and estimates diffusion. Select `"method":"navier_stokes"` or `"method":"cfd"` for a periodic grid with velocity and tracer advection, viscosity, diffusion, and pressure projection. The grid uses 6–24 cells per axis and up to 96 time steps. The same options work with `fluid` and `gas` when a 3D `size` is supplied. Their original tank-drain and ideal-gas tools remain available. The grid uses periodic boundaries, independent of room walls. The gas solver models low-speed, constant-density flow and transports a passive concentration. The structural solvers cover small elastic deformation and a pinned spring network. [Stable Fluids reference](https://doi.org/10.1145/311535.311548)
+
+Use `"backend":"gpu"` to run pressure projection on an OpenCL GPU. Other CFD steps use system memory. OpenCL failure falls back to CPU projection. If CFD exceeds its memory or timestep budget, the tool reports the fallback to reduced flow. Windows allocates pageable system memory first and can use the configured pagefile. If allocation fails, it tries a temporary file mapping. Use `"memory":"mapped"` to select the file-backed allocation on Windows. Neutrino leaves Windows pagefile settings unchanged.
+
+`scene_medium` stores a branch-local gas configuration. `sound_loss` and `light_loss` multiply the integrated concentration along the air portion of a ray. They are model coefficients expressed in dB per concentration-metre. `scene_place` accepts a separate `optical` material with power `transmission`, power `reflectivity`, and `loss_db_per_m`. Choose `"backend":"rt"` for hardware occlusion of direct and wall-reflected light when the RT build is available. Material attenuation and object-reflection checks run on the CPU.
+
+`softbody3d` accepts an exact `nodes` count of at least 8, or a scalar or three-axis `resolution` for a complete lattice. An exact count can leave the top layer partially filled. Dynamic runs use pageable memory or a Windows temporary file mapping and report allocation failure without reducing the requested count. Memory and runtime depend on lattice size and duration. Use `sample_node` to inspect a zero-based node index, or set `seconds` to zero to query the initial geometry without allocating the lattice.
+
+```text
+/sim {"neutrino_tool":"flow3d","medium":"liquid","size":[6,6,4],"method":"navier_stokes","vortex_m_s":0.4,"seconds":0.5}
+/sim {"neutrino_tool":"scene_room","min":[0,0,0],"max":[6,5,4]}
+/sim {"neutrino_tool":"scene_medium","method":"cfd","wind":[0.3,0.1,0],"seconds":0.5,"sound_loss":2,"light_loss":4}
+/sim {"neutrino_tool":"scene_light","source":[1,2,2],"listener":[5,2,2],"wall_reflectivity":0.3}
+/sim {"neutrino_tool":"ignition3d","source":[1,2,3],"site":[1,2,3],"pulse_ticks":2,"cool_ticks":2}
+```
+
+Run `ctest --test-dir build --output-on-failure` for the numerical checks. Run `scene_physics_test --cfd-gpu` to compare OpenCL pressure projection with the CPU, and `scene_physics_test --rt` to check the separate hardware ray path.
 
 ```json
 {"actions":[{"neutrino_tool":"tune","setting":"gravity","value":1},{"neutrino_tool":"fluid","height":1,"tank_area":2,"outlet_area":0.003,"seconds":10}]}
@@ -144,6 +189,10 @@ Levels are relative to the direct source at one metre. In material mode `min_lev
 The ray batch and acoustic visibility tests accept `backend` values `auto`, `cpu`, `gpu` (OpenCL), and `vulkan`. Material crossings and attenuation run on the CPU. Automatic mode uses the CPU for small batches. At 32 or more intersection tests it tries a Vulkan hardware device when built in, then OpenCL, then CPU. Explicit Vulkan requests also work on software Vulkan implementations, which the result identifies as such.
 
 Build the optional Vulkan compute backend on Windows or Linux with `-DNEUTRINO_VULKAN=ON`. It needs Vulkan headers and `glslangValidator` when building and loads the installed Vulkan runtime on demand. The default build keeps its existing OpenCL and CPU backends. Run `scene_physics_test --vulkan` for a runtime ray and acoustics check. [Khronos Vulkan compute guide](https://docs.vulkan.org/guide/latest/compute_shaders.html)
+
+Add `-DNEUTRINO_VULKAN_RT=ON` to enable hardware ray queries on a Vulkan 1.2 GPU and driver that support `VK_KHR_ray_query` and acceleration structures. Select `"backend":"rt"` for `rays`, `scene_rays`, or acoustic occlusion. Results and `/trace` identify a successful dispatch as **Vulkan hardware RT**. If explicitly selected RT is unavailable, the tool reports it. The existing automatic backend order still applies when `backend` is omitted. [Khronos Vulkan ray queries](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_ray_query.html)
+
+The RT path caches the last unchanged group of boxes used for traversal. Acoustic material transmission and attenuation still use the CPU. Use `scene_physics_test --rt` to verify hardware execution.
 
 `/memory items` shows the active branch's filed props and their evidence. Multiple named props can be kept from a single sentence when the narrator establishes their actions or locations. Use `/inventory` for the player-controlled world inventory.
 

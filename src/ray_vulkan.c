@@ -3,6 +3,11 @@
 
 #include "ray.h"
 #include "neutrino_ray_spv.h"
+#ifdef NEUTRINO_VULKAN_RT
+#include "neutrino_ray_query_spv.h"
+#include <float.h>
+#include <math.h>
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +34,17 @@ typedef void *Loader;
     X(AllocateCommandBuffers) X(BeginCommandBuffer) X(EndCommandBuffer) X(CmdBindPipeline) \
     X(CmdBindDescriptorSets) X(CmdPushConstants) X(CmdDispatch) X(CmdPipelineBarrier) \
     X(QueueSubmit) X(QueueWaitIdle)
+#ifdef NEUTRINO_VULKAN_RT
+#define RT_FUNCTIONS(X) \
+    X(GetBufferDeviceAddress) X(CreateAccelerationStructureKHR) X(DestroyAccelerationStructureKHR) \
+    X(GetAccelerationStructureBuildSizesKHR) X(GetAccelerationStructureDeviceAddressKHR) \
+    X(CmdBuildAccelerationStructuresKHR)
+static const char *const rt_extensions[] = {
+    VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, VK_KHR_RAY_QUERY_EXTENSION_NAME,
+    VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME
+};
+static void rt_release_scene(void);
+#endif
 
 static struct {
     Loader loader;
@@ -42,9 +58,22 @@ static struct {
     uint32_t family;
     int rank;
     bool attempted;
+#ifdef NEUTRINO_VULKAN_RT
+    bool use_rt;
+    uint32_t scratch_alignment;
+    VkDescriptorSetLayout rt_descriptors;
+    VkPipelineLayout rt_layout;
+    VkPipeline rt_pipeline;
+    PFN_vkGetPhysicalDeviceFeatures2 features;
+    PFN_vkGetPhysicalDeviceProperties2 properties;
+    PFN_vkEnumerateDeviceExtensionProperties extensions;
+#endif
 #define DECLARE(name) PFN_vk##name name;
     INSTANCE_FUNCTIONS(DECLARE)
     DEVICE_FUNCTIONS(DECLARE)
+#ifdef NEUTRINO_VULKAN_RT
+    RT_FUNCTIONS(DECLARE)
+#endif
 #undef DECLARE
 } vk;
 
@@ -65,6 +94,12 @@ static PFN_vkGetInstanceProcAddr open_loader(void)
 
 static void close_backend(void)
 {
+#ifdef NEUTRINO_VULKAN_RT
+    rt_release_scene();
+    if (vk.rt_pipeline) vk.DestroyPipeline(vk.device, vk.rt_pipeline, NULL);
+    if (vk.rt_layout) vk.DestroyPipelineLayout(vk.device, vk.rt_layout, NULL);
+    if (vk.rt_descriptors) vk.DestroyDescriptorSetLayout(vk.device, vk.rt_descriptors, NULL);
+#endif
     if (vk.pipeline) vk.DestroyPipeline(vk.device, vk.pipeline, NULL);
     if (vk.layout) vk.DestroyPipelineLayout(vk.device, vk.layout, NULL);
     if (vk.descriptors) vk.DestroyDescriptorSetLayout(vk.device, vk.descriptors, NULL);
@@ -80,6 +115,36 @@ static void close_backend(void)
     vk.pipeline = VK_NULL_HANDLE;
 }
 
+#ifdef NEUTRINO_VULKAN_RT
+static bool rt_supported(VkPhysicalDevice physical, uint32_t version)
+{
+    if (version < VK_API_VERSION_1_2 || !vk.features || !vk.properties || !vk.extensions) return false;
+    uint32_t count = 0;
+    if (vk.extensions(physical, NULL, &count, NULL) != VK_SUCCESS || !count || count > 4096) return false;
+    VkExtensionProperties *extensions = calloc(count, sizeof *extensions);
+    if (!extensions) return false;
+    bool supported = vk.extensions(physical, NULL, &count, extensions) == VK_SUCCESS;
+    for (size_t i = 0; supported && i < sizeof rt_extensions / sizeof *rt_extensions; ++i) {
+        supported = false;
+        for (uint32_t j = 0; j < count; ++j)
+            if (!strcmp(rt_extensions[i], extensions[j].extensionName)) {
+                supported = true;
+                break;
+            }
+    }
+    free(extensions);
+    if (!supported) return false;
+    VkPhysicalDeviceRayQueryFeaturesKHR query = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR structure = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR, .pNext = &query};
+    VkPhysicalDeviceBufferDeviceAddressFeatures address = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES, .pNext = &structure};
+    VkPhysicalDeviceFeatures2 features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &address};
+    vk.features(physical, &features);
+    return query.rayQuery && structure.accelerationStructure && address.bufferDeviceAddress;
+}
+#endif
+
 static VkPhysicalDevice compute_device(void)
 {
     uint32_t count = 0;
@@ -88,6 +153,7 @@ static VkPhysicalDevice compute_device(void)
     VkPhysicalDevice devices[64], best = VK_NULL_HANDLE;
     if (vk.EnumeratePhysicalDevices(vk.instance, &count, devices) != VK_SUCCESS) return VK_NULL_HANDLE;
     vk.rank = -1;
+    int best_score = -1;
     for (uint32_t i = 0; i < count; ++i) {
         VkPhysicalDeviceProperties properties;
         vk.GetPhysicalDeviceProperties(devices[i], &properties);
@@ -95,7 +161,12 @@ static VkPhysicalDevice compute_device(void)
         int rank = type == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3 :
             type == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 :
             type == VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU ? 1 : 0;
-        if (rank <= vk.rank) continue;
+        int score = rank;
+#ifdef NEUTRINO_VULKAN_RT
+        bool rt = rank >= 2 && rt_supported(devices[i], properties.apiVersion);
+        if (rt) score += 4;
+#endif
+        if (score <= best_score) continue;
         uint32_t families = 0;
         vk.GetPhysicalDeviceQueueFamilyProperties(devices[i], &families, NULL);
         if (!families || families > 256) continue;
@@ -106,6 +177,10 @@ static VkPhysicalDevice compute_device(void)
             best = devices[i];
             vk.family = j;
             vk.rank = rank;
+            best_score = score;
+#ifdef NEUTRINO_VULKAN_RT
+            vk.use_rt = rt;
+#endif
             break;
         }
     }
@@ -121,11 +196,25 @@ static bool init_backend(void)
     PFN_vkCreateInstance create = (PFN_vkCreateInstance)proc(VK_NULL_HANDLE, "vkCreateInstance");
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
                              .pApplicationName = "Neutrino", .apiVersion = VK_API_VERSION_1_0};
+#ifdef NEUTRINO_VULKAN_RT
+    PFN_vkEnumerateInstanceVersion loader_version =
+        (PFN_vkEnumerateInstanceVersion)proc(VK_NULL_HANDLE, "vkEnumerateInstanceVersion");
+    uint32_t version;
+    if (loader_version && loader_version(&version) == VK_SUCCESS && version >= VK_API_VERSION_1_2)
+        app.apiVersion = VK_API_VERSION_1_2;
+#endif
     VkInstanceCreateInfo instance = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app};
     if (!create || create(&instance, NULL, &vk.instance) != VK_SUCCESS) goto fail;
 #define LOAD_INSTANCE(name) vk.name = (PFN_vk##name)proc(vk.instance, "vk" #name); if (!vk.name) goto fail;
     INSTANCE_FUNCTIONS(LOAD_INSTANCE)
 #undef LOAD_INSTANCE
+#ifdef NEUTRINO_VULKAN_RT
+    if (app.apiVersion >= VK_API_VERSION_1_2) {
+        vk.features = (PFN_vkGetPhysicalDeviceFeatures2)proc(vk.instance, "vkGetPhysicalDeviceFeatures2");
+        vk.properties = (PFN_vkGetPhysicalDeviceProperties2)proc(vk.instance, "vkGetPhysicalDeviceProperties2");
+        vk.extensions = (PFN_vkEnumerateDeviceExtensionProperties)proc(vk.instance, "vkEnumerateDeviceExtensionProperties");
+    }
+#endif
     VkPhysicalDevice physical = compute_device();
     if (!physical) goto fail;
     vk.GetPhysicalDeviceMemoryProperties(physical, &vk.memory);
@@ -134,11 +223,47 @@ static bool init_backend(void)
         .queueFamilyIndex = vk.family, .queueCount = 1, .pQueuePriorities = &priority};
     VkDeviceCreateInfo device = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = 1, .pQueueCreateInfos = &queue};
-    if (vk.CreateDevice(physical, &device, NULL, &vk.device) != VK_SUCCESS) goto fail;
+#ifdef NEUTRINO_VULKAN_RT
+    VkPhysicalDeviceRayQueryFeaturesKHR query = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR, .rayQuery = VK_TRUE};
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR structure = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+        .pNext = &query, .accelerationStructure = VK_TRUE};
+    VkPhysicalDeviceBufferDeviceAddressFeatures address = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
+        .pNext = &structure, .bufferDeviceAddress = VK_TRUE};
+    if (vk.use_rt) {
+        device.pNext = &address;
+        device.enabledExtensionCount = sizeof rt_extensions / sizeof *rt_extensions;
+        device.ppEnabledExtensionNames = rt_extensions;
+        if (vk.CreateDevice(physical, &device, NULL, &vk.device) != VK_SUCCESS) {
+            vk.use_rt = false;
+            vk.device = VK_NULL_HANDLE;
+            device.pNext = NULL;
+            device.enabledExtensionCount = 0;
+            device.ppEnabledExtensionNames = NULL;
+        }
+    }
+#endif
+    if (!vk.device && vk.CreateDevice(physical, &device, NULL, &vk.device) != VK_SUCCESS) goto fail;
 #define LOAD_DEVICE(name) vk.name = (PFN_vk##name)vk.GetDeviceProcAddr(vk.device, "vk" #name); if (!vk.name) goto fail;
     DEVICE_FUNCTIONS(LOAD_DEVICE)
 #undef LOAD_DEVICE
     vk.GetDeviceQueue(vk.device, vk.family, 0, &vk.queue);
+#ifdef NEUTRINO_VULKAN_RT
+    if (vk.use_rt) {
+#define LOAD_RT(name) vk.name = (PFN_vk##name)vk.GetDeviceProcAddr(vk.device, "vk" #name); if (!vk.name) vk.use_rt = false;
+        RT_FUNCTIONS(LOAD_RT)
+#undef LOAD_RT
+        VkPhysicalDeviceAccelerationStructurePropertiesKHR structure_properties = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};
+        VkPhysicalDeviceProperties2 properties = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &structure_properties};
+        vk.properties(physical, &properties);
+        vk.scratch_alignment = structure_properties.minAccelerationStructureScratchOffsetAlignment;
+        if (!vk.scratch_alignment) vk.use_rt = false;
+    }
+#endif
     VkDescriptorSetLayoutBinding binding = {.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
     VkDescriptorSetLayoutCreateInfo descriptors = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -235,3 +360,250 @@ done:
     if (memory) vk.FreeMemory(vk.device, memory, NULL);
     return success ? (vk.rank ? "Vulkan GPU" : "Vulkan software") : NULL;
 }
+
+#ifdef NEUTRINO_VULKAN_RT
+typedef struct { VkBuffer buffer; VkDeviceMemory memory; VkDeviceAddress address; void *map; } RtBuffer;
+typedef struct { RtBuffer storage; VkAccelerationStructureKHR handle; } RtStructure;
+static struct {
+    RtStructure blas, tlas;
+    RtBox boxes[16];
+    size_t count;
+} rt_scene;
+
+static void rt_free_buffer(RtBuffer *buffer)
+{
+    if (buffer->map) vk.UnmapMemory(vk.device, buffer->memory);
+    if (buffer->buffer) vk.DestroyBuffer(vk.device, buffer->buffer, NULL);
+    if (buffer->memory) vk.FreeMemory(vk.device, buffer->memory, NULL);
+}
+static void rt_free_structure(RtStructure *structure)
+{
+    if (structure->handle) vk.DestroyAccelerationStructureKHR(vk.device, structure->handle, NULL);
+    rt_free_buffer(&structure->storage);
+}
+static void rt_release_scene(void)
+{
+    rt_free_structure(&rt_scene.tlas);
+    rt_free_structure(&rt_scene.blas);
+    memset(&rt_scene, 0, sizeof rt_scene);
+}
+
+static bool rt_buffer(RtBuffer *out, VkDeviceSize size, VkBufferUsageFlags usage, bool upload)
+{
+    const bool address = (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0;
+    VkBufferCreateInfo info = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = usage};
+    if (vk.CreateBuffer(vk.device, &info, NULL, &out->buffer) != VK_SUCCESS) return false;
+    VkMemoryRequirements requirements;
+    vk.GetBufferMemoryRequirements(vk.device, out->buffer, &requirements);
+    VkMemoryPropertyFlags flags = upload ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT :
+                                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    uint32_t type = 0;
+    for (; type < vk.memory.memoryTypeCount; ++type)
+        if ((requirements.memoryTypeBits & (1u << type)) &&
+            (vk.memory.memoryTypes[type].propertyFlags & flags) == flags) break;
+    if (type == vk.memory.memoryTypeCount) return false;
+    VkMemoryAllocateFlagsInfo address_flag = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+                                             .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+    VkMemoryAllocateInfo allocation = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = address ? &address_flag : NULL, .allocationSize = requirements.size, .memoryTypeIndex = type};
+    if (vk.AllocateMemory(vk.device, &allocation, NULL, &out->memory) != VK_SUCCESS ||
+        vk.BindBufferMemory(vk.device, out->buffer, out->memory, 0) != VK_SUCCESS) return false;
+    if (address) {
+        VkBufferDeviceAddressInfo query = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = out->buffer};
+        out->address = vk.GetBufferDeviceAddress(vk.device, &query);
+        if (!out->address) return false;
+    }
+    return !upload || vk.MapMemory(vk.device, out->memory, 0, size, 0, &out->map) == VK_SUCCESS;
+}
+
+static bool rt_build_info(RtStructure *out, RtBuffer *scratch,
+                          VkAccelerationStructureBuildGeometryInfoKHR *build, uint32_t primitives)
+{
+    VkAccelerationStructureBuildSizesInfoKHR sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    vk.GetAccelerationStructureBuildSizesKHR(vk.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                            build, &primitives, &sizes);
+    if (!rt_buffer(&out->storage, sizes.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, false) ||
+        !rt_buffer(scratch, sizes.buildScratchSize + vk.scratch_alignment - 1,
+                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, false)) return false;
+    VkAccelerationStructureCreateInfoKHR info = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+        .buffer = out->storage.buffer, .size = sizes.accelerationStructureSize, .type = build->type};
+    if (vk.CreateAccelerationStructureKHR(vk.device, &info, NULL, &out->handle) != VK_SUCCESS) return false;
+    build->dstAccelerationStructure = out->handle;
+    build->scratchData.deviceAddress = (scratch->address + vk.scratch_alignment - 1) &
+                                      ~((VkDeviceAddress)vk.scratch_alignment - 1);
+    return true;
+}
+
+static bool init_rt_pipeline(void)
+{
+    if (!init_backend() || !vk.use_rt) return false;
+    if (vk.rt_pipeline) return true;
+    VkDescriptorSetLayoutBinding bindings[] = {
+        {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT},
+        {.binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
+         .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT}
+    };
+    VkDescriptorSetLayoutCreateInfo descriptors = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 2, .pBindings = bindings};
+    if (vk.CreateDescriptorSetLayout(vk.device, &descriptors, NULL, &vk.rt_descriptors) != VK_SUCCESS) goto fail;
+    VkPushConstantRange push = {.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .size = 2 * sizeof(uint32_t)};
+    VkPipelineLayoutCreateInfo layout = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1, .pSetLayouts = &vk.rt_descriptors, .pushConstantRangeCount = 1, .pPushConstantRanges = &push};
+    if (vk.CreatePipelineLayout(vk.device, &layout, NULL, &vk.rt_layout) != VK_SUCCESS) goto fail;
+    VkShaderModule shader;
+    VkShaderModuleCreateInfo module = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = sizeof neutrino_ray_query_spv, .pCode = neutrino_ray_query_spv};
+    if (vk.CreateShaderModule(vk.device, &module, NULL, &shader) != VK_SUCCESS) goto fail;
+    VkComputePipelineCreateInfo pipeline = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .layout = vk.rt_layout, .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = shader, .pName = "main"}};
+    VkResult result = vk.CreateComputePipelines(vk.device, VK_NULL_HANDLE, 1, &pipeline, NULL, &vk.rt_pipeline);
+    vk.DestroyShaderModule(vk.device, shader, NULL);
+    if (result == VK_SUCCESS) return true;
+fail:
+    vk.use_rt = false;
+    return false;
+}
+
+bool ray_vulkan_rt(const RtRay *rays, size_t count, const RtBox *boxes, size_t box_count, RtHit *hits)
+{
+    if (!count || count > 4096 || !box_count || box_count > 16 || !init_rt_pipeline()) return false;
+    static_assert(sizeof(RtBox) == sizeof(VkAabbPositionsKHR), "Vulkan AABB layout");
+    static_assert(sizeof(RtRay) == 6 * sizeof(float) && sizeof(RtHit) == 2 * sizeof(float), "RT shader buffer layout");
+    RtStructure blas = {0}, tlas = {0};
+    RtBuffer bounds = {0}, instance = {0}, bottom_scratch = {0}, top_scratch = {0}, data = {0};
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    VkCommandPool commands = VK_NULL_HANDLE;
+    bool success = false;
+    bool build_scene = rt_scene.count != box_count ||
+                       memcmp(rt_scene.boxes, boxes, box_count * sizeof *boxes) != 0;
+    const VkBufferUsageFlags input = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+                                    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    size_t input_size = count * sizeof *rays + box_count * sizeof *boxes;
+    size_t size = input_size + count * sizeof *hits;
+    if (!rt_buffer(&data, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true)) goto done;
+    memcpy(data.map, rays, count * sizeof *rays);
+    memcpy((unsigned char *)data.map + count * sizeof *rays, boxes, box_count * sizeof *boxes);
+    VkAccelerationStructureGeometryKHR geometry = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+        .geometryType = VK_GEOMETRY_TYPE_AABBS_KHR, .geometry.aabbs = {
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR,
+            .stride = sizeof(VkAabbPositionsKHR)}};
+    VkAccelerationStructureBuildGeometryInfoKHR bottom = {
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+        .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+        .geometryCount = 1, .pGeometries = &geometry};
+    VkAccelerationStructureGeometryKHR instances = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+        .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR, .geometry.instances = {
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR}};
+    VkAccelerationStructureBuildGeometryInfoKHR top = {
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+        .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+        .geometryCount = 1, .pGeometries = &instances};
+    if (build_scene) {
+        if (!rt_buffer(&bounds, box_count * sizeof(VkAabbPositionsKHR), input, true) ||
+            !rt_buffer(&instance, sizeof(VkAccelerationStructureInstanceKHR), input, true)) goto done;
+        RtBox *conservative = bounds.map;
+        for (size_t i = 0; i < box_count; ++i) {
+            for (int axis = 0; axis < 3; ++axis) {
+                float scale = fmaxf(1, fmaxf(fabsf(boxes[i].lo[axis]), fabsf(boxes[i].hi[axis])));
+                float pad = 8 * FLT_EPSILON * scale;
+                conservative[i].lo[axis] = boxes[i].lo[axis] - pad;
+                conservative[i].hi[axis] = boxes[i].hi[axis] + pad;
+            }
+        }
+        geometry.geometry.aabbs.data.deviceAddress = bounds.address;
+        instances.geometry.instances.data.deviceAddress = instance.address;
+        if (!rt_build_info(&blas, &bottom_scratch, &bottom, (uint32_t)box_count) ||
+            !rt_build_info(&tlas, &top_scratch, &top, 1)) goto done;
+        VkAccelerationStructureDeviceAddressInfoKHR address = {
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR, .accelerationStructure = blas.handle};
+        VkDeviceAddress blas_address = vk.GetAccelerationStructureDeviceAddressKHR(vk.device, &address);
+        if (!blas_address) goto done;
+        VkAccelerationStructureInstanceKHR object = {
+            .transform.matrix = {{1,0,0,0}, {0,1,0,0}, {0,0,1,0}}, .mask = 0xff,
+            .accelerationStructureReference = blas_address};
+        memcpy(instance.map, &object, sizeof object);
+    }
+
+    VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+                                    {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1}};
+    VkDescriptorPoolCreateInfo descriptor_pool = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = 1, .poolSizeCount = 2, .pPoolSizes = sizes};
+    if (vk.CreateDescriptorPool(vk.device, &descriptor_pool, NULL, &pool) != VK_SUCCESS) goto done;
+    VkDescriptorSet set;
+    VkDescriptorSetAllocateInfo descriptors = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = pool, .descriptorSetCount = 1, .pSetLayouts = &vk.rt_descriptors};
+    if (vk.AllocateDescriptorSets(vk.device, &descriptors, &set) != VK_SUCCESS) goto done;
+    VkDescriptorBufferInfo storage = {.buffer = data.buffer, .range = size};
+    VkWriteDescriptorSetAccelerationStructureKHR scene = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+        .accelerationStructureCount = 1, .pAccelerationStructures = build_scene ? &tlas.handle : &rt_scene.tlas.handle};
+    VkWriteDescriptorSet writes[] = {
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0,
+         .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &storage},
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = &scene, .dstSet = set, .dstBinding = 1,
+         .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR}
+    };
+    vk.UpdateDescriptorSets(vk.device, 2, writes, 0, NULL);
+    VkCommandPoolCreateInfo command_pool = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, .queueFamilyIndex = vk.family};
+    if (vk.CreateCommandPool(vk.device, &command_pool, NULL, &commands) != VK_SUCCESS) goto done;
+    VkCommandBuffer command;
+    VkCommandBufferAllocateInfo allocation = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = commands, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
+    VkCommandBufferBeginInfo begin = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    if (vk.AllocateCommandBuffers(vk.device, &allocation, &command) != VK_SUCCESS ||
+        vk.BeginCommandBuffer(command, &begin) != VK_SUCCESS) goto done;
+    VkAccelerationStructureBuildRangeInfoKHR bottom_range = {.primitiveCount = (uint32_t)box_count};
+    VkAccelerationStructureBuildRangeInfoKHR top_range = {.primitiveCount = 1};
+    const VkAccelerationStructureBuildRangeInfoKHR *range = &bottom_range;
+    VkMemoryBarrier build_barrier = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+        .dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR};
+    if (build_scene) {
+        vk.CmdBuildAccelerationStructuresKHR(command, 1, &bottom, &range);
+        vk.CmdPipelineBarrier(command, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                              VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &build_barrier, 0, NULL, 0, NULL);
+        range = &top_range;
+        vk.CmdBuildAccelerationStructuresKHR(command, 1, &top, &range);
+    }
+    vk.CmdPipelineBarrier(command, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &build_barrier, 0, NULL, 0, NULL);
+    vk.CmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, vk.rt_pipeline);
+    vk.CmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, vk.rt_layout, 0, 1, &set, 0, NULL);
+    uint32_t limits[] = {(uint32_t)count, (uint32_t)box_count};
+    vk.CmdPushConstants(command, vk.rt_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof limits, limits);
+    vk.CmdDispatch(command, (limits[0] + 63) / 64, 1, 1);
+    VkMemoryBarrier readback = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
+    vk.CmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                         0, 1, &readback, 0, NULL, 0, NULL);
+    if (vk.EndCommandBuffer(command) != VK_SUCCESS) goto done;
+    VkSubmitInfo submit = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &command};
+    success = vk.QueueSubmit(vk.queue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS && vk.QueueWaitIdle(vk.queue) == VK_SUCCESS;
+    if (success) memcpy(hits, (unsigned char *)data.map + input_size, count * sizeof *hits);
+
+done:
+    if (commands) vk.DestroyCommandPool(vk.device, commands, NULL);
+    if (pool) vk.DestroyDescriptorPool(vk.device, pool, NULL);
+    if (success && build_scene) {
+        rt_release_scene();
+        rt_scene.blas = blas;
+        rt_scene.tlas = tlas;
+        memcpy(rt_scene.boxes, boxes, box_count * sizeof *boxes);
+        rt_scene.count = box_count;
+    } else {
+        rt_free_structure(&tlas);
+        rt_free_structure(&blas);
+    }
+    rt_free_buffer(&top_scratch);
+    rt_free_buffer(&bottom_scratch);
+    rt_free_buffer(&data);
+    rt_free_buffer(&instance);
+    rt_free_buffer(&bounds);
+    return success;
+}
+#endif

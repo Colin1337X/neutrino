@@ -7,7 +7,15 @@
 /* Three origin, direction, lower and upper coordinates, in that order.
    Direction defines the parameterization. A negative hit means a miss. */
 enum { RAY_VALUES = 12 };
+#ifdef NEUTRINO_VULKAN_RT
+typedef struct { float origin[3], direction[3]; } RtRay;
+typedef struct { float lo[3], hi[3]; } RtBox;
+typedef struct { float distance, box; } RtHit;
+/* box is a zero-based index, or -1 for a miss. */
+bool ray_vulkan_rt(const RtRay *rays, size_t count, const RtBox *boxes, size_t box_count, RtHit *hits);
+#endif
 bool ray_gpu(const float *rays, size_t count, float *hits);
+bool flow_pressure_gpu(int resolution, const double weights[3], const double *rhs, double *pressure, int sweeps);
 #ifdef NEUTRINO_VULKAN
 const char *ray_vulkan(const float *rays, size_t count, float *hits, bool hardware_only);
 #endif

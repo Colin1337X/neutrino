@@ -1,0 +1,35 @@
+name: Benchmark smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gateway-history:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and test the Release executable
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang-20 libcurl4-openssl-dev
+          multiarch="$(gcc -print-multiarch)"
+          CC=clang-20 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCURL_NO_CURL_CMAKE=ON "-DCURL_INCLUDE_DIR=/usr/include/$multiarch" \
+            "-DCURL_LIBRARY=/usr/lib/$multiarch/libcurl.so"
+          cmake --build build --parallel 3
+          ctest --test-dir build --output-on-failure --no-tests=error
+          cmake --build build --target ray_scaling_bench
+          build/ray_scaling_bench cpu > ray-scaling.csv
+      - name: Check a long history through the gateway
+        run: |
+          python3 benchmarks/gateway_history.py build/neutrino
+          python3 benchmarks/gateway_history.py build/neutrino --fault 429
+          python3 benchmarks/gateway_history.py build/neutrino --branches branch-evidence.json

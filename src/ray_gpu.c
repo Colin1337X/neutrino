@@ -36,7 +36,7 @@ typedef struct _cl_program *Program;
 typedef struct _cl_kernel *Kernel;
 typedef struct _cl_mem *Buffer;
 typedef struct _cl_event *Event;
-enum { CL_GPU = 1 << 2, CL_WRITE_ONLY = 1 << 1, CL_READ_ONLY = 1 << 2, CL_COPY_HOST = 1 << 5 };
+enum { CL_GPU = 1 << 2, CL_READ_WRITE = 1, CL_WRITE_ONLY = 1 << 1, CL_READ_ONLY = 1 << 2, CL_COPY_HOST = 1 << 5 };
 
 #define OPENCL_API(F) \
     F(I32, GetPlatformIDs, (U32, Platform *, U32 *)) \
@@ -65,8 +65,10 @@ static struct {
     Library library;
     Context context;
     Queue queue;
+    Device device;
     Kernel kernel;
-    bool attempted;
+    Kernel pressure;
+    bool attempted, pressure_attempted;
 #define FIELD(result, name, args) Fn##name name;
     OPENCL_API(FIELD)
 #undef FIELD
@@ -82,6 +84,7 @@ static const char kernel_source[] =
 
 static void close_gpu(void)
 {
+    if (gpu.pressure) gpu.ReleaseKernel(gpu.pressure);
     if (gpu.kernel) gpu.ReleaseKernel(gpu.kernel);
     if (gpu.queue) gpu.ReleaseCommandQueue(gpu.queue);
     if (gpu.context) gpu.ReleaseContext(gpu.context);
@@ -117,6 +120,7 @@ static bool init_gpu(void)
         device = nullptr;
     }
     if (!device) goto failed;
+    gpu.device = device;
     gpu.context = gpu.CreateContext(nullptr, 1, &device, nullptr, nullptr, nullptr);
     if (!gpu.context) goto failed;
     gpu.queue = gpu.CreateCommandQueue(gpu.context, device, 0, nullptr);
@@ -147,5 +151,61 @@ bool ray_gpu(const float *rays, size_t count, float *hits)
         !gpu.EnqueueReadBuffer(gpu.queue, output, 1, 0, count * sizeof(float), hits, 0, nullptr, nullptr);
     if (output) gpu.ReleaseMemObject(output);
     if (input) gpu.ReleaseMemObject(input);
+    return ok;
+}
+
+static bool init_pressure(void)
+{
+    if (!init_gpu()) return false;
+    if (gpu.pressure_attempted) return gpu.pressure != nullptr;
+    gpu.pressure_attempted = true;
+    const char *code =
+        "kernel void pressure(global const float *rhs, global const float *a, global float *b,"
+        " int n, float wx, float wy, float wz) {"
+        " int i=(int)get_global_id(0), x=i%n, y=(i/n)%n, z=i/(n*n);"
+        " int dx0=x ? -1 : n-1, dx1=x+1<n ? 1 : 1-n;"
+        " int dy0=y ? -n : n*(n-1), dy1=y+1<n ? n : n*(1-n);"
+        " int dz0=z ? -n*n : n*n*(n-1), dz1=z+1<n ? n*n : n*n*(1-n);"
+        " float adjacent=wx*(a[i+dx0]+a[i+dx1])+wy*(a[i+dy0]+a[i+dy1])+wz*(a[i+dz0]+a[i+dz1]);"
+        " b[i]=a[i]+(2.0f/3.0f)*((adjacent-rhs[i])/(2.0f*(wx+wy+wz))-a[i]);"
+        "}";
+    Program program = gpu.CreateProgramWithSource(gpu.context,1,&code,nullptr,nullptr);
+    if (!program) return false;
+    if (!gpu.BuildProgram(program,1,&gpu.device,"-cl-std=CL1.2",nullptr,nullptr))
+        gpu.pressure = gpu.CreateKernel(program,"pressure",nullptr);
+    gpu.ReleaseProgram(program);
+    return gpu.pressure != nullptr;
+}
+
+bool flow_pressure_gpu(int resolution, const double weights[3], const double *rhs, double *pressure, int sweeps)
+{
+    if (resolution < 6 || resolution > 24 || sweeps < 1 || sweeps > 64 || !init_pressure()) return false;
+    size_t cells = (size_t)resolution*resolution*resolution, bytes = cells*sizeof(float);
+    float *host = malloc(bytes);
+    if (!host) return false;
+    for (size_t i = 0; i < cells; ++i) host[i] = (float)rhs[i];
+    Buffer forcing = gpu.CreateBuffer(gpu.context,CL_READ_ONLY|CL_COPY_HOST,bytes,host,nullptr);
+    for (size_t i = 0; i < cells; ++i) host[i] = 0;
+    Buffer in = gpu.CreateBuffer(gpu.context,CL_READ_WRITE|CL_COPY_HOST,bytes,host,nullptr);
+    Buffer out = gpu.CreateBuffer(gpu.context,CL_READ_WRITE,bytes,nullptr,nullptr);
+    float factors[3] = {(float)weights[0],(float)weights[1],(float)weights[2]};
+    bool ok = forcing && in && out && !gpu.SetKernelArg(gpu.pressure,0,sizeof forcing,&forcing) &&
+        !gpu.SetKernelArg(gpu.pressure,3,sizeof resolution,&resolution);
+    for (U32 axis=0; ok && axis<3; ++axis)
+        ok = !gpu.SetKernelArg(gpu.pressure,axis+4,sizeof factors[axis],&factors[axis]);
+    for (int pass=0; ok && pass<sweeps; ++pass) {
+        ok = !gpu.SetKernelArg(gpu.pressure,1,sizeof in,&in) &&
+             !gpu.SetKernelArg(gpu.pressure,2,sizeof out,&out) &&
+             !gpu.EnqueueNDRangeKernel(gpu.queue,gpu.pressure,1,nullptr,&cells,nullptr,0,nullptr,nullptr);
+        Buffer swap = in;
+        in = out;
+        out = swap;
+    }
+    if (ok) ok = !gpu.EnqueueReadBuffer(gpu.queue,in,1,0,bytes,host,0,nullptr,nullptr);
+    if (ok) for (size_t i=0; i<cells; ++i) pressure[i] = host[i];
+    if (out) gpu.ReleaseMemObject(out);
+    if (in) gpu.ReleaseMemObject(in);
+    if (forcing) gpu.ReleaseMemObject(forcing);
+    free(host);
     return ok;
 }

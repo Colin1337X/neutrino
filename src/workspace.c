@@ -116,7 +116,7 @@ static wchar_t *wide_path(const char *path)
 }
 #endif
 
-static char *read_bytes(const char *path, size_t *size)
+static char *read_bytes(const char *path, size_t *size, size_t limit)
 {
 #ifdef _WIN32
     wchar_t *wide = wide_path(path);
@@ -130,22 +130,35 @@ static char *read_bytes(const char *path, size_t *size)
     Text out = {0};
     char chunk[8192];
     size_t n;
-    while ((n = fread(chunk, 1, sizeof chunk, f)) && out.len + n <= FILE_LIMIT)
-        append_n(&out, chunk, n);
+    bool out_of_memory = false;
+    while ((n = fread(chunk,1,sizeof chunk,f)) && n <= limit-out.len) {
+        const size_t need = out.len+n+1;
+        if (need > out.cap) {
+            size_t cap = out.cap <= SIZE_MAX/2 ? out.cap*2 : out.cap;
+            if (cap < need) cap = need;
+            char *next = realloc(out.data,cap);
+            if (!next) { out_of_memory = true; break; }
+            out.data = next;
+            out.cap = cap;
+        }
+        memcpy(out.data+out.len,chunk,n);
+        out.len += n;
+        out.data[out.len] = 0;
+    }
     bool failed = n != 0 || ferror(f);
     fclose(f);
     if (failed) {
         release(&out);
-        errno = EIO;
+        errno = out_of_memory ? ENOMEM : EIO;
         return NULL;
     }
     *size = out.len;
     return out.data ? out.data : copy("");
 }
-char *read_file(const char *path)
+static char *read_text(const char *path, size_t limit)
 {
     size_t n;
-    char *data = read_bytes(path, &n);
+    char *data = read_bytes(path, &n, limit);
     if (data && memchr(data, 0, n)) {
         free(data);
         errno = EINVAL;
@@ -153,6 +166,7 @@ char *read_file(const char *path)
     }
     return data;
 }
+char *read_file(const char *path) { return read_text(path,FILE_LIMIT); }
 
 bool write_file(const char *path, const char *data, bool replace)
 {
@@ -374,7 +388,7 @@ bool workspace_open(Workspace *ws, const char *path, bool writable)
 {
     *ws = (Workspace){.path = path};
     if (path && writable && !lock_workspace(ws)) return false;
-    char *data = path ? read_file(path) : NULL;
+    char *data = path ? read_text(path,SIZE_MAX-1) : NULL;
     if (path && !data && errno != ENOENT) { workspace_close(ws); return false; }
     ws->root = cJSON_ParseWithOpts(data ? data : "{\"records\":[],\"config\":{}}", NULL, 1);
     free(data);
@@ -395,7 +409,7 @@ static bool save_as(const Workspace *ws, const char *path, bool replace)
         cJSON_DeleteItemFromObjectCaseSensitive(profile, "api_key");
     }
     char *data = cJSON_PrintUnformatted(safe);
-    bool ok = data && strlen(data) <= FILE_LIMIT && write_file(path, data, replace);
+    bool ok = data && write_file(path, data, replace);
     cJSON_free(data);
     cJSON_Delete(safe);
     return ok;
@@ -828,7 +842,7 @@ static Json *import_sillytavern(Workspace *ws, const char *input)
 Json *workspace_import(Workspace *ws, const char *path, Text *error)
 {
     size_t size;
-    char *data = read_bytes(path, &size);
+    char *data = read_bytes(path, &size, FILE_LIMIT);
     if (!data) { append(error, "Could not read import file."); return NULL; }
     Json *result = workspace_import_data(ws, path, data, size, error);
     free(data);

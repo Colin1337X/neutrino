@@ -105,6 +105,7 @@ size_t utf_encode(int cp, char bytes[4]);
 int utf_width(const char *s, size_t n);
 
 typedef struct Inference Inference;
+enum { NEUTRINO_GATEWAY_MESSAGE_LIMIT = 512 };
 typedef struct {
     int slot, max_tokens, timeout_ms;
     const char *json_schema;

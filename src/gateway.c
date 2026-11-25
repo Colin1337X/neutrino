@@ -295,7 +295,8 @@ static void parse_request(Client *c, const char *token, const Gateway *gateway)
     if (ready >= READY_LIMIT) { http_error(c, 503, "Gateway Busy"); return; }
     Json *body = cJSON_ParseWithOpts(s + offset, NULL, 1);
     Json *messages = at(body, "messages");
-    if (!cJSON_IsArray(messages) || !messages->child || cJSON_GetArraySize(messages) > 512 ||
+    if (!cJSON_IsArray(messages) || !messages->child ||
+        cJSON_GetArraySize(messages) > NEUTRINO_GATEWAY_MESSAGE_LIMIT ||
         !route_for(js(body, "model"), &c->route)) {
         http_error(c, 400, "Invalid Messages Or Unconfigured Model");
     } else {

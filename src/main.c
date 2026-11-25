@@ -575,7 +575,7 @@ static void messages_for_story(App *a, Json *messages)
     if (*js(p->story, "authorNote")) format(&system, "\nAuthor's note: %s", js(p->story, "authorNote"));
     if (p->messages_context.len) format(&system, "\n\nStory sources:\n%s", str(&p->messages_context));
     if (p->world_context.len)
-        format(&system, "\n\nCurrent world state (set through player actions):\n%s", str(&p->world_context));
+        format(&system, "\n\nWorld state before the narrator's tool calls:\n%s", str(&p->world_context));
     if (p->speaker.len)
         format(&system, "\nThe player addressed %s. Reply as that character in the current room.", str(&p->speaker));
     Json *preset = at(p->story, "preset"), *prompt;
@@ -606,14 +606,18 @@ static void messages_for_story(App *a, Json *messages)
     release(&system);
     size_t bytes = 0;
     int total = cJSON_GetArraySize(path), first = total;
+    /* Reserve room for the continuation cue when the history ends in an assistant turn. */
+    int history_limit = NEUTRINO_GATEWAY_MESSAGE_LIMIT - cJSON_GetArraySize(messages) - 1;
     node = path->child ? path->child->prev : NULL;
-    while (first > 0 && node) {
+    while (first > 0 && node && total - first < history_limit) {
         size_t n = strlen(js(node, "content"));
         if (n > 64000 - bytes) break;
         bytes += n;
         first--;
         node = node->prev;
     }
+    if (total - first == history_limit && node && node->next && node->next != last &&
+        !strcmp(js(node->next, "role"), "assistant")) first++;
     if (first < covered) first = covered;
     if (first > covered) format(&p->selection_trace, "%d older messages omitted by the history size limit.\n", first - covered);
     if (covered) format(&p->selection_trace, "Recap covers the first %d visible messages.\n", covered);
@@ -660,8 +664,9 @@ static void messages_for_story(App *a, Json *messages)
             append(&revision, "\n\nGive a self-contained reply in one or two short, complete sentences. "
                               "End the last sentence with punctuation.");
         if (p->tool_feedback.len && !p->tool_prose_only)
-            append(&revision, "\n\nUse the completed tool results above and continue in plain story prose. "
-                              "Request another tool only if a different calculation is still needed.");
+            append(&revision, "\n\nUse the completed tool results above to decide what happens next. "
+                              "If a new measurement or scene change is needed, return only that tool request. "
+                              "Otherwise continue in plain in-character prose.");
         if (p->reading_count)
             append(&revision, " Describe the effect in words and leave measurements to the instrument readout.");
         set(latest, "content", str(&revision));

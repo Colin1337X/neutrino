@@ -23,7 +23,7 @@ typedef struct {
     char label[64];
     bool finished;
 } Candidate;
-enum { SIM_TOOL_LIMIT = 3, ACOUSTIC_BLOCKERS = 16, ACOUSTIC_ROOM_PATHS = 7,
+enum { SIM_TOOL_LIMIT = 12, ACOUSTIC_BLOCKERS = 16, ACOUSTIC_ROOM_PATHS = 7,
        PHYSICS_ACOUSTIC_PATHS = ACOUSTIC_ROOM_PATHS + 6 * ACOUSTIC_BLOCKERS };
 typedef enum { READING_NONE, READING_FLUID, READING_ACOUSTIC } ReadingKind;
 typedef struct {
@@ -141,8 +141,11 @@ const char *world_room(const Json *story, int head, Text *out);
 bool world_address(const Json *story, const char *line, Text *speaker, const char **message);
 const char *world_character_room(const Json *story, int head, const char *name, Text *out);
 bool world_inventory_tool(Json *story, int head, const Json *args);
+bool world_edit(Json *story, int head, const Json *args);
+bool world_inspect(const Json *story, int head, const Json *args, Text *out);
 bool physics_run(const char *name, const Json *args, const Json *settings, Text *out);
 bool physics_run_reading(const char *name, const Json *args, const Json *settings, Text *out, PhysicsReading *reading);
+bool physics_scene_edit(Json *settings, const Json *op);
 bool physics_prose_matches(const PhysicsReading *readings, int count, const char *body);
 void physics_prose_readouts(const PhysicsReading *readings, int count, Text *body);
 bool physics_tune(Json *settings, const Json *op);

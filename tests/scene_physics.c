@@ -1,4 +1,6 @@
 #include "app.h"
+#include "ray.h"
+#include "physics_models.h"
 
 #include <float.h>
 #include <math.h>
@@ -120,6 +122,318 @@ static bool ordered_protocol(void)
         cJSON_GetArraySize(p.tool_pending) == 2 && !at(p.story, "simLog");
     free_protocol(&p);
     release(&plan);
+    return ok;
+}
+
+static bool scene_protocol(const char *backend)
+{
+    const char *room = "{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[8,5,4]}";
+    const char *wall = "{\"neutrino_tool\":\"scene_place\",\"name\":\"Divider\",\"kind\":\"wall\","
+                       "\"min\":[2.5,1,1],\"max\":[3.5,3,3]}";
+    const char *prop = "{\"neutrino_tool\":\"scene_place\",\"name\":\"Shelf\",\"kind\":\"object\","
+                       "\"min\":[0.5,1.5,3],\"max\":[1.5,2.5,3.5]}";
+    const char *sound = "{\"neutrino_tool\":\"scene_acoustic\",\"source\":[1,2,2],\"listener\":[5,2,2],"
+                        "\"backend\":\"cpu\"}";
+    Preview p = {.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    Text plan = {0}, context = {0};
+    format(&plan, "{\"actions\":[%s,%s,%s,{\"neutrino_tool\":\"scene_rays\",\"origin\":[1,2,2],"
+           "\"directions\":[[1,0,0],[0,0,1],[0,0,-1]],\"backend\":\"%s\"}],\"continue\":true}",
+           room, wall, prop, backend);
+    bool ok = simulation_tool_reply(&p, str(&plan)) == SIM_REGENERATE &&
+        !p.tool_prose_only && p.tool_rounds == 4 && !at(p.story, "simLog") &&
+        strstr(str(&p.tool_results), "Divider 1.5 m; Shelf 1 m; room boundary 2 m;");
+    simulation_prompt(&p, &context);
+    ok = ok && strstr(str(&context), "8 tool operations left") &&
+         strstr(str(&context), "3D room in metres") && strstr(str(&context), "Shelf");
+    clear(&plan);
+    format(&plan, "{\"actions\":[{\"neutrino_tool\":\"scene_remove\",\"name\":\"Divider\"},%s]}",
+           "{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[1,1,1]}");
+    ok = ok && simulation_tool_reply(&p, str(&plan)) == SIM_REGENERATE && !p.tool_prose_only &&
+         strstr(str(&p.tool_results), "rejected at step 2");
+    clear(&plan);
+    format(&plan, "{\"actions\":[%s,{\"neutrino_tool\":\"scene_rays\","
+           "\"origin\":[1,2,2],\"count\":4096,\"backend\":\"%s\"}]}", sound, backend);
+    ok = ok && simulation_tool_reply(&p, str(&plan)) == SIM_REGENERATE &&
+         p.tool_prose_only && p.reading_count == 1 &&
+         strstr(str(&p.tool_results), "Direct blocked.") && strstr(str(&p.tool_results), "4096 rays") &&
+         (strcmp(backend, "rt") || strstr(str(&p.tool_results), "Vulkan hardware RT")) &&
+         cJSON_GetArraySize(p.tool_pending) == 3 &&
+         simulation_tool_reply(&p, "Iona hears an echo around the divider.") == SIM_NARRATIVE;
+    release(&context);
+    release(&plan);
+    free_protocol(&p);
+    return ok;
+}
+
+#ifdef NEUTRINO_VULKAN_RT
+static float reference_slab(const float *row)
+{
+    RAY_SLAB_BODY
+}
+
+static bool rt_parity(void)
+{
+    RtBox boxes[] = {
+        {{2, -1, -1}, {3, 1, 1}}, {{4, -1, -1}, {5, 2, 2}}, {{2, -1, -1}, {3, 1, 1}}
+    };
+    static RtRay rays[4096];
+    static RtHit hits[4096];
+    for (size_t i = 0; i < 4096; ++i) {
+        rays[i] = (RtRay){{(i % 4 == 0) ? 2.5f : 0, (float)(i % 13) * .25f - 1.5f,
+                           (float)(i % 17) * .125f - 1},
+                          {(i % 6 == 0) ? -1 : 1, (i % 3 == 0) ? 0 : .125f, 0}};
+    }
+    rays[0] = (RtRay){{2.5f, 0, 0}, {0, 0, 0}};
+    for (int pass = 0; pass < 3; ++pass) {
+        if (pass == 2) boxes[0].lo[0] = 2.75f;
+        if (!ray_vulkan_rt(rays, 4096, boxes, sizeof boxes / sizeof *boxes, hits)) return false;
+        for (size_t i = 0; i < 4096; ++i) {
+            int winner = -1;
+            float expected = -1;
+            for (size_t box = 0; box < sizeof boxes / sizeof *boxes; ++box) {
+                float row[RAY_VALUES];
+                memcpy(row, &rays[i], sizeof rays[i]);
+                memcpy(row + 6, &boxes[box], sizeof boxes[box]);
+                float hit = reference_slab(row);
+                if (hit >= 0 && (winner < 0 || hit < expected)) {
+                    expected = hit;
+                    winner = (int)box;
+                }
+            }
+            if (hits[i].box != (float)winner || !(fabsf(hits[i].distance - expected) < 1e-5f)) {
+                fprintf(stderr, "RT parity pass %d ray %zu: expected box %d at %g, got box %g at %g\n",
+                        pass, i, winner, expected, hits[i].box, hits[i].distance);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+#endif
+
+static bool extended_models(void)
+{
+    const struct {const char *tool, *args, *expected;} cases[] = {
+        {"elastic3d","{\"size\":[2,1,1],\"force\":[1000,0,0],\"young_pa\":1000000,\"poisson\":0.25}",
+         "deformed size [2.002, 0.99975, 0.99975] m"},
+        {"elastic3d","{\"size\":[1,1,1],\"force\":[1000,0,0],\"young_pa\":1}",nullptr},
+        {"elastic3d","{\"model\":\"cantilever\",\"size\":[2,0.2,0.2],\"force\":[0,0,100],\"young_pa\":200000000000}",
+         "tip displacement [0, 0, 1e-05] m"},
+        {"softbody3d","{\"size\":[1,2,3],\"mass_kg\":1,\"stiffness\":100,\"seconds\":0}",
+         "top displacement [0, 0, 0]"},
+        {"softbody3d","{\"size\":[1,2,3],\"mass_kg\":1,\"stiffness\":10,\"resolution\":5,\"seconds\":0.001}",
+         "125 mass nodes"},
+        {"softbody3d","{\"size\":[1,2,3],\"mass_kg\":10,\"stiffness\":10,\"nodes\":100003,"
+         "\"seconds\":0.001,\"sample_node\":100002}", "Sampled node 100002"},
+        {"softbody3d","{\"size\":[1,2,3],\"mass_kg\":1,\"stiffness\":10,\"resolution\":[16,17,18],\"seconds\":0.001}",
+         "4896 mass nodes"},
+        {"softbody3d","{\"size\":[1,2,3],\"mass_kg\":1,\"stiffness\":10,\"nodes\":1000000000000,\"seconds\":0}",
+         "1000000000000 mass nodes"},
+        {"softbody3d","{\"size\":[1,2,3],\"mass_kg\":1,\"stiffness\":10,\"nodes\":125,\"resolution\":5,\"seconds\":0}",
+         nullptr},
+#ifdef _WIN32
+        {"softbody3d","{\"size\":[1,2,3],\"mass_kg\":1,\"stiffness\":10,\"nodes\":4099,"
+         "\"seconds\":0.001,\"memory\":\"mapped\"}", "4099 mass nodes, temporary file mapping"},
+#endif
+        {"trajectory3d","{\"origin\":[1,2,10],\"velocity\":[1,2,3],\"seconds\":1}",
+         "position [2, 4, 8.096675] m"},
+        {"thermal3d","{\"kelvin\":300,\"ambient_kelvin\":300,\"heat_capacity_j_k\":50,\"power_w\":250,\"seconds\":2}",
+         "final 310 K, internal energy change 500 J"},
+        {"thermal3d","{\"kelvin\":300,\"ambient_kelvin\":300,\"heat_capacity_j_k\":50,\"seconds\":1,"
+         "\"size\":[1,1,1],\"probe\":[0,0,0],\"variation_k\":[5,10,15],\"thermal_diffusivity\":0}",
+         "3D insulated conduction modes: probe 330 K"},
+        {"gas","{\"size\":[6,6,6],\"method\":\"cfd\",\"seconds\":600,\"wind\":[25,25,25]}",
+         "Fallback: CFD timestep budget exceeded."},
+        {"fluid","{\"size\":[6,6,6],\"method\":\"navier_stokes\",\"seconds\":0}",
+         "3D liquid flow: 3D incompressible Navier-Stokes, CPU"},
+        {"flow3d","{\"size\":[6,6,6],\"seconds\":0}", "reduced Gaussian transport"},
+        {"ignition3d","{\"source\":[1,2,3],\"site\":[1,2,3],\"pulse_ticks\":2,\"cool_ticks\":2}",
+         "Ignition at 0.916291 ticks. Reset at"},
+        {"ignition3d","{\"source\":[1,2,3],\"site\":[1,2,15],\"pulse_ticks\":10}",
+         "Final state: inactive"}
+    };
+    Text result = {0};
+    bool ok = true;
+    for (size_t i=0; i<sizeof cases/sizeof *cases; ++i) {
+        Json *args = cJSON_Parse(cases[i].args);
+        bool ran = physics_run(cases[i].tool,args,nullptr,&result);
+        if (ran != (cases[i].expected != nullptr) || (ran && !strstr(str(&result),cases[i].expected))) {
+            fprintf(stderr,"%s extended case %zu: %s\n",cases[i].tool,i,str(&result));
+            ok = false;
+        }
+        cJSON_Delete(args);
+        clear(&result);
+    }
+    release(&result);
+    return ok;
+}
+
+static bool narrator_world_control(void)
+{
+    App app = {0};
+    Preview p = {.story=cJSON_Parse("{\"simEnabled\":true,\"head\":1,\"nodes\":["
+        "{\"id\":1,\"parent\":0,\"role\":\"user\",\"content\":\"Look around.\"},"
+        "{\"id\":2,\"parent\":0,\"role\":\"assistant\",\"content\":\"Another branch.\"},"
+        "{\"id\":3,\"parent\":1,\"role\":\"assistant\",\"content\":\"A lantern gleams.\"}]}"),.parent=1};
+    const char *plan = "{\"actions\":["
+        "{\"neutrino_tool\":\"world\",\"action\":\"room\",\"name\":\"Cellar\",\"description\":\"Stone stairs.\"},"
+        "{\"neutrino_tool\":\"world\",\"action\":\"room\",\"name\":\"Loft\",\"description\":\"Wood rafters.\"},"
+        "{\"neutrino_tool\":\"world\",\"action\":\"connect\",\"name\":\"Cellar\",\"room\":\"Loft\"},"
+        "{\"neutrino_tool\":\"world\",\"action\":\"move\",\"name\":\"Loft\"},"
+        "{\"neutrino_tool\":\"world\",\"action\":\"npc\",\"name\":\"Mara\",\"description\":\"Keeper.\"},"
+        "{\"neutrino_tool\":\"world\",\"action\":\"item\",\"name\":\"Scarf\",\"description\":\"Wool.\"},"
+        "{\"neutrino_tool\":\"inventory\",\"action\":\"take\",\"name\":\"Scarf\"},"
+        "{\"neutrino_tool\":\"inventory\",\"action\":\"wear\",\"name\":\"Scarf\"},"
+        "{\"neutrino_tool\":\"set_time\",\"minutes\":60000000},"
+        "{\"neutrino_tool\":\"auto_time\",\"minutes\":0},"
+        "{\"neutrino_tool\":\"world_inspect\"}],\"continue\":true}";
+    Text context = {0}, branch = {0};
+    bool ok = simulation_tool_reply(&p,plan)==SIM_REGENERATE &&
+        strstr(str(&p.tool_results),"Current room: Loft") && strstr(str(&p.tool_results),"Item: Scarf · Worn") &&
+        !at(p.story,"world") && !at(p.story,"simLog");
+    simulation_prompt(&p,&context);
+    ok = ok && strstr(str(&context),"Staged world state") && strstr(str(&context),"Day 41667, 16:00") &&
+         strstr(str(&context),"Present character: Mara");
+    simulation_commit(&app,&p,3);
+    world_context(p.story,3,&branch);
+    ok = ok && strstr(str(&branch),"Room: Loft") && strstr(str(&branch),"Worn: Scarf");
+    clear(&branch);
+    world_context(p.story,2,&branch);
+    ok = ok && !branch.len;
+    release(&context);
+    release(&branch);
+    free_protocol(&p);
+    return ok;
+}
+
+static bool large_scene_state(const char *backend)
+{
+    App app = {0};
+    Preview p = {.story=cJSON_Parse("{\"simEnabled\":true,\"nodes\":["
+        "{\"id\":1,\"parent\":0,\"role\":\"assistant\",\"content\":\"The city opens its doors.\"}]}")};
+    Json *settings = cJSON_CreateObject();
+    Text plan = {0}, result = {0};
+    append(&plan,"{\"actions\":[");
+    char name[64];
+    for (int i=0; i<145; ++i) {
+        format(&plan,"%s{\"neutrino_tool\":\"world\",\"action\":\"room\",\"name\":\"Room %d\","
+                     "\"description\":\"A room.\"}",i ? "," : "",i);
+    }
+    append(&plan,"]}");
+    bool ok = simulation_tool_reply(&p,str(&plan))==SIM_REGENERATE && p.tool_prose_only &&
+              cJSON_GetArraySize(p.tool_pending)==145;
+    simulation_commit(&app,&p,1);
+    Json *page = cJSON_Parse("{\"offset\":128}");
+    ok = ok && world_inspect(p.story,1,page,&result) && strstr(str(&result),"Room 144");
+    cJSON_Delete(page);
+    free_protocol(&p);
+    release(&plan);
+    clear(&result);
+    Json *room = cJSON_Parse("{\"neutrino_tool\":\"scene_room\",\"name\":\"Atrium\",\"min\":[0,0,0],\"max\":[100,10,10]}");
+    ok = physics_scene_edit(settings,room) && ok;
+    Json *edit = cJSON_Parse("{\"neutrino_tool\":\"scene_place\",\"kind\":\"object\",\"min\":[2,2,2],\"max\":[3,3,3]}");
+    for (int i=0; i<40; ++i) {
+        snprintf(name,sizeof name,"Prop %d",i);
+        set(edit,"name",name);
+        if (i==39) put(edit,"min",cJSON_Parse("[1.5,2,2]"));
+        ok = physics_scene_edit(settings,edit) && ok;
+    }
+    set(room,"name","Balcony");
+    ok = physics_scene_edit(settings,room) && ok;
+    set(room,"neutrino_tool","scene_select");
+    set(room,"name","Atrium");
+    integer(room,"offset",32);
+    ok = ok && physics_scene_edit(settings,room) && physics_run("scene_inspect",room,settings,&result) &&
+         strstr(str(&result),"Prop 39") && strstr(str(&result),"\"object_count\":40");
+    clear(&result);
+    Json *ray = cJSON_Parse("{\"origin\":[1,2.5,2.5],\"directions\":[[1,0,0]],\"backend\":\"cpu\"}");
+    set(ray,"backend",backend);
+    ok = ok && physics_run("scene_rays",ray,settings,&result) && strstr(str(&result),"Prop 39 0.5 m");
+    release(&result);
+    cJSON_Delete(ray);
+    cJSON_Delete(room);
+    cJSON_Delete(edit);
+    cJSON_Delete(settings);
+    return ok;
+}
+
+static bool cfd_models(bool hardware)
+{
+    const double size[] = {6,6,6}, source[] = {2.75,2.75,2.75}, transported[] = {3.25,3.25,3.25};
+    Json *args = cJSON_Parse("{\"method\":\"cfd\",\"resolution\":12,\"seconds\":0.5,\"wind\":[1,1,1],"
+                            "\"center\":[2.75,2.75,2.75],\"diffusivity\":0}");
+    FlowConfig config;
+    if (!flow_parse(args,size,&config)) { cJSON_Delete(args); return false; }
+    cJSON_Delete(args);
+    FlowField field = flow_solve(&config);
+    /* Six equal upwind interpolation steps per axis on this uniform-flow fixture. */
+    const int binomial[] = {1,6,15,20,15,6,1};
+    double one_axis = 0;
+    for (int k=0; k<=6; ++k)
+        one_axis += binomial[k]*pow(1.0/6,k)*pow(5.0/6,6-k)*exp(-.5*(k-1)*(k-1));
+    bool ok = field.grid && field.divergence < 1e-8 && fabs(field.speed-sqrt(3)) < 1e-8 &&
+              flow_sample(&field,transported) > flow_sample(&field,source) &&
+              fabs(flow_sample(&field,transported)-one_axis*one_axis*one_axis) < 1e-8;
+    if (!ok) fprintf(stderr,"Uniform CFD: divergence %g, speed %g, dye %g vs %g.\n",
+                     field.divergence,field.speed,flow_sample(&field,transported),flow_sample(&field,source));
+    flow_release(&field);
+    config.vortex = .7;
+    FlowField cpu = flow_solve(&config);
+    ok = ok && cpu.grid && cpu.divergence < .01 && cpu.tracer_mean > 0;
+    if (!ok) fprintf(stderr,"Vortex CFD: divergence %g, tracer mean %g.\n",cpu.divergence,cpu.tracer_mean);
+    if (hardware) {
+        config.gpu = true;
+        FlowField gpu = flow_solve(&config);
+        ok = ok && gpu.grid && !gpu.fallback && strstr(gpu.method,"OpenCL pressure") &&
+             fabs(gpu.divergence-cpu.divergence) < 1e-5 &&
+             fabs(flow_sample(&gpu,transported)-flow_sample(&cpu,transported)) < 1e-5;
+        if (!ok) fprintf(stderr,"OpenCL CFD: %s, divergence %g.\n",gpu.method,gpu.divergence);
+        flow_release(&gpu);
+    }
+#ifdef _WIN32
+    config.gpu = false;
+    config.mapped = true;
+    FlowField mapped = flow_solve(&config);
+    ok = ok && mapped.grid && mapped.mapped && flow_sample(&mapped,transported) == flow_sample(&cpu,transported);
+    if (!ok) fprintf(stderr,"Mapped CFD: %s, tracer %g.\n",mapped.memory,flow_sample(&mapped,transported));
+    flow_release(&mapped);
+#endif
+    flow_release(&cpu);
+    return ok;
+}
+
+static bool optics_and_gas(void)
+{
+    Json *settings = cJSON_CreateObject();
+    Json *room = cJSON_Parse("{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[6,5,4]}");
+    Json *medium = cJSON_Parse("{\"neutrino_tool\":\"scene_medium\",\"method\":\"cfd\",\"seconds\":0,"
+        "\"sigma_m\":1000,\"sound_loss\":2,\"light_loss\":2}");
+    Json *query = cJSON_Parse("{\"source\":[1,2,2],\"listener\":[5,2,2],\"backend\":\"cpu\",\"wall_reflectivity\":0.4}");
+    Json *glass = cJSON_Parse("{\"neutrino_tool\":\"scene_place\",\"name\":\"Glass\",\"kind\":\"wall\","
+        "\"min\":[2.5,1,1],\"max\":[3.5,3,3],\"optical\":{\"transmission\":0.25,\"reflectivity\":0.5}}");
+    Text result = {0};
+    PhysicsReading reading;
+    bool ok = physics_scene_edit(settings,room) && physics_scene_edit(settings,medium) &&
+        physics_run_reading("scene_acoustic",query,settings,&result,&reading) &&
+        fabs(reading.arrival[0].level_db - (-20*log10(4)-8)) < .001 &&
+        strstr(str(&result),"Gas attenuation: 3D incompressible Navier-Stokes");
+    clear(&result);
+    ok = ok && physics_run("scene_light",query,settings,&result) &&
+         strstr(str(&result),"Gas extinction: 3D incompressible Navier-Stokes") &&
+         strstr(str(&result),"Y-min reflection");
+    clear(&result);
+    ok = ok && physics_scene_edit(settings,glass) && physics_run("scene_light",query,settings,&result);
+    const char *direct = strstr(str(&result),"\nDirect ");
+    double metres, nanos, db;
+    ok = ok && direct && sscanf(direct,"\nDirect %lf m · %lf ns · %lf dB",&metres,&nanos,&db)==3 &&
+         metres == 4 && fabs(nanos-4/.299792458) < .0001 &&
+         fabs(db-(-20*log10(4)+10*log10(.25)-6)) < .001;
+    release(&result);
+    cJSON_Delete(glass);
+    cJSON_Delete(query);
+    cJSON_Delete(medium);
+    cJSON_Delete(room);
+    cJSON_Delete(settings);
     return ok;
 }
 
@@ -357,19 +671,54 @@ int main(int argc, char **argv)
     cJSON_Delete(tune);
     cJSON_Delete(settings);
     if (!ordered_protocol()) { fputs("Ordered simulation protocol failed.\n", stderr); failures++; }
-    if (argc > 1 && (!strcmp(argv[1], "--gpu") || !strcmp(argv[1], "--vulkan"))) {
+    if (!extended_models()) { fputs("Extended 3D model checks failed.\n", stderr); failures++; }
+    if (!narrator_world_control()) { fputs("Narrator world control and branch isolation failed.\n",stderr); failures++; }
+    if (!large_scene_state(argc > 1 && !strcmp(argv[1],"--rt") ? "rt" : "cpu")) {
+        fputs("Large scenario state checks failed.\n",stderr);
+        failures++;
+    }
+    if (!cfd_models(argc > 1 && !strcmp(argv[1],"--cfd-gpu"))) {
+        fputs("CFD transport/projection/memory checks failed.\n", stderr);
+        failures++;
+    } else if (argc > 1 && !strcmp(argv[1],"--cfd-gpu")) puts("OpenCL pressure projection matches CPU; Windows mapped memory matches CPU.");
+    if (!optics_and_gas()) { fputs("3D optics and gas attenuation checks failed.\n", stderr); failures++; }
+    if (!scene_protocol("cpu")) { fputs("3D scene simulation protocol failed.\n", stderr); failures++; }
+#ifndef NEUTRINO_VULKAN_RT
+    Json *no_rt = cJSON_Parse(cases[3].json);
+    set(no_rt, "backend", "rt");
+    PhysicsReading unavailable;
+    if (!physics_run_reading("rays", no_rt, nullptr, &result, &unavailable) || !unavailable.unavailable ||
+        !strstr(str(&result), "hardware RT unavailable")) failures++;
+    cJSON_Delete(no_rt);
+    release(&result);
+#endif
+    if (argc > 1 && (!strcmp(argv[1], "--gpu") || !strcmp(argv[1], "--vulkan") ||
+                     !strcmp(argv[1], "--rt"))) {
         bool vulkan = !strcmp(argv[1], "--vulkan");
+        bool rt = !strcmp(argv[1], "--rt");
+        if (rt && !scene_protocol("rt")) {
+            fputs("Hardware RT 3D scene protocol failed.\n", stderr);
+            failures++;
+        }
+#ifdef NEUTRINO_VULKAN_RT
+        if (rt) {
+            if (!rt_parity()) failures++;
+            else puts("RT matches CPU distances and box IDs for 4096 rays, including cached and edited geometry.");
+        }
+#endif
+        const char *backend = rt ? "rt" : vulkan ? "vulkan" : "gpu";
+        const char *label = rt ? "Vulkan hardware RT" : vulkan ? "Vulkan " : "OpenCL GPU";
         Json *batch = cJSON_Parse(cases[3].json);
-        set(batch, "backend", vulkan ? "vulkan" : "gpu");
+        set(batch, "backend", backend);
         if (!physics_run("rays", batch, nullptr, &result) ||
-            !strstr(str(&result), vulkan ? "Vulkan " : "OpenCL GPU") ||
+            !strstr(str(&result), label) ||
             !strstr(str(&result), "ray batch (2) hit distances in m: 2 miss")) failures++;
         puts(str(&result));
         clear(&result);
         Json *room = cJSON_Parse(cases[5].json);
-        set(room, "backend", vulkan ? "vulkan" : "gpu");
+        set(room, "backend", backend);
         if (!physics_run("acoustic", room, nullptr, &result) ||
-            !strstr(str(&result), vulkan ? "Vulkan " : "OpenCL GPU visibility") ||
+            !strstr(str(&result), label) ||
             !strstr(str(&result), "Direct blocked.")) failures++;
         puts(str(&result));
         release(&result);

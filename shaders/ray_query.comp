@@ -1,0 +1,55 @@
+#version 460
+#extension GL_EXT_ray_query : require
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) buffer RayBuffer { float data[]; };
+layout(set = 0, binding = 1) uniform accelerationStructureEXT scene;
+layout(push_constant) uniform Batch { uint count; uint boxes; };
+
+vec3 load_vec(uint at) { return vec3(data[at], data[at + 1], data[at + 2]); }
+
+float slab(vec3 origin, vec3 direction, uint box)
+{
+    uint start = (count + box) * 6;
+    vec3 lo = load_vec(start) - origin, hi = load_vec(start + 3) - origin;
+    float near = 0.0, far = 3.402823466e38;
+    for (uint axis = 0; axis < 3; ++axis) {
+        if (abs(direction[axis]) < 1e-12) {
+            if (lo[axis] > 0.0 || hi[axis] < 0.0) return -1.0;
+        } else {
+            float a = lo[axis] / direction[axis], b = hi[axis] / direction[axis];
+            near = max(near, min(a, b));
+            far = min(far, max(a, b));
+            if (near > far) return -1.0;
+        }
+    }
+    return near;
+}
+
+void main()
+{
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= count) return;
+    vec3 origin = load_vec(index * 6), direction = load_vec(index * 6 + 3);
+    vec3 traversal_direction = direction;
+    for (uint axis = 0; axis < 3; ++axis)
+        if (abs(direction[axis]) < 1e-12) traversal_direction[axis] = 0.0;
+    // A zero-length segment only hits boxes containing its origin.
+    if (all(equal(traversal_direction, vec3(0.0)))) traversal_direction.x = 1.0;
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, scene, 0, 0xff, origin, 0.0, traversal_direction, 3.402823466e38);
+    float nearest = -1.0;
+    int winner = -1;
+    // Refine conservative BVH candidates and resolve equal distances by placement order.
+    while (rayQueryProceedEXT(query)) {
+        uint box = rayQueryGetIntersectionPrimitiveIndexEXT(query, false);
+        float hit = slab(origin, direction, box);
+        if (hit >= 0.0 && (winner < 0 || hit < nearest || (hit == nearest && int(box) < winner))) {
+            nearest = hit;
+            winner = int(box);
+        }
+    }
+    uint output_index = (count + boxes) * 6 + index * 2;
+    data[output_index] = nearest;
+    data[output_index + 1] = float(winner);
+}

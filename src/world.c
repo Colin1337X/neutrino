@@ -1,11 +1,10 @@
 #include "app.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-enum { WORLD_ROOM_LIMIT = 128 };
 
 static bool equal_name(const char *a, const char *b)
 {
@@ -61,11 +60,55 @@ static bool *path_ids(const Json *story, int head, int *count)
     return visible;
 }
 
+static bool link_matches(const Json *link, const char *a, const char *b);
+
 static void replay(Json *state, const Json *event)
 {
     const char *type = js(event, "type"), *name = js(event, "name");
     if (!strcmp(type, "move")) set(state, "room", name);
     else if (!strcmp(type, "weather")) set(state, "weather", js(event, "text"));
+    else if (!strcmp(type, "room")) {
+        Json *rooms = at(state, "rooms"), *room = named(rooms, name);
+        if (!room) {
+            room = cJSON_CreateObject();
+            set(room, "name", name);
+            cJSON_AddItemToArray(rooms, room);
+        }
+        set(room, "text", js(event, "text"));
+        if (!*js(state, "room")) set(state, "room", name);
+    } else if (!strcmp(type, "roomdelete")) {
+        Json *rooms = at(state, "rooms"), *room = named(rooms, name);
+        if (room) cJSON_Delete(cJSON_DetachItemViaPointer(rooms, room));
+    } else if (!strcmp(type, "link") || !strcmp(type, "unlink")) {
+        Json *links = at(state, "links"), *link;
+        const char *to = js(event, "room");
+        cJSON_ArrayForEach(link, links)
+            if (link_matches(link, name, to)) break;
+        if (link && !strcmp(type, "unlink"))
+            cJSON_Delete(cJSON_DetachItemViaPointer(links, link));
+        if (!link && !strcmp(type, "link")) {
+            link = cJSON_CreateObject();
+            set(link, "from", name);
+            set(link, "to", to);
+            cJSON_AddItemToArray(links, link);
+        }
+    } else if (!strcmp(type, "itemdelete") || !strcmp(type, "npcdelete")) {
+        Json *items = at(state, *type == 'i' ? "item" : "npc"), *item = named(items, name);
+        if (item) cJSON_Delete(cJSON_DetachItemViaPointer(items, item));
+    } else if (!strcmp(type, "npcplace") || !strcmp(type, "itemplace")) {
+        Json *items = at(state, *type == 'i' ? "item" : "npc"), *item = named(items, name);
+        if (!item) {
+            item = cJSON_CreateObject();
+            set(item, "name", name);
+            cJSON_AddItemToArray(items, item);
+        }
+        if (*js(event, "text")) set(item, "text", js(event, "text"));
+        set(item, "room", js(event, "room"));
+        if (*type == 'i') {
+            put(item,"carried",cJSON_CreateFalse());
+            put(item,"worn",cJSON_CreateFalse());
+        }
+    }
     else if (!strcmp(type, "item") || !strcmp(type, "npc")) {
         Json *bucket = at(state, type);
         if (*name && !named(bucket, name)) cJSON_AddItemToArray(bucket, cJSON_Duplicate(event, true));
@@ -121,6 +164,9 @@ static void inventory_panel(App *a, const char *filter)
 static Json *world_state(const Json *story, int head)
 {
     Json *state = cJSON_CreateObject();
+    const Json *world = at(story,"world"), *rooms = at(world,"rooms"), *links = at(world,"links");
+    put(state,"rooms",cJSON_IsArray(rooms) ? cJSON_Duplicate(rooms,true) : cJSON_CreateArray());
+    put(state,"links",cJSON_IsArray(links) ? cJSON_Duplicate(links,true) : cJSON_CreateArray());
     put(state, "item", cJSON_CreateArray());
     put(state, "npc", cJSON_CreateArray());
     put(state, "events", cJSON_CreateArray());
@@ -170,36 +216,40 @@ static char *trim(char *text)
     return text;
 }
 
-static void describe_world(const Json *story, const Json *state, Text *out)
+static void describe_world(const Json *state, Text *out)
 {
     const char *room = js(state, "room");
     if (!*room) return;
-    Json *world = at(story, "world"), *r = named(at(world, "rooms"), room);
+    Json *r = named(at(state, "rooms"), room);
     format(out, "Room: %s\n%s\n", room, js(r, "text"));
     if (*js(state, "weather")) format(out, "Weather: %s\n", js(state, "weather"));
     Json *link, *item;
     int count = 0;
-    cJSON_ArrayForEach(link, at(world, "links")) {
+    cJSON_ArrayForEach(link, at(state, "links")) {
+        if (out->len > 10000) break;
         const char *from = js(link, "from"), *to = js(link, "to");
         if (equal_name(from, room) || equal_name(to, room))
             format(out, "%s%s", count++ ? ", " : "Exits: ", equal_name(from, room) ? to : from);
     }
     if (count) append(out, "\n");
     cJSON_ArrayForEach(item, at(state, "item")) {
+        if (out->len > 12000) break;
         bool carried = cJSON_IsTrue(at(item, "carried"));
         if (carried || equal_name(js(item, "room"), room))
             format(out, "%s: %s — %s\n", item_state(item, "Nearby"), js(item, "name"), js(item, "text"));
     }
-    cJSON_ArrayForEach(item, at(state, "npc"))
+    cJSON_ArrayForEach(item, at(state, "npc")) {
+        if (out->len > 14000) break;
         if (equal_name(js(item, "room"), room))
             format(out, "Present character: %s — %s\n", js(item, "name"), js(item, "text"));
+    }
+    if (out->len > 10000) append(out,"Use world_inspect to see more saved state.\n");
 }
 
 void world_context(const Json *story, int head, Text *out)
 {
-    if (!*default_room(story)) return;
     Json *state = world_state(story, head);
-    describe_world(story, state, out);
+    describe_world(state, out);
     const Json *events = at(state, "events");
     int skipped = cJSON_GetArraySize(events) - 10;
     Json *event;
@@ -213,23 +263,9 @@ void world_context(const Json *story, int head, Text *out)
 
 const char *world_room(const Json *story, int head, Text *out)
 {
-    const char *room = default_room(story);
-    Json *events = at(at(story, "world"), "events");
-    if (*room && events && events->child) {
-        int count = 0;
-        bool *visible = path_ids(story, head, &count);
-        Json *event = events->child->prev;
-        while (event) {
-            int anchor = number(event, "at");
-            if (anchor >= 0 && anchor <= count && visible[anchor] && !strcmp(js(event, "type"), "move")) {
-                room = js(event, "name");
-                break;
-            }
-            event = event == events->child ? NULL : event->prev;
-        }
-        free(visible);
-    }
-    append(out, room);
+    Json *state = world_state(story,head);
+    append(out,js(state,"room"));
+    cJSON_Delete(state);
     return str(out);
 }
 const char *world_character_room(const Json *story, int head, const char *name, Text *out)
@@ -240,33 +276,109 @@ const char *world_character_room(const Json *story, int head, const char *name, 
     return str(out);
 }
 
+static bool save_event(Json *story, int head, const char *type, const char *name,
+                       const char *text, const char *room)
+{
+    Json *events = array(world_object(story),"events");
+    Json *event = cJSON_CreateObject();
+    integer(event,"at",head);
+    set(event,"type",type);
+    set(event,"name",name);
+    set(event,"text",text);
+    set(event,"room",room);
+    cJSON_AddItemToArray(events,event);
+    return true;
+}
+
+bool world_inspect(const Json *story, int head, const Json *args, Text *out)
+{
+    const Json *offset_value = at(args,"offset");
+    int offset = 0;
+    if (offset_value) {
+        if (!cJSON_IsNumber(offset_value) || !(offset_value->valuedouble >= 0 && offset_value->valuedouble <= INT_MAX) ||
+            offset_value->valuedouble != (double)(int)offset_value->valuedouble) return false;
+        offset = (int)offset_value->valuedouble;
+    }
+    Json *state = world_state(story,head), *item;
+    format(out,"Current room: %s\n",*js(state,"room") ? js(state,"room") : "none");
+    if (*js(state,"weather")) format(out,"Weather: %s\n",js(state,"weather"));
+    const char *const buckets[] = {"rooms","links","npc","item"};
+    size_t index = 0, shown = 0;
+    for (size_t bucket=0; bucket<sizeof buckets/sizeof *buckets; ++bucket) {
+        cJSON_ArrayForEach(item,at(state,buckets[bucket])) {
+            if (index++ < (size_t)offset) continue;
+            if (shown++ == 64) {
+                format(out,"Next offset: %zu.\n",index-1);
+                cJSON_Delete(state);
+                return true;
+            }
+            if (bucket == 0) format(out,"Room: %s\n",js(item,"name"));
+            if (bucket == 1) format(out,"Exit: %s ↔ %s\n",js(item,"from"),js(item,"to"));
+            if (bucket == 2) format(out,"Character: %s in %s\n",js(item,"name"),js(item,"room"));
+            if (bucket == 3) format(out,"Item: %s · %s\n",js(item,"name"),item_state(item,js(item,"room")));
+        }
+    }
+    cJSON_Delete(state);
+    return true;
+}
+
+bool world_edit(Json *story, int head, const Json *args)
+{
+    const char *action = js(args,"action"), *name = js(args,"name");
+    const char *room = js(args,"room"), *description = js(args,"description");
+    if (strlen(description) > 600) return false;
+    Json *state = world_state(story,head);
+    Json *rooms = at(state,"rooms"), *place = named(rooms,name);
+    const char *here = js(state,"room"), *type = nullptr;
+    if (!strcmp(action,"room") && valid_name(name) && *description) type = "room";
+    else if (!strcmp(action,"remove_room") && place && !equal_name(name,here)) {
+        Json *item;
+        type = "roomdelete";
+        cJSON_ArrayForEach(item,at(state,"links"))
+            if (equal_name(js(item,"from"),name) || equal_name(js(item,"to"),name)) type = nullptr;
+        cJSON_ArrayForEach(item,at(state,"npc"))
+            if (equal_name(js(item,"room"),name)) type = nullptr;
+        cJSON_ArrayForEach(item,at(state,"item"))
+            if (equal_name(js(item,"room"),name) && !cJSON_IsTrue(at(item,"carried"))) type = nullptr;
+    } else if ((!strcmp(action,"connect") || !strcmp(action,"disconnect")) &&
+               place && named(rooms,room) && !equal_name(name,room)) {
+        const bool remove = !strcmp(action,"disconnect");
+        if (linked(state,name,room) == remove) type = remove ? "unlink" : "link";
+    } else if (place && (!strcmp(action,"relocate") ||
+                        (!strcmp(action,"move") && linked(state,here,name)))) type = "move";
+    else if (!strcmp(action,"weather") && at(args,"description") && cJSON_IsString(at(args,"description")))
+        type = "weather";
+    else if (!strcmp(action,"npc") || !strcmp(action,"item")) {
+        Json *bucket = at(state,action), *item = named(bucket,name);
+        if (!*room) room = here;
+        if (valid_name(name) && named(rooms,room) && (item || *description))
+            type = !strcmp(action,"npc") ? "npcplace" : "itemplace";
+    } else if (!strcmp(action,"remove_npc") && named(at(state,"npc"),name)) type = "npcdelete";
+    else if (!strcmp(action,"remove_item") && named(at(state,"item"),name)) type = "itemdelete";
+    bool valid = type && save_event(story,head,type,name,description,room);
+    cJSON_Delete(state);
+    return valid;
+}
+
 bool world_inventory_tool(Json *story, int head, const Json *args)
 {
     const char *action = js(args, "action"), *name = js(args, "name"), *text = js(args, "description");
     if (!valid_name(name)) return false;
     bool add = !strcmp(action, "add"), edit = !strcmp(action, "edit");
     bool take = !strcmp(action, "take"), drop = !strcmp(action, "drop");
-    if (!(add || edit || take || drop) || ((add || edit) && (!*text || strlen(text) > 600))) return false;
+    bool wear = !strcmp(action,"wear"), remove = !strcmp(action,"remove");
+    if (!(add || edit || take || drop || wear || remove) ||
+        ((add || edit) && (!*text || strlen(text) > 600))) return false;
     Json *state = world_state(story, head);
     const char *room = js(state, "room");
     Json *item = named(at(state, "item"), name);
     bool carried = cJSON_IsTrue(at(item, "carried"));
+    bool worn = cJSON_IsTrue(at(item,"worn"));
     bool nearby = item && *room && equal_name(room, js(item, "room")) && !carried;
-    bool valid = *room && (add ? !item && cJSON_GetArraySize(at(state, "item")) < 128 :
-                          edit ? carried || nearby : take ? nearby : carried);
-    if (valid) {
-        Json *events = array(world_object(story), "events");
-        if (cJSON_GetArraySize(events) >= 8192) valid = false;
-        else {
-            Json *event = cJSON_CreateObject();
-            integer(event, "at", head);
-            set(event, "type", add ? "item" : edit ? "itemedit" : action);
-            set(event, "name", item ? js(item, "name") : name);
-            set(event, "text", add || edit ? text : "");
-            set(event, "room", room);
-            cJSON_AddItemToArray(events, event);
-        }
-    }
+    bool valid = *room && (add ? !item :
+                          edit ? carried || nearby : take ? nearby : carried && (!wear || !worn) && (!remove || worn));
+    if (valid) valid = save_event(story,head,add ? "item" : edit ? "itemedit" : action,
+                                  item ? js(item,"name") : name,add || edit ? text : "",room);
     cJSON_Delete(state);
     return valid;
 }
@@ -274,8 +386,9 @@ bool world_inventory_tool(Json *story, int head, const Json *args)
 bool world_address(const Json *story, const char *line, Text *speaker, const char **message)
 {
     *message = line;
-    if (*line != '@' || !*default_room(story)) return true;
+    if (*line != '@') return true;
     Json *state = world_state(story, number(story, "head")), *npc, *chosen = NULL;
+    if (!*js(state,"room")) { cJSON_Delete(state); return true; }
     size_t length = 0;
     const char *requested = line + 1;
     cJSON_ArrayForEach(npc, at(state, "npc")) {
@@ -318,7 +431,7 @@ static void world_panel(App *a, bool log)
         }
         if (!a->info.len) append(&a->info, "No world actions on this branch.");
     } else {
-        describe_world(a->story, state, &a->info);
+        describe_world(state, &a->info);
         if (!a->info.len) append(&a->info, "Create the starting room with /room NAME | DESCRIPTION.\n");
         append(&a->info, "\n/room  /connect  /go  /item  /take  /drop  /wear  /remove  /npc\n"
                          "@Name MESSAGE addresses a character in this room.\n/world log shows branch activity. /map shows room links.");
@@ -328,11 +441,10 @@ static void world_panel(App *a, bool log)
 
 static void inspect_world(App *a, const char *name)
 {
-    const Json *world = at(a->story, "world");
     Json *state = world_state(a->story, number(a->story, "head"));
     const char *room = js(state, "room");
     if (!*room) { app_status(a, "Create a starting room with /room first."); cJSON_Delete(state); return; }
-    const Json *place = !*name || equal_name(name, room) ? named(at(world, "rooms"), room) : nullptr;
+    const Json *place = !*name || equal_name(name, room) ? named(at(state, "rooms"), room) : nullptr;
     const Json *item = named(at(state, "item"), name);
     const Json *character = named(at(state, "npc"), name);
     const bool carried = cJSON_IsTrue(at(item, "carried"));
@@ -371,10 +483,11 @@ static void room_exits(App *a)
     const char *room = world_room(a->story, number(a->story, "head"), &current);
     app_info(a, "Room exits");
     if (*room) format(&a->info, "%s\n\n", room);
-    const Json *world = at(a->story, "world"), *rooms = at(world, "rooms");
+    Json *state = world_state(a->story,number(a->story,"head"));
+    const Json *rooms = at(state, "rooms");
     int exits = 0;
     Json *link;
-    cJSON_ArrayForEach(link, at(world, "links")) {
+    cJSON_ArrayForEach(link, at(state, "links")) {
         const char *from = js(link, "from"), *to = js(link, "to");
         const char *destination = equal_name(room, from) ? to : equal_name(room, to) ? from : "";
         const Json *place = named(rooms, destination);
@@ -383,96 +496,104 @@ static void room_exits(App *a)
         exits++;
     }
     if (!exits) append(&a->info, "No exits are available.");
+    cJSON_Delete(state);
     release(&current);
 }
 
-static int map_index(const char *const rooms[], int count, const char *name)
+typedef struct {
+    const char *name;
+    int parent, distance, queue;
+} RoomVisit;
+
+static int map_index(const RoomVisit *rooms, int count, const char *name)
 {
     for (int i = 0; i < count; i++)
-        if (equal_name(rooms[i], name)) return i;
+        if (equal_name(rooms[i].name, name)) return i;
     return -1;
 }
 
 static void world_map(App *a, const char *destination)
 {
-    const Json *world = at(a->story, "world");
-    const char *rooms[WORLD_ROOM_LIMIT];
-    int count = 0;
-    Json *item;
-    cJSON_ArrayForEach(item, at(world, "rooms")) {
-        if (count == WORLD_ROOM_LIMIT) break;
-        if (*js(item, "name")) rooms[count++] = js(item, "name");
-    }
-    if (!count) { app_status(a, "Create a starting room with /room first."); return; }
-    Text current = {0};
-    world_room(a->story, number(a->story, "head"), &current);
-    int start = map_index(rooms, count, str(&current));
-    release(&current);
-    if (start < 0) { app_status(a, "The current room is missing from the map."); return; }
-    int end = *destination ? map_index(rooms, count, destination) : -1;
-    if (*destination && end < 0) { app_status(a, "Unknown destination. Use /map to list the rooms."); return; }
-
-    bool links[WORLD_ROOM_LIMIT][WORLD_ROOM_LIMIT] = {0};
-    cJSON_ArrayForEach(item, at(world, "links")) {
-        int from = map_index(rooms, count, js(item, "from"));
-        int to = map_index(rooms, count, js(item, "to"));
-        if (from >= 0 && to >= 0 && from != to) links[from][to] = links[to][from] = true;
-    }
-    int parents[WORLD_ROOM_LIMIT], distance[WORLD_ROOM_LIMIT], queue[WORLD_ROOM_LIMIT] = {start};
-    for (int i = 0; i < count; i++) distance[i] = -1;
-    parents[start] = -1;
-    distance[start] = 0;
-    for (int head = 0, tail = 1; head < tail; head++) {
-        int from = queue[head];
-        for (int to = 0; to < count; to++) {
-            if (!links[from][to] || distance[to] >= 0) continue;
-            parents[to] = from;
-            distance[to] = distance[from] + 1;
-            queue[tail++] = to;
-        }
-    }
-
-    app_info(a, "World map");
-    format(&a->info, "You are here: %s\n\n", rooms[start]);
-    if (end >= 0) {
-        if (distance[end] < 0) format(&a->info, "No route to %s.\n", rooms[end]);
-        else if (end == start) format(&a->info, "You are already at %s.\n", rooms[end]);
-        else {
-            format(&a->info, "Shortest route to %s (%d %s)\n", rooms[end], distance[end],
-                   distance[end] == 1 ? "step" : "steps");
-            int route[WORLD_ROOM_LIMIT], steps = 0;
-            for (int at = end; at >= 0; at = parents[at]) route[steps++] = at;
-            for (int i = steps - 1; i >= 0; i--)
-                format(&a->info, "%s%s", i == steps - 1 ? "" : " → ", rooms[route[i]]);
-            format(&a->info, "\n\nNext move: /go %s\n", rooms[route[steps - 2]]);
-        }
+    Json *world = world_state(a->story,number(a->story,"head")), *item;
+    const int count = cJSON_GetArraySize(at(world,"rooms"));
+    RoomVisit *rooms = count ? calloc((size_t)count,sizeof *rooms) : nullptr;
+    if (!rooms) {
+        app_status(a,count ? "Could not allocate the world map." : "Create a starting room with /room first.");
+        cJSON_Delete(world);
         return;
     }
-    for (int i = 0; i < count; i++) {
-        format(&a->info, "%s%s", i == start ? "● " : "○ ", rooms[i]);
-        if (distance[i] < 0) append(&a->info, " (unreachable)");
-        int exits = 0;
-        for (int to = 0; to < count; to++)
-            if (links[i][to]) format(&a->info, "%s%s", exits++ ? ", " : " → ", rooms[to]);
-        append(&a->info, "\n");
+    int index = 0;
+    cJSON_ArrayForEach(item,at(world,"rooms")) {
+        rooms[index].name = js(item,"name");
+        rooms[index].distance = -1;
+        ++index;
     }
-    append(&a->info, "\n/map ROOM  Plot the shortest route");
+    int start = map_index(rooms,count,js(world,"room"));
+    int end = *destination ? map_index(rooms,count,destination) : -1;
+    if (start < 0 || (*destination && end < 0)) {
+        app_status(a,start < 0 ? "The current room is missing from the map." : "Unknown destination.");
+        goto done;
+    }
+    rooms[0].queue = start;
+    rooms[start].parent = -1;
+    rooms[start].distance = 0;
+    for (int head = 0, tail = 1; head < tail; ++head) {
+        int from = rooms[head].queue;
+        if (from == end) break;
+        cJSON_ArrayForEach(item,at(world,"links")) {
+            const char *left = js(item,"from"), *right = js(item,"to");
+            const char *neighbor = equal_name(left,rooms[from].name) ? right :
+                                   equal_name(right,rooms[from].name) ? left : nullptr;
+            if (!neighbor) continue;
+            int next = map_index(rooms,count,neighbor);
+            if (next < 0 || rooms[next].distance >= 0) continue;
+            rooms[next].parent = from;
+            rooms[next].distance = rooms[from].distance+1;
+            rooms[tail++].queue = next;
+        }
+    }
+    app_info(a,"World map");
+    format(&a->info,"You are here: %s\n\n",rooms[start].name);
+    if (end >= 0) {
+        if (rooms[end].distance < 0) format(&a->info,"No route to %s.\n",rooms[end].name);
+        else if (end == start) format(&a->info,"You are already at %s.\n",rooms[end].name);
+        else {
+            const int distance = rooms[end].distance;
+            format(&a->info,"Shortest route to %s (%d %s)\n\n",rooms[end].name,distance,distance == 1 ? "step" : "steps");
+            int route = end;
+            for (int i = distance; i >= 0; --i) {
+                rooms[i].queue = route;
+                route = rooms[route].parent;
+            }
+            for (int i = 0; i <= distance; ++i) format(&a->info,"%s%s",i ? " → " : "",rooms[rooms[i].queue].name);
+            format(&a->info,"\n\nNext move: /go %s\n",rooms[rooms[1].queue].name);
+        }
+    } else for (int i = 0; i < count; ++i) {
+        format(&a->info,"%s%s",i == start ? "● " : "○ ",rooms[i].name);
+        if (rooms[i].distance < 0) append(&a->info," (unreachable)");
+        int exits = 0;
+        cJSON_ArrayForEach(item,at(world,"links")) {
+            const char *left = js(item,"from"), *right = js(item,"to");
+            if (equal_name(left,rooms[i].name)) format(&a->info,"%s%s",exits++ ? ", " : " → ",right);
+            else if (equal_name(right,rooms[i].name)) format(&a->info,"%s%s",exits++ ? ", " : " → ",left);
+        }
+        append(&a->info,"\n");
+    }
+done:
+    free(rooms);
+    cJSON_Delete(world);
 }
 
-static void add_event(App *a, Json *world, const char *type, const char *name,
+static bool add_event(App *a, const char *type, const char *name,
                       const char *text, const char *room)
 {
-    Json *events = array(world, "events");
-    if (cJSON_GetArraySize(events) >= 8192) { app_status(a, "World activity limit reached."); return; }
-    Json *event = cJSON_CreateObject();
-    integer(event, "at", number(a->story, "head"));
-    set(event, "type", type);
-    set(event, "name", name);
-    set(event, "text", text);
-    set(event, "room", room);
-    cJSON_AddItemToArray(events, event);
+    if (!save_event(a->story,number(a->story,"head"),type,name,text,room)) {
+        app_status(a,"World activity limit reached.");
+        return false;
+    }
     a->ws.dirty = true;
     app_status(a, "World action saved");
+    return true;
 }
 
 void world_command(App *a, const char *verb, char *argument)
@@ -501,58 +622,50 @@ void world_command(App *a, const char *verb, char *argument)
             return;
         }
     }
-    Json *world = at(a->story, "world"), *rooms = at(world, "rooms");
+    Json *state = world_state(a->story,number(a->story,"head")), *rooms = at(state,"rooms");
     if (room_cmd) {
-        if (named(rooms, name)) { app_status(a, "A room with that name already exists."); return; }
-        if (cJSON_GetArraySize(rooms) >= WORLD_ROOM_LIMIT) { app_status(a, "Room limit reached."); return; }
-        Json *r = cJSON_CreateObject();
-        set(r, "name", name);
-        set(r, "text", text);
-        cJSON_AddItemToArray(array(world_object(a->story), "rooms"), r);
-        a->ws.dirty = true;
-        app_status(a, "Room created");
+        if (named(rooms,name)) app_status(a,"A room with that name already exists.");
+        else if (add_event(a,"room",name,text,"")) app_status(a,"Room created");
+        cJSON_Delete(state);
         return;
     }
-    if (!*default_room(a->story)) { app_status(a, "Create a starting room with /room first."); return; }
+    if (!*js(state,"room")) {
+        app_status(a,"Create a starting room with /room first.");
+        cJSON_Delete(state);
+        return;
+    }
     if (link_cmd) {
         Json *from = named(rooms, name), *to = named(rooms, text);
-        if (!from || !to || from == to) { app_status(a, "Choose two distinct existing rooms."); return; }
-        if (linked(world, name, text)) { app_status(a, "These rooms are already connected."); return; }
-        Json *link = cJSON_CreateObject();
-        set(link, "from", js(from, "name"));
-        set(link, "to", js(to, "name"));
-        cJSON_AddItemToArray(array(world, "links"), link);
-        a->ws.dirty = true;
-        app_status(a, "Rooms connected");
+        if (!from || !to || from == to) app_status(a,"Choose two distinct existing rooms.");
+        else if (linked(state,name,text)) app_status(a,"These rooms are already connected.");
+        else if (add_event(a,"link",js(from,"name"),"",js(to,"name"))) app_status(a,"Rooms connected");
+        cJSON_Delete(state);
         return;
     }
 
-    Json *state = world_state(a->story, number(a->story, "head"));
     const char *room = js(state, "room");
     if (prop_cmd) {
         if (named(at(state, verb), name)) app_status(a, "That name already exists on this branch.");
-        else if (cJSON_GetArraySize(at(state, verb)) >= (!strcmp(verb, "npc") ? 32 : 128))
-            app_status(a, "World entity limit reached.");
-        else add_event(a, world, verb, name, text, room);
+        else add_event(a, verb, name, text, room);
     } else if (!strcmp(verb, "go")) {
         Json *target = named(rooms, name);
-        if (!target || !linked(world, room, js(target, "name"))) app_status(a, "Choose an exit shown by /world.");
-        else add_event(a, world, "move", js(target, "name"), "", room);
+        if (!target || !linked(state, room, js(target, "name"))) app_status(a, "Choose an exit shown by /world.");
+        else add_event(a, "move", js(target, "name"), "", room);
     } else if (!strcmp(verb, "take") || !strcmp(verb, "drop")) {
         Json *object = named(at(state, "item"), name);
         bool carried = cJSON_IsTrue(at(object, "carried")), taking = !strcmp(verb, "take");
         if (!object || (taking ? carried || !equal_name(room, js(object, "room")) : !carried))
             app_status(a, taking ? "That item is unavailable in this room." : "That item is outside your inventory.");
-        else add_event(a, world, verb, js(object, "name"), "", room);
+        else add_event(a, verb, js(object, "name"), "", room);
     } else if (!strcmp(verb, "wear") || !strcmp(verb, "remove")) {
         Json *object = named(at(state, "item"), name);
         bool wearing = !strcmp(verb, "wear"), worn = cJSON_IsTrue(at(object, "worn"));
         if (!cJSON_IsTrue(at(object, "carried")) || wearing == worn)
             app_status(a, wearing ? "Choose a carried item you are not wearing." : "Choose a worn item.");
-        else add_event(a, world, verb, js(object, "name"), "", room);
+        else add_event(a, verb, js(object, "name"), "", room);
     } else if (!strcmp(verb, "say") || !strcmp(verb, "weather")) {
         if (!*name || strlen(name) > 600) app_status(a, "Enter text up to 600 bytes.");
-        else add_event(a, world, verb, "", name, room);
+        else add_event(a, verb, "", name, room);
     }
     cJSON_Delete(state);
 }
