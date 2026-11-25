@@ -111,7 +111,7 @@ const Command commands[] = {
     {"canon", " type | name | description", "Add a book-scoped canon entry"},
     {"promote", " entry ID", "Promote a Bible draft to canon"},
     {"context", "", "Inspect the assembled story sources"},
-    {"budget", " 128–32768", "Set estimated source-token budget"},
+    {"budget", " 128–32768", "Set the estimated context-token budget"},
     {"pin", " source ID", "Require a source in context"},
     {"exclude", " source ID", "Omit a source from context"},
     {"unpin", " source ID", "Restore default source inclusion"},
@@ -597,7 +597,7 @@ static void messages_for_story(App *a, Json *messages)
     }
     clear(&p->selection_trace);
     memory_inject(p->story, p->parent, p->memory_picks, &system, &p->selection_trace);
-    Json *path = story_path(p->story, p->parent), *node;
+    Json *path = story_path(p->story, p->parent);
     int covered = 0;
     const char *recap = memory_enabled(p->story) ? memory_recap(path, &covered) : "";
     if (*recap) format(&system, "\n\nRecap of older story messages:\n%s", recap);
@@ -612,31 +612,12 @@ static void messages_for_story(App *a, Json *messages)
     messages_add(messages, "system", str(&system));
     if (p->research_data.len) messages_add(messages, "user", str(&p->research_data));
     release(&system);
-    size_t bytes = 0;
-    int total = cJSON_GetArraySize(path), first = total;
-    /* Reserve room for the continuation cue when the history ends in an assistant turn. */
-    int history_limit = NEUTRINO_GATEWAY_MESSAGE_LIMIT - cJSON_GetArraySize(messages) - 1;
-    node = path->child ? path->child->prev : NULL;
-    while (first > 0 && node && total - first < history_limit) {
-        size_t n = strlen(js(node, "content"));
-        if (n > 64000 - bytes) break;
-        bytes += n;
-        first--;
-        node = node->prev;
-    }
-    if (total - first == history_limit && node && node->next && node->next != last &&
-        !strcmp(js(node->next, "role"), "assistant")) first++;
-    if (first < covered) first = covered;
-    if (first > covered) format(&p->selection_trace, "%d older messages omitted by the history size limit.\n", first - covered);
-    if (covered) format(&p->selection_trace, "Recap covers the first %d visible messages.\n", covered);
-    int i = 0;
-    const char *last_role = "";
-    cJSON_ArrayForEach(node, path) {
-        last_role = js(node, "role");
-        if (i++ < first) continue;
-        const char *content = js(node, "content");
-        if (node == last && !strcmp(last_role, "user")) {
-            if (p->tool_prose_only) continue;
+    int insertion = cJSON_GetArraySize(messages);
+    const char *last_role = js(last, "role");
+    if (last) {
+        const char *content = js(last, "content");
+        if (strcmp(last_role, "user")) messages_add(messages, last_role, content);
+        else if (!p->tool_prose_only) {
             Text selection = {0};
             bool attached = simulation_acoustic_selection_prompt(p, &selection, content);
             if (p->inline_research) {
@@ -646,7 +627,7 @@ static void messages_for_story(App *a, Json *messages)
                        "\n\nAnswer just this factual question in one or two sentences using the "
                        "retrieved evidence. Put the corresponding [[source number]] immediately after the fact.");
             }
-            const char *speaker = js(node,"speaker");
+            const char *speaker = js(last,"speaker");
             if (*speaker) {
                 Text labeled = {0};
                 format(&labeled,"[%s] %s",speaker,attached || p->inline_research ? str(&selection) : content);
@@ -654,12 +635,7 @@ static void messages_for_story(App *a, Json *messages)
                 release(&labeled);
             } else messages_add(messages, last_role, attached || p->inline_research ? str(&selection) : content);
             release(&selection);
-        } else if (!strcmp(last_role,"user") && *js(node,"speaker")) {
-            Text labeled = {0};
-            format(&labeled,"[%s] %s",js(node,"speaker"),content);
-            messages_add(messages,last_role,str(&labeled));
-            release(&labeled);
-        } else messages_add(messages, last_role, content);
+        }
     }
     if (p->tool_prose_only)
         messages_add(messages, "user", p->tool_measurement_retry ?
@@ -669,7 +645,7 @@ static void messages_for_story(App *a, Json *messages)
             "Write one complete sentence of dialogue or physical action. Describe what the character experiences." :
             "Write one or two sentences of dialogue or physical action showing the character's immediate reaction. "
             "Stay with what the character can sense or do. Leave measurements to the instrument readout.");
-    else if (i == first) messages_add(messages, "user", "Begin the story.");
+    else if (!last) messages_add(messages, "user", "Begin the story.");
     else if (!strcmp(last_role, "assistant"))
         messages_add(messages, "user", "Continue the story from this moment.");
     if (p->repeat_retry || p->completion_retry || (p->tool_feedback.len && !p->tool_prose_only)) {
@@ -691,6 +667,7 @@ static void messages_for_story(App *a, Json *messages)
         set(latest, "content", str(&revision));
         release(&revision);
     }
+    narrator_add_history(messages, path, covered, insertion, workspace_context_budget(&a->ws), &p->selection_trace);
     cJSON_Delete(path);
 }
 

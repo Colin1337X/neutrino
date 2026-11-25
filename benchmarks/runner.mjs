@@ -73,7 +73,7 @@ const stop=child=>new Promise(resolve=>{
 const append=(file,entry)=>fsp.appendFile(file,JSON.stringify(entry)+'\n');
 const revisions={neutrino:command('git','rev-parse','HEAD'),sillytavern:command('git','-C',st,'rev-parse','HEAD')};
 const settings={
-    context_boundary:'ST token target 4096; Neutrino approximates 4096 tokens as 16384 source bytes and applies its history policy.',
+    context_boundary:'Both fixtures target 4096 context tokens. Neutrino estimates rendered prompt size including message framing; pinned context and the latest instruction are retained.',
     controlled:'Same model, seed, initial facts, user cue, output token budget and provider sampling. Product prompts differ.',
     recommended:'Shared keyword lore contains the early fact. ST-EXTENDED enables the bundled Summarize Main API source. No embeddings model was configured.',
     ST_DEFAULT:{release:'1.19.1',extension_policy:'Bundled defaults; no third-party extensions.'},

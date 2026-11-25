@@ -1047,16 +1047,20 @@ static void collect_lore(const Json *story, const Json *book, const char *label,
         release(&scoped);
     }
 }
+int workspace_context_budget(const Workspace *ws)
+{
+    int budget = number(ws->root, "neutrinoBudget");
+    if (!budget) budget = number(ws->root, "contextBudget");
+    return budget >= 128 && budget <= 32768 ? budget : 5000;
+}
+
 bool collect_context_with_cue(const Workspace *ws, const Json *scene, const Json *story, int head,
                               const char *cue, Text *out, Text *trace)
 {
     Json *rec, *field, *bible = at(ws->root, "bible"), *records = at(ws->root, "records");
     const char *path = scene ? js(scene, "path") : js(story, "scene");
     bool fits = true;
-    size_t limit = 20000;
-    int budget = number(ws->root, "neutrinoBudget");
-    if (!budget) budget = number(ws->root, "contextBudget");
-    if (budget >= 128 && budget <= 32768) limit = (size_t)budget * 4;
+    size_t limit = (size_t)workspace_context_budget(ws) * 4;
     fits &= bounded_source(out, "Writing preferences", js(ws->root, "preferences"), limit);
     Json *controls = cJSON_CreateObject();
     cJSON_ArrayForEach(field, at(at(ws->root, "config"), "creativeControls"))

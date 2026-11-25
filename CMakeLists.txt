@@ -30,7 +30,7 @@ foreach(asset IN ITEMS index.html app.css app.js)
 endforeach()
 file(GENERATE OUTPUT "${browser_header}" CONTENT "${browser_assets}")
 add_executable(neutrino src/main.c src/workspace.c src/terminal.c src/inference.c src/gateway.c src/memory.c src/facts.c src/world.c src/ui.c src/web.c
-    src/simulation.c src/physics.c src/physics_flow.c src/physics_models.c src/measurements.c src/ray_gpu.c src/prose.c src/browser.c
+    src/simulation.c src/physics.c src/physics_flow.c src/physics_models.c src/measurements.c src/ray_gpu.c src/prose.c src/prompt.c src/browser.c
     third_party/cjson/cJSON.c)
 target_include_directories(neutrino PRIVATE third_party/cjson "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(neutrino PRIVATE CURL::libcurl)
@@ -68,6 +68,16 @@ if(BUILD_TESTING)
         target_link_libraries(compendium_claims_test PRIVATE m)
     endif()
     add_test(NAME compendium_claims COMMAND compendium_claims_test)
+
+    add_executable(prompt_budget_test tests/prompt_budget.c src/prompt.c src/workspace.c third_party/cjson/cJSON.c)
+    target_include_directories(prompt_budget_test PRIVATE src third_party/cjson)
+    if(MSVC)
+        target_compile_definitions(prompt_budget_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+    elseif(NOT WIN32)
+        target_compile_definitions(prompt_budget_test PRIVATE _POSIX_C_SOURCE=200809L _XOPEN_SOURCE=700)
+        target_link_libraries(prompt_budget_test PRIVATE m)
+    endif()
+    add_test(NAME prompt_budget COMMAND prompt_budget_test)
 
     add_executable(scene_physics_test tests/scene_physics.c src/physics.c src/physics_flow.c src/physics_models.c
         src/measurements.c src/ray_gpu.c src/simulation.c

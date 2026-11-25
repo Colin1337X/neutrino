@@ -75,6 +75,9 @@ int story_push(Workspace *ws, Json *story, int parent, const char *role, const c
 bool story_lorebook(const Json *input);
 void story_expand_names(const Json *story, const char *source, Text *out);
 Json *story_path(const Json *story, int head);
+int workspace_context_budget(const Workspace *ws);
+void narrator_add_history(Json *messages, const Json *path, int covered, int insertion,
+                          int budget, Text *trace);
 void workspace_demo(Workspace *ws);
 bool collect_context(const Workspace *ws, const Json *scene, const Json *story, int head, Text *out, Text *trace);
 bool collect_context_with_cue(const Workspace *ws, const Json *scene, const Json *story, int head,
