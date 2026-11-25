@@ -94,7 +94,7 @@ static bool ray(const Json *args, Text *out)
 }
 
 enum { RAY_BATCH_MAX = 4096 };
-typedef struct { double lo[3], hi[3]; } Box;
+typedef PhysicsBox Box;
 typedef enum { BACKEND_AUTO, BACKEND_CPU, BACKEND_GPU, BACKEND_VULKAN, BACKEND_RT, BACKEND_INVALID } Backend;
 
 static Backend backend(const Json *args)
@@ -132,7 +132,28 @@ static bool room_flow(const Json *args, const Box *room, FlowConfig *config)
 {
     double length[3];
     for (int axis = 0; axis < 3; ++axis) length[axis] = room->hi[axis] - room->lo[axis];
-    return flow_parse(args, length, config);
+    return flow_parse(args, length, config) &&
+        (!at(args, "solid_geometry") || (cJSON_IsBool(at(args, "solid_geometry")) &&
+        (!cJSON_IsTrue(at(args, "solid_geometry")) || config->cfd)));
+}
+
+static FlowField room_flow_solve(const Json *room, const Box *bounds, const FlowConfig *config)
+{
+    if (!cJSON_IsTrue(at(at(room, "medium"), "solid_geometry"))) return flow_solve(config);
+    Box solids[128];
+    size_t count = 0;
+    const Json *item;
+    cJSON_ArrayForEach(item, at(room, "objects")) {
+        if (count == sizeof solids / sizeof *solids || !read_box(item, &solids[count])) {
+            return (FlowField){.fallback = "CFD requires at most 128 valid obstacle boxes"};
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            solids[count].lo[axis] -= bounds->lo[axis];
+            solids[count].hi[axis] -= bounds->lo[axis];
+        }
+        ++count;
+    }
+    return flow_solve_domain(config, solids, count);
 }
 
 static Json *scene_object(const Json *objects, const char *name)
@@ -157,9 +178,50 @@ static bool scene_name(const char *name)
     return true;
 }
 
+int physics_scene_relation(const Json *settings, const char *entity, const char *target)
+{
+    const Json *room = active_room(settings), *objects = at(room, "objects");
+    if (!room) return -1;
+    const Json *object = scene_object(objects, entity);
+    if (!target) return object != nullptr;
+    Box a, b;
+    if (!read_box(object, &a) || !read_box(scene_object(objects, target), &b)) return -1;
+    for (int axis = 0; axis < 3; ++axis)
+        if (a.hi[axis] <= b.lo[axis] || b.hi[axis] <= a.lo[axis]) return 0;
+    return 1;
+}
+
+static bool acoustic_properties(const Json *material, double *loss, double *reflectivity)
+{
+    return cJSON_IsObject(material) && physics_scalar(material, "loss_db_per_m", 0, 1e6, loss) &&
+        physics_scalar(material, "reflectivity", 0, 1, reflectivity);
+}
+
+static bool optical_properties(const Json *optical, double *transmission, double *reflectivity, double *loss)
+{
+    return cJSON_IsObject(optical) && physics_optional(optical, "transmission", 0, 1, 0, transmission) &&
+        physics_optional(optical, "reflectivity", 0, 1, 0, reflectivity) &&
+        physics_optional(optical, "loss_db_per_m", 0, 1e6, 0, loss) && *transmission + *reflectivity <= 1;
+}
+
 bool physics_scene_edit(Json *settings, const Json *op)
 {
     const char *tool = js(op, "neutrino_tool");
+    if (!strcmp(tool, "scene_material")) {
+        const char *name = js(op, "name");
+        const Json *acoustic = at(op, "acoustic"), *optical = at(op, "optical");
+        double first, second, third;
+        if (!scene_name(name) || (!acoustic && !optical) ||
+            (acoustic && !acoustic_properties(acoustic, &first, &second)) ||
+            (optical && !optical_properties(optical, &first, &second, &third))) return false;
+        Json *materials = at(settings, "materials3d");
+        if (!materials) put(settings, "materials3d", materials = cJSON_CreateObject());
+        Json *entry = cJSON_CreateObject();
+        if (acoustic) put(entry, "material", cJSON_Duplicate(acoustic, true));
+        if (optical) put(entry, "optical", cJSON_Duplicate(optical, true));
+        put(materials, name, entry);
+        return true;
+    }
     if (!strcmp(tool,"scene_select")) {
         const char *name = js(op,"name");
         if (!cJSON_IsString(at(op,"name")) ||
@@ -198,6 +260,13 @@ bool physics_scene_edit(Json *settings, const Json *op)
         return true;
     }
     if (!room || !read_box(room, &bounds)) return false;
+    if (!strcmp(tool, "scene_air")) {
+        const char *id = js(op, "material_id");
+        if (!cJSON_IsString(at(op, "material_id")) ||
+            (*id && !at(at(settings, "materials3d"), id))) return false;
+        set(room, "air", id);
+        return true;
+    }
     if (!strcmp(tool, "scene_medium")) {
         if (cJSON_IsTrue(at(op, "off"))) {
             cJSON_DeleteItemFromObjectCaseSensitive(room, "medium");
@@ -207,7 +276,7 @@ bool physics_scene_edit(Json *settings, const Json *op)
         if (!room_flow(op, &bounds, &config)) return false;
         Json *medium = cJSON_CreateObject();
         const char *const keys[] = {"method","seconds","sigma_m","concentration","viscosity","diffusivity","vortex_m_s",
-                                    "resolution","center","wind","sound_loss","light_loss","memory","backend"};
+                                    "resolution","center","wind","sound_loss","light_loss","memory","backend","solid_geometry"};
         for (size_t i = 0; i < sizeof keys / sizeof *keys; ++i)
             if (at(op,keys[i])) put(medium,keys[i],cJSON_Duplicate(at(op,keys[i]),true));
         put(room, "medium", medium);
@@ -216,6 +285,18 @@ bool physics_scene_edit(Json *settings, const Json *op)
     const char *name = js(op, "name");
     if (!scene_name(name)) return false;
     Json *object = scene_object(objects, name);
+    if (!strcmp(tool, "scene_translate")) {
+        double offset[3];
+        if (!read_box(object, &shape) || !physics_vector(op, "offset", offset)) return false;
+        for (int axis = 0; axis < 3; ++axis) {
+            shape.lo[axis] += offset[axis];
+            shape.hi[axis] += offset[axis];
+        }
+        if (!contained_box(&bounds, &shape)) return false;
+        put(object, "min", cJSON_CreateDoubleArray(shape.lo, 3));
+        put(object, "max", cJSON_CreateDoubleArray(shape.hi, 3));
+        return true;
+    }
     if (!strcmp(tool, "scene_remove")) {
         if (!object) return false;
         cJSON_Delete(cJSON_DetachItemViaPointer(objects, object));
@@ -227,21 +308,19 @@ bool physics_scene_edit(Json *settings, const Json *op)
     if (strcmp(kind, "object") && strcmp(kind, "wall")) return false;
     const Json *material = at(op, "material");
     const Json *optical = at(op, "optical");
+    const char *material_id = js(op, "material_id");
+    if (at(op, "material_id") && (!scene_name(material_id) || material || optical ||
+        !at(at(settings, "materials3d"), material_id))) return false;
     double loss, reflectivity;
     double transmission, optical_reflection, optical_loss;
-    if (material && (!cJSON_IsObject(material) ||
-        !physics_scalar(material, "loss_db_per_m", 0, 1e6, &loss) ||
-        !physics_scalar(material, "reflectivity", 0, 1, &reflectivity))) return false;
-    if (optical && (!cJSON_IsObject(optical) ||
-        !physics_optional(optical,"transmission",0,1,0,&transmission) ||
-        !physics_optional(optical,"reflectivity",0,1,0,&optical_reflection) ||
-        !physics_optional(optical,"loss_db_per_m",0,1e6,0,&optical_loss) ||
-        transmission + optical_reflection > 1.0)) return false;
+    if (material && !acoustic_properties(material, &loss, &reflectivity)) return false;
+    if (optical && !optical_properties(optical, &transmission, &optical_reflection, &optical_loss)) return false;
     Json *copy = cJSON_CreateObject();
     set(copy, "name", name);
     set(copy, "kind", kind);
     put(copy, "min", cJSON_Duplicate(at(op, "min"), true));
     put(copy, "max", cJSON_Duplicate(at(op, "max"), true));
+    if (*material_id) set(copy, "material_id", material_id);
     if (material) {
         Json *attributes = cJSON_CreateObject();
         put(attributes, "loss_db_per_m", cJSON_CreateNumber(loss));
@@ -773,7 +852,7 @@ static bool acoustic(const Json *args, const Json *settings, const FlowField *fi
     }
     return true;
 }
-static bool light(const Json *args, const Json *scene, const Box *room, const FlowField *field,
+static bool light(const Json *args, const Json *scene, const Box *room, const FlowField *field, double air_loss,
                   Text *out, PhysicsReading *reading)
 {
     const Backend selected = backend(args);
@@ -821,6 +900,7 @@ static bool light(const Json *args, const Json *scene, const Box *room, const Fl
         return true;
     }
     format(out,"3D geometric light (%s direct/room visibility", tested ? engine : "no opaque blockers");
+    if (reading) reading->kind = READING_OPTICAL;
     if (count > room_paths) append(out,", CPU object reflections");
     append(out,"). Relative power at 1 m.");
     const double field_loss = field ? field->config.light_loss : 0;
@@ -850,15 +930,31 @@ static bool light(const Json *args, const Json *scene, const Box *room, const Fl
         const double floor_db = -300;
         double budget = 20*log10(path->reflection/path_length) - floor_db;
         int crossings = 0;
-        if (budget <= 0 || !attenuate_path(optics,objects,path->object,source,end,0,room,field,field_loss,&budget,&crossings) ||
-            (i && !attenuate_path(optics,objects,path->object,end,listener,0,room,field,field_loss,&budget,&crossings))) {
+        if (budget <= 0 || !attenuate_path(optics,objects,path->object,source,end,air_loss,room,field,field_loss,&budget,&crossings) ||
+            (i && !attenuate_path(optics,objects,path->object,end,listener,air_loss,room,field,field_loss,&budget,&crossings))) {
             append(out," below cutoff.");
             continue;
         }
         const double level = floor_db + budget;
+        double power = pow(10, level / 10), delay = path_length / 0.299792458;
+        if (reading) {
+            if (!reading->optical_power || delay < reading->optical_first_ns) reading->optical_first_ns = delay;
+            reading->optical_power = fmax(reading->optical_power, power);
+        }
         format(out," %.7g m · %.7g ns · %+.7g dB · relative power %.7g.",
-               path_length,path_length/0.299792458,level,pow(10,level/10));
+               path_length,delay,level,power);
     }
+    return true;
+}
+
+static bool endpoint(const Json *args, const Json *objects, const char *id_key, const char *point_key,
+                     double center[3])
+{
+    if (!at(args, id_key)) return physics_vector(args, point_key, center);
+    Box box;
+    if (at(args, point_key) || !scene_name(js(args, id_key)) ||
+        !read_box(scene_object(objects, js(args, id_key)), &box)) return false;
+    for (int axis = 0; axis < 3; ++axis) center[axis] = (box.lo[axis] + box.hi[axis]) / 2;
     return true;
 }
 
@@ -897,6 +993,7 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
         put(page,"min",cJSON_Duplicate(at(room,"min"),true));
         put(page,"max",cJSON_Duplicate(at(room,"max"),true));
         if (at(room,"medium")) put(page,"medium",cJSON_Duplicate(at(room,"medium"),true));
+        if (*js(room, "air")) set(page, "air", js(room, "air"));
         put(page,"objects",entries);
         int index = 0, shown = 0;
         cJSON_ArrayForEach(item,objects) {
@@ -915,9 +1012,37 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
         return true;
     }
     if (!strcmp(tool, "scene_rays")) return scene_rays(args, room, &bounds, out, reading);
+    if (!strcmp(tool, "scene_flow")) {
+        FlowConfig config;
+        double point[3];
+        if (!at(room, "medium") || !room_flow(at(room, "medium"), &bounds, &config) ||
+            !physics_vector(args, "probe", point) || !strictly_inside(&bounds, point)) return false;
+        FlowField field = room_flow_solve(room, &bounds, &config);
+        if (!field.grid && cJSON_IsTrue(at(at(room, "medium"), "solid_geometry"))) {
+            if (reading) reading->unavailable = true;
+            format(out, "Geometry-aware CFD unavailable. %s.", field.fallback ? field.fallback : "No grid");
+        } else {
+            for (int axis = 0; axis < 3; ++axis) point[axis] -= bounds.lo[axis];
+            double concentration = flow_sample(&field, point);
+            if (reading) {
+                reading->kind = READING_FLOW;
+                reading->tracer_concentration = concentration;
+                reading->voxel_flow = field.solid != nullptr;
+            }
+            format(out, "%s. Probe concentration %.9g. RMS divergence %.9g s^-1. Mean speed %.9g m/s.",
+                   field.method, concentration, field.divergence, field.speed);
+            if (field.fallback) format(out, " Fallback: %s.", field.fallback);
+        }
+        flow_release(&field);
+        return true;
+    }
     const bool optical = !strcmp(tool,"scene_light");
     if (at(args, "min") || at(args, "max") || at(args, "blockers")) return false;
     const Json *include = at(args,"include"), *objects = at(room,"objects"), *entry;
+    const char *source_id = js(args, "source_entity"), *receiver_id = js(args, "receiver_entity");
+    double source[3], listener[3];
+    if (!endpoint(args, objects, "source_entity", "source", source) ||
+        !endpoint(args, objects, "receiver_entity", "listener", listener)) return false;
     if (include && (!cJSON_IsArray(include) || cJSON_GetArraySize(include) > ACOUSTIC_BLOCKERS)) return false;
     if (!include && cJSON_GetArraySize(objects) > ACOUSTIC_BLOCKERS) {
         if (reading) reading->unavailable = true;
@@ -941,21 +1066,56 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
         objects = selection;
         append(out,"Selected-object measurement. Unselected geometry is outside this calculation. ");
     }
+    const Json *materials = at(settings, "materials3d");
+    if ((materials || *source_id || *receiver_id) && !filtered) {
+        filtered = cJSON_CreateObject();
+        put(filtered, "objects", cJSON_Duplicate(objects, true));
+        objects = at(filtered, "objects");
+    }
+    if (filtered) {
+        Json *selection = at(filtered, "objects");
+        for (Json *object = selection ? selection->child : nullptr, *next; object; object = next) {
+            next = object->next;
+            const char *name = js(object, "name");
+            if ((*source_id && !strcmp(name, source_id)) || (*receiver_id && !strcmp(name, receiver_id))) {
+                cJSON_Delete(cJSON_DetachItemViaPointer(selection, object));
+                continue;
+            }
+            const Json *material = at(materials, js(object, "material_id"));
+            if (at(material, "material")) put(object, "material", cJSON_Duplicate(at(material, "material"), true));
+            if (at(material, "optical")) put(object, "optical", cJSON_Duplicate(at(material, "optical"), true));
+        }
+    }
     FlowConfig config;
     FlowField field = {0};
     const FlowField *gas = nullptr;
     if (at(room,"medium") && room_flow(at(room,"medium"),&bounds,&config) &&
         (optical ? config.light_loss : config.sound_loss) > 0) {
-        field = flow_solve(&config);
+        field = room_flow_solve(room, &bounds, &config);
+        if (!field.grid && cJSON_IsTrue(at(at(room, "medium"), "solid_geometry"))) {
+            if (reading) reading->unavailable = true;
+            format(out, "Geometry-aware CFD unavailable. %s.", field.fallback ? field.fallback : "No grid");
+            cJSON_Delete(filtered);
+            flow_release(&field);
+            return true;
+        }
         gas = &field;
     }
+    const Json *air = at(materials, js(room, "air"));
+    Json *query = cJSON_Duplicate(args, true);
+    put(query, "source", cJSON_CreateDoubleArray(source, 3));
+    put(query, "listener", cJSON_CreateDoubleArray(listener, 3));
     if (optical) {
-        bool valid = light(args, filtered ? filtered : room, &bounds, gas, out, reading);
+        double air_loss = 0;
+        physics_optional(at(air, "optical"), "loss_db_per_m", 0, 1e6, 0, &air_loss);
+        bool valid = light(query, filtered ? filtered : room, &bounds, gas, air_loss, out, reading);
+        cJSON_Delete(query);
         cJSON_Delete(filtered);
         flow_release(&field);
         return valid;
     }
-    Json *query = cJSON_Duplicate(args, true);
+    if (!at(query, "medium") && at(air, "material"))
+        put(query, "medium", cJSON_Duplicate(at(air, "material"), true));
     put(query, "min", cJSON_Duplicate(at(room, "min"), true));
     put(query, "max", cJSON_Duplicate(at(room, "max"), true));
     put(query, "blockers", cJSON_Duplicate(objects, true));
@@ -1015,7 +1175,7 @@ bool physics_run_reading(const char *name, const Json *args, const Json *setting
 {
     if (reading) *reading = (PhysicsReading){0};
     if (!strcmp(name, "scene_inspect") || !strcmp(name, "scene_rays") || !strcmp(name, "scene_acoustic") ||
-        !strcmp(name, "scene_light") || !strcmp(name,"scene_catalog"))
+        !strcmp(name, "scene_light") || !strcmp(name,"scene_catalog") || !strcmp(name, "scene_flow"))
         return scene_query(name, args, settings, out, reading);
     if (!strcmp(name, "ray")) return ray(args, out);
     if (!strcmp(name, "rays")) return rays(args, out, reading);

@@ -134,6 +134,8 @@ The narrator can create, edit, and remove map features and entities with `world`
 
 For dependent narrator actions, use an object with an `actions` array. Operations run in order against a staged copy of the scene. Add `"continue":true` beside `actions` to let the narrator use the results to select another tool. If a step fails, the sequence is discarded and `/trace` identifies the failed step.
 
+Use `sim_plan` for a hypothetical experiment or an ordered set of staged changes with typed consequence queries. The terminal, web composer, and narrator share the same executor. See the [multiphysics guide](docs/MULTIPHYSICS.md) for runnable examples, shared materials, and voxel CFD.
+
 To run the same sequence directly, paste its JSON after `/sim`. The panel shows each result, and a valid sequence applies its changes to the current branch immediately.
 
 ### Headless 3D room

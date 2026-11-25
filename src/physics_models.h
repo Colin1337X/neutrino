@@ -19,9 +19,12 @@ typedef struct {
     bool cfd, mapped, gpu;
 } FlowConfig;
 
+typedef struct { double lo[3], hi[3]; } PhysicsBox;
+
 typedef struct {
     FlowConfig config;
     double *grid;
+    unsigned char *solid;
     double divergence, speed, tracer_mean;
     const char *method;
     const char *memory;
@@ -31,6 +34,7 @@ typedef struct {
 
 bool flow_parse(const Json *args, const double length[3], FlowConfig *config);
 FlowField flow_solve(const FlowConfig *config);
+FlowField flow_solve_domain(const FlowConfig *config, const PhysicsBox *solids, size_t count);
 double flow_sample(const FlowField *field, const double local[3]);
 double flow_column(const FlowField *field, const double a[3], const double b[3], const double origin[3],
                    double start, double end);

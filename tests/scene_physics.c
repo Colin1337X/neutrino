@@ -6,6 +6,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 void app_info(App *app, const char *title) { (void)app; (void)title; }
 void app_status(App *app, const char *message) { (void)app; (void)message; }
@@ -17,6 +18,99 @@ static void free_protocol(Preview *p)
     cJSON_Delete(p->tool_requests);
     release(&p->tool_feedback);
     release(&p->tool_results);
+}
+
+static bool scenario_protocol(void)
+{
+    const char *experiment =
+        "{\"neutrino_tool\":\"sim_plan\",\"name\":\"relay\",\"mode\":\"hypothetical\","
+        "\"actions\":["
+        "{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[10,4,4]},"
+        "{\"neutrino_tool\":\"scene_material\",\"name\":\"pane\","
+            "\"acoustic\":{\"loss_db_per_m\":20,\"reflectivity\":0},\"optical\":{\"transmission\":0.5}},"
+        "{\"neutrino_tool\":\"scene_material\",\"name\":\"dense air\","
+            "\"acoustic\":{\"loss_db_per_m\":6,\"reflectivity\":0},\"optical\":{\"loss_db_per_m\":100}},"
+        "{\"neutrino_tool\":\"scene_place\",\"name\":\"pane\",\"kind\":\"wall\","
+            "\"min\":[2.5,1,1],\"max\":[3.5,3,3],\"material_id\":\"pane\"},"
+        "{\"neutrino_tool\":\"scene_place\",\"name\":\"bell\",\"kind\":\"object\","
+            "\"min\":[0.9,1.9,1.9],\"max\":[1.1,2.1,2.1]},"
+        "{\"neutrino_tool\":\"scene_acoustic\",\"source_entity\":\"bell\",\"listener\":[5,2,2],\"min_level_db\":-50},"
+        "{\"neutrino_tool\":\"scene_light\",\"source_entity\":\"bell\",\"listener\":[5,2,2]},"
+        "{\"neutrino_tool\":\"scene_air\",\"material_id\":\"dense air\"},"
+        "{\"neutrino_tool\":\"scene_acoustic\",\"source_entity\":\"bell\",\"listener\":[5,2,2],\"min_level_db\":-50},"
+        "{\"neutrino_tool\":\"scene_light\",\"source_entity\":\"bell\",\"listener\":[5,2,2]}],"
+        "\"queries\":[{\"id\":\"beforeSound\",\"predicate\":\"signal.arrival_before\",\"step\":6,\"threshold\":12},"
+        "{\"id\":\"beforeLight\",\"predicate\":\"signal.arrival_before\",\"step\":7,\"threshold\":0.000014},"
+        "{\"id\":\"afterSound\",\"predicate\":\"signal.reaches_receiver\",\"step\":9},"
+        "{\"id\":\"afterLight\",\"predicate\":\"signal.reaches_receiver\",\"step\":10},"
+        "{\"id\":\"missing\",\"predicate\":\"entity.exists\",\"entity\":\"missing\"},"
+        "{\"id\":\"unknown\",\"predicate\":\"thermal.phase_changed\"}]}";
+    Preview p = {.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    bool ok = simulation_tool_reply(&p, experiment) == SIM_REGENERATE && !p.tool_pending &&
+        !p.reading_count && p.tool_prose_only && !at(p.story, "simLog");
+    Json *report = cJSON_Parse(str(&p.tool_feedback));
+    const Json *results = at(report, "consequences");
+    const char *const expected[] = {"TRUE", "TRUE", "FALSE", "FALSE", "FALSE", "UNSUPPORTED"};
+    for (int i = 0; i < 6; ++i)
+        ok &= !strcmp(js(cJSON_GetArrayItem(results, i), "result"), expected[i]);
+    const Json *delay = at(cJSON_GetArrayItem(results, 0), "value");
+    ok &= cJSON_IsNumber(delay) && fabs(delay->valuedouble - 1000 * 4 / sqrt(1.4 * 287.05 * 293.15)) < 1e-9;
+    cJSON_Delete(report);
+    free_protocol(&p);
+
+    p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    const char *stage =
+        "{\"neutrino_tool\":\"sim_plan\",\"mode\":\"stage\",\"name\":\"gravity\",\"actions\":["
+        "{\"neutrino_tool\":\"tune\",\"setting\":\"gravity\",\"value\":1},"
+        "{\"neutrino_tool\":\"fluid\",\"height\":1,\"tank_area\":2,\"outlet_area\":0.003,\"seconds\":10}],"
+        "\"queries\":[{\"id\":\"drain\",\"predicate\":\"fluid.volume_exceeds\",\"step\":2,\"threshold\":25}]}";
+    ok &= simulation_tool_reply(&p, stage) == SIM_REGENERATE && cJSON_GetArraySize(p.tool_pending) == 1 &&
+        p.reading_count == 1 && strstr(str(&p.tool_feedback), "\"pending_commit\":true") &&
+        !at(p.story, "simLog");
+    report = cJSON_Parse(str(&p.tool_feedback));
+    const Json *volume = at(cJSON_GetArrayItem(at(report, "consequences"), 0), "value");
+    double remaining = 1 - 0.62 * 0.003 * sqrt(2) * 10 / 4;
+    ok &= cJSON_IsNumber(volume) && fabs(volume->valuedouble - 2000 * (1 - remaining * remaining)) < 1e-10;
+    cJSON_Delete(report);
+    Workspace ws = {.root = cJSON_CreateObject()};
+    int id = story_push(&ws, p.story, 0, "assistant", "The water trickles out.");
+    int other = story_push(&ws, p.story, 0, "assistant", "The water rushes out.");
+    App a = {0};
+    simulation_commit(&a, &p, id);
+    const Json *log = at(p.story, "simLog");
+    ok &= id > 0 && other != id && cJSON_GetArraySize(log) == 2;
+    for (const Json *op = log ? log->child : nullptr; op; op = op->next)
+        ok &= number(op, "anchor") == id;
+    cJSON_Delete(ws.root);
+    free_protocol(&p);
+
+    p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    ok &= simulation_tool_reply(&p,
+        "{\"neutrino_tool\":\"sim_plan\",\"name\":\"failure\",\"mode\":\"stage\","
+        "\"actions\":[{\"neutrino_tool\":\"tune\",\"setting\":\"gravity\",\"value\":1},"
+        "{\"neutrino_tool\":\"scene_translate\",\"name\":\"missing\",\"offset\":[1,0,0]}],"
+        "\"queries\":[{\"id\":\"missing\",\"predicate\":\"entity.exists\",\"entity\":\"missing\"}]}") == SIM_REGENERATE &&
+        !p.tool_pending && strstr(str(&p.tool_feedback), "SIMULATION_FAILED");
+    free_protocol(&p);
+
+    p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    ok &= simulation_tool_reply(&p,
+        "{\"neutrino_tool\":\"sim_plan\",\"name\":\"condition\",\"mode\":\"stage\","
+        "\"max_actions\":2,\"actions\":["
+        "{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[8,8,8]},"
+        "{\"neutrino_tool\":\"scene_remove\",\"name\":\"missing\","
+        "\"when\":{\"predicate\":\"entity.exists\",\"entity\":\"missing\"}}],\"queries\":[]}") == SIM_REGENERATE &&
+        cJSON_GetArraySize(p.tool_pending) == 1 && strstr(str(&p.tool_results), "action skipped");
+    free_protocol(&p);
+
+    p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    ok &= simulation_tool_reply(&p,
+        "{\"neutrino_tool\":\"sim_plan\",\"name\":\"budget\",\"mode\":\"stage\","
+        "\"max_actions\":1,\"actions\":[{\"neutrino_tool\":\"tune\",\"setting\":\"gravity\",\"value\":1},"
+        "{\"neutrino_tool\":\"tune\",\"setting\":\"gravity\",\"value\":2}],\"queries\":[]}") == SIM_REGENERATE &&
+        !p.tool_pending && strstr(str(&p.tool_results), "action budget");
+    free_protocol(&p);
+    return ok;
 }
 
 static bool tool_protocol(void)
@@ -123,6 +217,58 @@ static bool ordered_protocol(void)
     free_protocol(&p);
     release(&plan);
     return ok;
+}
+
+static bool solid_cfd(void)
+{
+    FlowConfig config = {.length={8,8,8},.center={4.5,4.5,4.5},.sigma=.3,.density=1,
+                         .diffusivity=.1,.resolution=8,.cfd=true};
+    PhysicsBox walls[] = {{{2,0,0},{3,8,8}},{{6,0,0},{7,8,8}}};
+    FlowField initial = flow_solve_domain(&config, walls, 2);
+    config.seconds = 10;
+    FlowField closed = flow_solve_domain(&config, walls, 2), open = flow_solve(&config);
+    double solid_point[] = {6.5,4.5,4.5}, isolated[] = {7.5,4.5,4.5};
+    bool ok = initial.grid && closed.grid && closed.solid && open.grid &&
+        flow_sample(&closed, solid_point) == 0 && flow_sample(&closed, isolated) < 1e-8 &&
+        flow_sample(&open, isolated) > 1e-4 && fabs(closed.tracer_mean - initial.tracer_mean) < 1e-12 &&
+        closed.divergence == 0 && closed.speed == 0;
+    if (!ok) fprintf(stderr, "Voxel CFD open %.9g, isolated %.9g, mass delta %.9g\n",
+        flow_sample(&open, isolated), flow_sample(&closed, isolated), closed.tracer_mean-initial.tracer_mean);
+    flow_release(&initial);
+    flow_release(&closed);
+    flow_release(&open);
+    return ok;
+}
+
+static int cfd_timing(void)
+{
+    const PhysicsBox walls[] = {{{2,0,0},{3,8,8}},{{6,0,0},{7,8,8}}};
+    const int resolutions[] = {8, 16, 24};
+    puts("resolution,obstacles,repetition,mean_ms,divergence_s_inv");
+    for (size_t i = 0; i < sizeof resolutions / sizeof *resolutions; ++i) {
+        FlowConfig config = {.length={8,8,8},.center={4.5,4.5,4.5},.sigma=.5,.density=1,
+            .diffusivity=.02,.viscosity=.01,.seconds=2,.wind={.25,0,0},
+            .vortex=.05,.resolution=resolutions[i],.cfd=true};
+        for (int obstacles = 0; obstacles <= 2; obstacles += 2) {
+            for (int sample = 0; sample <= 5; ++sample) {
+                double divergence = 0;
+                const int batches = 10;
+                clock_t start = clock();
+                for (int batch = 0; batch < batches; ++batch) {
+                    FlowField field = flow_solve_domain(&config, walls, (size_t)obstacles);
+                    bool valid = field.grid && (!obstacles || field.solid) && isfinite(field.divergence);
+                    divergence = field.divergence;
+                    flow_release(&field);
+                    if (!valid) return 1;
+                }
+                clock_t end = clock();
+                if (start == (clock_t)-1 || end == (clock_t)-1) return 1;
+                if (sample) printf("%d,%d,%d,%.6f,%.9g\n", config.resolution, obstacles, sample,
+                    1000.0 * (end - start) / (CLOCKS_PER_SEC * (double)batches), divergence);
+            }
+        }
+    }
+    return 0;
 }
 
 static bool scene_protocol(const char *backend)
@@ -627,6 +773,7 @@ static bool supplied_acoustic_protocol(void)
 
 int main(int argc, char **argv)
 {
+    if (argc > 1 && !strcmp(argv[1], "--cfd-timing")) return cfd_timing();
     const struct {
         const char *name, *json, *expected;
     } cases[] = {
@@ -724,6 +871,8 @@ int main(int argc, char **argv)
         failures++;
     } else if (argc > 1 && !strcmp(argv[1],"--cfd-gpu")) puts("OpenCL pressure projection matches CPU; Windows mapped memory matches CPU.");
     if (!optics_and_gas()) { fputs("3D optics and gas attenuation checks failed.\n", stderr); failures++; }
+    if (!scenario_protocol()) { fputs("Typed scenario protocol failed.\n", stderr); failures++; }
+    if (!solid_cfd()) { fputs("Voxel CFD boundary test failed.\n", stderr); failures++; }
     if (!scene_protocol("cpu")) { fputs("3D scene simulation protocol failed.\n", stderr); failures++; }
 #ifndef NEUTRINO_VULKAN_RT
     Json *no_rt = cJSON_Parse(cases[3].json);

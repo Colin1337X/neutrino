@@ -64,7 +64,8 @@ static bool apply_stat(Json *state, const Json *op)
     int value;
     if (!strcmp(tool, "tune")) return physics_tune(at(state, "physics"), op);
     if (!strcmp(tool, "scene_room") || !strcmp(tool, "scene_place") || !strcmp(tool, "scene_remove") ||
-        !strcmp(tool, "scene_medium") || !strcmp(tool,"scene_select"))
+        !strcmp(tool, "scene_medium") || !strcmp(tool,"scene_select") || !strcmp(tool, "scene_material") ||
+        !strcmp(tool, "scene_air") || !strcmp(tool, "scene_translate"))
         return physics_scene_edit(at(state, "physics"), op);
     if (!strcmp(tool, "set_time") || !strcmp(tool, "auto_time") || !strcmp(tool, "advance")) {
         const bool step = !strcmp(tool, "auto_time"), advancing = !strcmp(tool, "advance");
@@ -252,6 +253,25 @@ static const char tool_help[] =
     "inventory: action (add/edit/take/drop/wear/remove/give), name, description for add/edit, target for give. "
     "World and inventory actions can include actor (party member name or @default); otherwise use the active character. "
     "World actions say (description) and use (name, optional description) record events.\n";
+static const char scenario_help[] =
+    "scene_material registers a name with acoustic and/or optical property objects; scene_place can reference it with material_id.\n"
+    "scene_air selects a material_id for room-medium attenuation. scene_translate moves a named box by an offset vector. "
+    "Scene acoustic and light endpoints can use source_entity and receiver_entity instead of coordinates.\n"
+    "For voxel CFD, add solid_geometry:true with method:cfd to scene_medium. scene_flow reads concentration at a probe point.\n"
+    "sim_plan: name, mode (hypothetical/stage), actions (ordered tool objects), queries (id and predicate). "
+    "Hypothetical plans leave the story unchanged. Predicates: entity.exists(entity), entity.overlaps(entity,target), "
+    "fluid.volume_exceeds(step,threshold in L), fluid.level_exceeds(step,threshold in m), "
+    "fluid.concentration_exceeds(step,relative tracer threshold), "
+    "signal.reaches_receiver(step), signal.arrival_before(step,threshold in ms), "
+    "signal.power_exceeds(step,relative optical power threshold). Steps are one-based. "
+    "An action's optional when condition uses the same predicate fields as a query without id, "
+    "and may specify expect:false to run on a false result.\n"
+    "Valid minimal example (replace the example values with the scene's own): "
+    "{\"neutrino_tool\":\"sim_plan\",\"name\":\"drain\",\"mode\":\"hypothetical\","
+    "\"actions\":[{\"neutrino_tool\":\"fluid\",\"height\":1,\"tank_area\":2,\"outlet_area\":0.003,\"seconds\":10}],"
+    "\"queries\":[{\"id\":\"spills\",\"predicate\":\"fluid.volume_exceeds\",\"step\":1,\"threshold\":80}]}. "
+    "Use these exact field names and numeric values without unit suffixes. Send the tool object alone.\n";
+
 static const char physics_help[] =
     "tune: setting and numeric value. gravity (0.1–30 m/s²), outlet_coefficient (0.1–1), ambient_kelvin (150–400 K), wall_reflectivity (0–1).\n"
     "ray: origin, direction, min, max (three-number arrays in metres, min/max are box corners).\n"
@@ -332,6 +352,7 @@ void simulation_prompt(const Preview *p, Text *system)
                        "{\"neutrino_tool\":\"acoustic\"}. The simulator uses the supplied values, including the materials.\n");
         append(system, tool_help);
         append(system, physics_help);
+        append(system, scenario_help);
     } else append(system, "\nWrite only in-world narrative or dialogue. Show what the character senses or does in the scene. "
                   "Keep implementation details out of the fiction.\n");
     if (p->tool_feedback.len)
@@ -365,7 +386,7 @@ static bool structured_reply(const char *body)
 static bool breaks_character(const char *body)
 {
     static const char *const phrases[] = {
-        "json", "neutrino_tool", "narrative flow", "narrative pacing", "story pacing",
+        "json", "neutrino_tool", "sim_plan", "narrative flow", "narrative pacing", "story pacing",
         "as a narrator", "out of character", "physics tool rejected"
     };
     for (const char *word = body; *word; ++word) {
@@ -407,7 +428,8 @@ static bool read_only_tool(const char *tool)
     return !strcmp(tool, "ray") || !strcmp(tool, "rays") || !strcmp(tool, "acoustic") ||
            !strcmp(tool, "fluid") || !strcmp(tool, "gas") || !strcmp(tool, "prop_load") ||
            !strcmp(tool, "scene_inspect") || !strcmp(tool, "scene_rays") || !strcmp(tool, "scene_acoustic") ||
-           !strcmp(tool, "scene_light") || !strcmp(tool,"scene_catalog") || !strcmp(tool,"world_inspect") ||
+           !strcmp(tool, "scene_light") || !strcmp(tool,"scene_catalog") || !strcmp(tool, "scene_flow") ||
+           !strcmp(tool,"world_inspect") ||
            physics_model_tool(tool);
 }
 
@@ -579,7 +601,8 @@ static void execute_tool(Preview *p, const Json *op, const char *json)
         Json *world = !strcmp(tool,"world_inspect") ? preview_world(p) : nullptr;
         if (!run_sim_read(tool,op,world ? world : p->story,p->parent,state,&result,&reading))
             append(&result, "Physics tool arguments rejected.");
-        else if (reading.kind != READING_NONE && p->reading_count < SIM_TOOL_LIMIT)
+        else if ((reading.kind == READING_FLUID || reading.kind == READING_ACOUSTIC) &&
+                 p->reading_count < SIM_TOOL_LIMIT)
             p->readings[p->reading_count++] = reading;
         cJSON_Delete(world);
         cJSON_Delete(state);
@@ -629,41 +652,80 @@ static bool execute_read_only_batch(Preview *p, const Json *batch, const char *j
     return true;
 }
 
+static bool stage_scenario_edit(Json **scratch, Json *story, int head, Json *state, const Json *op)
+{
+    const char *tool = js(op, "neutrino_tool");
+    if (strcmp(tool, "world") && strcmp(tool, "inventory") && strcmp(tool, "character"))
+        return apply_stat(state, op);
+    if (!*scratch) *scratch = cJSON_Duplicate(story, true);
+    return *scratch && apply_tool(*scratch, head, state, op);
+}
+
 static bool execute_action_order(Preview *p, const Json *plan)
 {
     const Json *actions = at(plan, "actions");
-    if (!actions) return false;
+    bool typed = !strcmp(js(plan, "neutrino_tool"), "sim_plan");
+    if (!actions && !typed) return false;
+    SimulationPlan scenario = {0};
+    if (typed && !simulation_plan_parse(plan, &scenario)) {
+        append(&p->tool_results, "Simulation plan rejected. Check mode, action budget and query schema.\n");
+        append(&p->tool_feedback, "Simulation plan rejected. Check mode, action budget and query schema.\n");
+        if (++p->tool_rounds >= SIM_TOOL_LIMIT) p->tool_prose_only = true;
+        return true;
+    }
     const Json *continuation = at(plan, "continue");
     int count = cJSON_GetArraySize(actions), index = 0;
     Text results = {0}, feedback = {0}, failure = {0};
     Json *pending = cJSON_CreateArray(), *accepted = cJSON_CreateArray();
-    Json *story = cJSON_Duplicate(p->story, true), *state = state_at(story, p->parent), *op;
+    Json *scratch = nullptr, *state = state_at(p->story, p->parent), *op;
     PhysicsReading readings[SIM_TOOL_LIMIT];
+    PhysicsReading *evidence = typed ? calloc((size_t)count, sizeof *evidence) : nullptr;
+    if (typed && !evidence) abort();
     int measured = 0;
-    bool valid = cJSON_IsObject(plan) && cJSON_GetArraySize(plan) == (continuation ? 2 : 1) &&
-                 (!continuation || cJSON_IsBool(continuation)) && cJSON_IsArray(actions) && count > 0;
+    bool valid = typed || (cJSON_IsObject(plan) && cJSON_GetArraySize(plan) == (continuation ? 2 : 1) &&
+                 (!continuation || cJSON_IsBool(continuation)) && cJSON_IsArray(actions) && count > 0);
     cJSON_ArrayForEach(op, p->tool_pending)
-        if (!apply_tool(story, p->parent, state, op)) valid = false;
+        if (!stage_scenario_edit(&scratch, p->story, p->parent, state, op)) valid = false;
     cJSON_ArrayForEach(op, actions) {
         if (!valid) break;
         ++index;
-        Json *expanded = supplied_acoustic_arguments(p, op);
-        const Json *effective = expanded ? expanded : op;
+        Json *conditional_op = nullptr;
+        const Json *condition = typed ? at(op, "when") : nullptr;
+        if (condition) {
+            int decision = simulation_plan_condition(condition, at(state, "physics"), evidence, index - 1);
+            if (decision <= 0) {
+                if (!decision) {
+                    format(&results, "%d. Condition did not match; action skipped.\n", p->tool_rounds + index);
+                    continue;
+                }
+                valid = false;
+                append(&failure, "A condition could not be evaluated from available evidence.");
+                break;
+            }
+            conditional_op = cJSON_Duplicate(op, true);
+            if (!conditional_op) abort();
+            cJSON_DeleteItemFromObjectCaseSensitive(conditional_op, "when");
+        }
+        const Json *requested = conditional_op ? conditional_op : op;
+        Json *expanded = supplied_acoustic_arguments(p, requested);
+        const Json *effective = expanded ? expanded : requested;
         const char *tool = js(effective, "neutrino_tool");
         Text result = {0};
         if (read_only_tool(tool)) {
             PhysicsReading reading;
-            valid = run_sim_read(tool,effective,story,p->parent,state,&result,&reading) &&
+            valid = run_sim_read(tool,effective,scratch ? scratch : p->story,p->parent,state,&result,&reading) &&
                 !reading.unavailable;
+            if (evidence) evidence[index - 1] = reading;
             if (reading.unavailable) append(&failure, str(&result));
-            if (valid && reading.kind != READING_NONE) {
+            if (valid && !scenario.hypothetical &&
+                (reading.kind == READING_FLUID || reading.kind == READING_ACOUSTIC)) {
                 if (p->reading_count+measured < SIM_TOOL_LIMIT) readings[measured++] = reading;
                 else {
                     valid = false;
                     append(&failure,"Finish this reply before collecting more narration readings.");
                 }
             }
-        } else if (*tool && apply_tool(story, p->parent, state, effective)) {
+        } else if (*tool && stage_scenario_edit(&scratch, p->story, p->parent, state, effective)) {
             cJSON_AddItemToArray(pending, cJSON_Duplicate(effective, true));
             append(&result, "Change staged for this reply.");
         } else valid = false;
@@ -677,16 +739,26 @@ static bool execute_action_order(Preview *p, const Json *plan)
         }
         release(&result);
         cJSON_Delete(expanded);
+        cJSON_Delete(conditional_op);
     }
     if (valid) {
-        if (!p->tool_pending) p->tool_pending = cJSON_CreateArray();
+        if (!scenario.hypothetical && !p->tool_pending) p->tool_pending = cJSON_CreateArray();
         if (!p->tool_requests) p->tool_requests = cJSON_CreateArray();
-        while (pending->child) cJSON_AddItemToArray(p->tool_pending, cJSON_DetachItemFromArray(pending, 0));
+        bool pending_commit = !scenario.hypothetical && pending->child;
+        while (!scenario.hypothetical && pending->child)
+            cJSON_AddItemToArray(p->tool_pending, cJSON_DetachItemFromArray(pending, 0));
         while (accepted->child) cJSON_AddItemToArray(p->tool_requests, cJSON_DetachItemFromArray(accepted, 0));
         for (int i = 0; i < measured; ++i) p->readings[p->reading_count++] = readings[i];
         append(&p->tool_results, "Ordered actions executed in sequence:\n");
         append(&p->tool_results, str(&results));
-        append(&p->tool_feedback, str(&feedback));
+        if (!typed) append(&p->tool_feedback, str(&feedback));
+        else {
+            Text report = {0};
+            simulation_plan_report(&scenario, at(state, "physics"), evidence, index, true, pending_commit, &report);
+            append(&p->tool_feedback, str(&report));
+            append(&p->tool_results, str(&report));
+            release(&report);
+        }
         p->tool_rounds += count;
         p->tool_prose_only = !cJSON_IsTrue(continuation) || p->tool_rounds >= SIM_TOOL_LIMIT;
     } else {
@@ -698,12 +770,20 @@ static bool execute_action_order(Preview *p, const Json *plan)
             format(&p->tool_results, "%s\n", str(&failure));
             format(&p->tool_feedback, "%s\n", str(&failure));
         }
+        if (typed) {
+            Text report = {0};
+            simulation_plan_report(&scenario, at(state, "physics"), evidence, index, false, false, &report);
+            append(&p->tool_feedback, str(&report));
+            append(&p->tool_results, str(&report));
+            release(&report);
+        }
         if (++p->tool_rounds >= SIM_TOOL_LIMIT) p->tool_prose_only = true;
     }
-    cJSON_Delete(story);
+    cJSON_Delete(scratch);
     cJSON_Delete(state);
     cJSON_Delete(pending);
     cJSON_Delete(accepted);
+    free(evidence);
     release(&results);
     release(&feedback);
     release(&failure);
@@ -764,6 +844,21 @@ SimulationReply simulation_tool_reply(Preview *p, const char *body)
     }
     if (length <= SIM_COMMAND_LIMIT) append_n(&json, body, length);
     Json *op = cJSON_ParseWithOpts(str(&json), nullptr, true);
+    if (!op && *str(&json) == '{') {
+        const char *end;
+        Json *prefix = cJSON_ParseWithOpts(str(&json), &end, false);
+        if (!strcmp(js(prefix, "neutrino_tool"), "sim_plan")) {
+            while (isspace((unsigned char)*end)) ++end;
+            if (!strncmp(end, "\x60\x60\x60", 3)) end += 3;
+            while (isspace((unsigned char)*end)) ++end;
+            if (*end && !structured_reply(end)) {
+                op = prefix;
+                prefix = nullptr;
+                append(&p->tool_results, "Discarded speculative prose attached to the simulation plan.\n");
+            }
+        }
+        cJSON_Delete(prefix);
+    }
     if (!op) op = read_only_sequence(str(&json));
     if (execute_action_order(p, op) || execute_read_only_batch(p, op, str(&json))) {
         release(&json);
@@ -857,7 +952,8 @@ static void player_action_order(App *a, const Json *plan, int head)
 {
     Preview sequence = {.story = a->story, .parent = head};
     execute_action_order(&sequence, plan);
-    if (sequence.tool_pending && sequence.tool_pending->child) {
+    bool committed = sequence.tool_pending && sequence.tool_pending->child;
+    if (committed) {
         Json *state = state_at(a->story, head), *op;
         cJSON_ArrayForEach(op, sequence.tool_pending) apply_tool(a->story, head, state, op);
         a->ws.dirty = true;
@@ -865,6 +961,7 @@ static void player_action_order(App *a, const Json *plan, int head)
     }
     app_info(a, "Ordered simulation results");
     append(&a->info, str(&sequence.tool_results));
+    if (committed) append(&a->info, "\nChanges committed to the active branch.\n");
     cJSON_Delete(sequence.tool_pending);
     cJSON_Delete(sequence.tool_requests);
     release(&sequence.tool_results);
@@ -881,6 +978,7 @@ void simulation_command(App *a, const char *verb, const char *arg)
         if (!stats && !clock) {
             append(&a->info,tool_help);
             append(&a->info,physics_help);
+            append(&a->info,scenario_help);
         }
         else {
             Json *state = state_at(a->story, head);
@@ -905,7 +1003,7 @@ void simulation_command(App *a, const char *verb, const char *arg)
         return;
     }
     Json *op = clock ? clock_command(arg) : strlen(arg) <= SIM_COMMAND_LIMIT ? cJSON_ParseWithOpts(arg, nullptr, true) : nullptr;
-    if (at(op, "actions")) {
+    if (at(op, "actions") || !strcmp(js(op, "neutrino_tool"), "sim_plan")) {
         player_action_order(a, op, head);
         cJSON_Delete(op);
         return;

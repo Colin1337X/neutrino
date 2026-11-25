@@ -25,14 +25,30 @@ typedef struct {
 } Candidate;
 enum { SIM_TOOL_LIMIT = 12, ACOUSTIC_BLOCKERS = 16, ACOUSTIC_ROOM_PATHS = 7,
        PHYSICS_ACOUSTIC_PATHS = ACOUSTIC_ROOM_PATHS + 6 * ACOUSTIC_BLOCKERS };
-typedef enum { READING_NONE, READING_FLUID, READING_ACOUSTIC } ReadingKind;
+typedef enum { READING_NONE, READING_FLUID, READING_ACOUSTIC, READING_OPTICAL, READING_FLOW } ReadingKind;
 typedef struct {
     ReadingKind kind;
     double seconds, level_m, drained_l, remaining_l, flow_lps, initial_flow_lps;
     struct { bool blocked, faded; double delay_ms, level_db; } arrival[PHYSICS_ACOUSTIC_PATHS];
     int arrivals;
     bool material_acoustics, unavailable;
+    double optical_power, optical_first_ns;
+    double tracer_concentration;
+    bool voxel_flow;
 } PhysicsReading;
+enum { SCENARIO_ACTION_LIMIT = 32 };
+typedef struct {
+    const Json *queries;
+    const char *name;
+    bool hypothetical;
+} SimulationPlan;
+bool simulation_plan_parse(const Json *plan, SimulationPlan *parsed);
+int simulation_plan_condition(const Json *query, const Json *settings,
+                              const PhysicsReading readings[], int preceding_steps);
+void simulation_plan_report(const SimulationPlan *plan, const Json *settings,
+                            const PhysicsReading readings[], int steps, bool complete,
+                            bool pending_commit, Text *out);
+int physics_scene_relation(const Json *settings, const char *entity, const char *target);
 typedef struct {
     Operation op;
     Json *scene, *story;
