@@ -128,7 +128,7 @@ function writeLibrary(next) {
 function makeMessage(message) {
     const article = element("article", undefined, "message");
     article.dataset.role = message.role;
-    article.append(element("h3", message.role === "user" ? "Player" : message.speaker || "Narrator"),
+    article.append(element("h3", message.speaker || (message.role === "user" ? "Player" : "Narrator")),
                    prose(message.text));
     return article;
 }

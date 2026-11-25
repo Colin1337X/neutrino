@@ -95,6 +95,22 @@ Use `/wear ITEM` for a carried article and `/remove ITEM` to take it off and kee
 
 `/exits` lists the destinations reachable from the current room, their descriptions, and the matching `/go` commands.
 
+### RPG commands and party control
+
+`/character create NAME | DESCRIPTION` creates a controllable party member in the current room. Use `/party` to see everyone and `/character switch NAME` to act as that character. Each character keeps their own location and belongings. `/character switch @default` returns to the original player, including their existing location and possessions. The transcript identifies which character spoke or acted.
+
+| Action | Command |
+| --- | --- |
+| Look around or inspect | `/look`, `/examine TARGET` |
+| Move through a connected exit | `/go ROOM` |
+| Manage possessions | `/inventory`, `/take ITEM`, `/drop ITEM`, `/wear ITEM`, `/remove ITEM` |
+| Hand over an item in the same room | `/give ITEM | CHARACTER` |
+| Talk to someone or use an available item | `/talk CHARACTER | MESSAGE`, `/use ITEM [| TARGET]` |
+
+Uppercase bare commands such as `LOOK`, `GO Loft`, and `TAKE Lantern` also work. Bare `look`, `inventory`, `exits`, `who`, and `party` accept either case. Talking and using items ask the narrator for a reply. Movement, inventory changes, and character switching apply directly.
+
+With `/stats on`, the narrator can create or switch characters with the `character` tool. `world` and `inventory` accept an optional `actor` name so it can act for a party member while keeping the current selection. Narrator edits save on the accepted reply's branch.
+
 ## Scene statistics and narrator tools
 
 `/stats` shows the active branch's location, clock, character locations, needs, mood, injuries and directional relationships. Player location follows `/go`. Character location comes from their room entry or an explicit tracked location. This also lets you track characters off-scene. Needs range from 0 to 100 as urgency increases. Mood ranges from 0 to 100 from low to high. Injuries are records by character, body part and condition, with four severity levels and untreated, treated or healed states.

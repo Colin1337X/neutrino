@@ -162,10 +162,11 @@ static Json *preview_world(const Preview *p)
     Json *story = nullptr, *op;
     cJSON_ArrayForEach(op,p->tool_pending) {
         const char *name = js(op,"neutrino_tool");
-        if (strcmp(name,"world") && strcmp(name,"inventory")) continue;
+        if (strcmp(name,"world") && strcmp(name,"inventory") && strcmp(name,"character")) continue;
         if (!story) story = cJSON_Duplicate(p->story,true);
         if (!strcmp(name,"world")) world_edit(story,p->parent,op);
-        else world_inventory_tool(story,p->parent,op);
+        else if (!strcmp(name,"inventory")) world_inventory_tool(story,p->parent,op);
+        else world_character_tool(story,p->parent,op);
     }
     return story;
 }
@@ -247,7 +248,10 @@ static const char tool_help[] =
     "move (name of connected room), relocate (name for a scene transition), weather (description), "
     "npc/item (name, room, description for new entries), "
     "remove_npc/remove_item (name). Existing entities can be moved or edited.\n"
-    "inventory: action (add/edit/take/drop/wear/remove), name, description for add/edit. Requires a defined room.\n";
+    "character: action create (name, description, optional room) or switch (name, or @default).\n"
+    "inventory: action (add/edit/take/drop/wear/remove/give), name, description for add/edit, target for give. "
+    "World and inventory actions can include actor (party member name or @default); otherwise use the active character. "
+    "World actions say (description) and use (name, optional description) record events.\n";
 static const char physics_help[] =
     "tune: setting and numeric value. gravity (0.1–30 m/s²), outlet_coefficient (0.1–1), ambient_kelvin (150–400 K), wall_reflectivity (0–1).\n"
     "ray: origin, direction, min, max (three-number arrays in metres, min/max are box corners).\n"
@@ -342,6 +346,7 @@ static bool apply_tool(Json *story, int head, Json *state, const Json *op)
     const char *tool = js(op, "neutrino_tool");
     if (!strcmp(tool, "inventory")) return world_inventory_tool(story, head, op);
     if (!strcmp(tool,"world")) return world_edit(story,head,op);
+    if (!strcmp(tool,"character")) return world_character_tool(story,head,op);
     if (!apply_stat(state, op)) return false;
     log_stat(story, head, op);
     return true;

@@ -306,6 +306,47 @@ static bool narrator_world_control(void)
     return ok;
 }
 
+static bool party_control(void)
+{
+    Preview p = {.story=cJSON_Parse("{\"simEnabled\":true,\"nodes\":[{\"id\":1,\"parent\":0,"
+        "\"role\":\"assistant\",\"content\":\"The party arrives.\"}]}")};
+    App app = {0};
+    const char *actions = "{\"actions\":["
+        "{\"neutrino_tool\":\"world\",\"action\":\"room\",\"name\":\"Dock\",\"description\":\"Quay.\"},"
+        "{\"neutrino_tool\":\"world\",\"action\":\"room\",\"name\":\"Loft\",\"description\":\"Rafters.\"},"
+        "{\"neutrino_tool\":\"world\",\"action\":\"connect\",\"name\":\"Dock\",\"room\":\"Loft\"},"
+        "{\"neutrino_tool\":\"character\",\"action\":\"create\",\"name\":\"Iona\",\"description\":\"Sailor.\"},"
+        "{\"neutrino_tool\":\"character\",\"action\":\"create\",\"name\":\"Mara\",\"description\":\"Keeper.\"},"
+        "{\"neutrino_tool\":\"world\",\"action\":\"item\",\"name\":\"Lantern\",\"description\":\"Brass.\"},"
+        "{\"neutrino_tool\":\"inventory\",\"action\":\"take\",\"actor\":\"Iona\",\"name\":\"Lantern\"},"
+        "{\"neutrino_tool\":\"inventory\",\"action\":\"give\",\"actor\":\"Iona\",\"name\":\"Lantern\",\"target\":\"Mara\"},"
+        "{\"neutrino_tool\":\"world\",\"action\":\"move\",\"actor\":\"Iona\",\"name\":\"Loft\"},"
+        "{\"neutrino_tool\":\"character\",\"action\":\"switch\",\"name\":\"Mara\"},"
+        "{\"neutrino_tool\":\"world_inspect\"}]}";
+    Text output = {0};
+    bool ok = simulation_tool_reply(&p,actions)==SIM_REGENERATE &&
+              strstr(str(&p.tool_results),"Active character: Mara") &&
+              strstr(str(&p.tool_results),"Party member: Iona in Loft") &&
+              strstr(str(&p.tool_results),"Item: Lantern · Carried by Mara");
+    simulation_commit(&app,&p,1);
+    integer(p.story,"head",1);
+    Json *item = cJSON_Parse("{\"action\":\"take\",\"actor\":\"Iona\",\"name\":\"Lantern\"}");
+    ok = ok && !world_inventory_tool(p.story,1,item);
+    set(item,"action","give");
+    set(item,"actor","Mara");
+    set(item,"target","Iona");
+    ok = ok && !world_inventory_tool(p.story,1,item);
+    cJSON_Delete(item);
+    world_context(p.story,1,&output);
+    ok = ok && strstr(str(&output),"Active character: Mara") && strstr(str(&output),"Carried: Lantern");
+    clear(&output);
+    world_active_character(p.story,0,&output);
+    ok = ok && !output.len;
+    release(&output);
+    free_protocol(&p);
+    return ok;
+}
+
 static bool large_scene_state(const char *backend)
 {
     App app = {0};
@@ -673,6 +714,7 @@ int main(int argc, char **argv)
     if (!ordered_protocol()) { fputs("Ordered simulation protocol failed.\n", stderr); failures++; }
     if (!extended_models()) { fputs("Extended 3D model checks failed.\n", stderr); failures++; }
     if (!narrator_world_control()) { fputs("Narrator world control and branch isolation failed.\n",stderr); failures++; }
+    if (!party_control()) { fputs("Party creation, acting, and inventory isolation failed.\n",stderr); failures++; }
     if (!large_scene_state(argc > 1 && !strcmp(argv[1],"--rt") ? "rt" : "cpu")) {
         fputs("Large scenario state checks failed.\n",stderr);
         failures++;

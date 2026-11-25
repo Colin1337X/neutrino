@@ -502,7 +502,7 @@ static void roleplay_rows(App *a, Text *body)
     cJSON_ArrayForEach(node, path) {
         bool player = !strcmp(js(node, "role"), "user");
         const char *name = player ? (*persona ? persona : "You") : (*character ? character : "Narrator");
-        if (!player && *js(node, "speaker")) name = js(node, "speaker");
+        if (*js(node, "speaker")) name = js(node, "speaker");
         const char *addressed = player ? js(node, "addressed") : "";
         if (body->len) append(body, "\n\n");
         format(body, "%s  %s%s%s  ·  #%d\n", player ? "›" : "◆", name,

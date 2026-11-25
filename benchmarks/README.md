@@ -62,3 +62,11 @@ Run these from the prepared checkout. Use the original executables for the first
     node benchmarks/runner.mjs run --profile=standard --mode=live --sizes=1000 --reps=1 --tokens=384 --track=recommended --config=N-WEB-CPU,ST-EXTENDED --out=build-comparison/recommended-384 --neutrino=build-comparison/fixed-cpu/neutrino.exe --timeout=55000 --skip-physics
 
 Run the report command with each output path after its trials finish.
+
+## RPG command latency
+
+Measure the player-facing command path in an isolated local web process:
+
+    python benchmarks/rpg_actions.py build-comparison/fixed-cpu/neutrino.exe --out build-comparison/rpg-actions.json
+
+The default workload starts with 2, 25, or 100 controllable characters and 10 scripted history turns. It times 30 measured requests per command after five warmups and saves the observations as milliseconds. Create appends a new member each time. The measured path includes loopback HTTP and workspace saves for mutations. The commands run without a model provider.

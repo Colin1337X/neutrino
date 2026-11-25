@@ -39,6 +39,10 @@ const Command commands[] = {
     {"search", " text", "Find literal text on the active roleplay path"},
     {"memory", " [mode|new|edit|status]", "Open or manage branch-aware story memory"},
     {"world", " [log]", "Inspect this branch's room, inventory, or activity"},
+    {"look", " [target]", "Look around or examine something nearby"},
+    {"examine", " TARGET", "Inspect a nearby room, character, or item"},
+    {"party", "", "List controlled characters and their locations"},
+    {"character", " [create NAME | DESCRIPTION or switch NAME]", "Create or select a controlled character"},
     {"map", " [destination]", "Show world links or the shortest route from this room"},
     {"inspect", " [name]", "Read details about the room, a nearby character, or an item"},
     {"inventory", " [held|worn|nearby]", "Browse items you hold, wear, or can reach"},
@@ -53,6 +57,9 @@ const Command commands[] = {
     {"item", " NAME | DESCRIPTION", "Place an item in the current room"},
     {"take", " ITEM", "Pick up a nearby item"},
     {"drop", " ITEM", "Leave a carried item here"},
+    {"give", " ITEM | CHARACTER", "Hand a carried item to a party member here"},
+    {"use", " ITEM [| TARGET]", "Use an available item in a narrated action"},
+    {"talk", " CHARACTER | MESSAGE", "Speak to a character in the current room"},
     {"wear", " ITEM", "Put on an item you carry"},
     {"remove", " ITEM", "Take off a worn item and keep carrying it"},
     {"npc", " NAME | DESCRIPTION", "Add a character in this room"},
@@ -597,6 +604,7 @@ static void messages_for_story(App *a, Json *messages)
     const Json *last = path->child ? path->child->prev : nullptr;
     if (p->tool_prose_only && !strcmp(js(last, "role"), "user")) {
         append(&system, "\n\nLatest player action and scene direction (reference only for the prose reply):\n");
+        if (*js(last,"speaker")) format(&system,"[%s] ",js(last,"speaker"));
         simulation_player_reference(&system, js(last, "content"));
     }
     simulation_prompt(p, &system);
@@ -638,8 +646,19 @@ static void messages_for_story(App *a, Json *messages)
                        "\n\nAnswer just this factual question in one or two sentences using the "
                        "retrieved evidence. Put the corresponding [[source number]] immediately after the fact.");
             }
-            messages_add(messages, last_role, attached || p->inline_research ? str(&selection) : content);
+            const char *speaker = js(node,"speaker");
+            if (*speaker) {
+                Text labeled = {0};
+                format(&labeled,"[%s] %s",speaker,attached || p->inline_research ? str(&selection) : content);
+                messages_add(messages,last_role,str(&labeled));
+                release(&labeled);
+            } else messages_add(messages, last_role, attached || p->inline_research ? str(&selection) : content);
             release(&selection);
+        } else if (!strcmp(last_role,"user") && *js(node,"speaker")) {
+            Text labeled = {0};
+            format(&labeled,"[%s] %s",js(node,"speaker"),content);
+            messages_add(messages,last_role,str(&labeled));
+            release(&labeled);
         } else messages_add(messages, last_role, content);
     }
     if (p->tool_prose_only)
@@ -1859,6 +1878,53 @@ static void append_manuscript(App *a, const char *text)
     release(&result);
 }
 
+static void roleplay_action(App *a, const char *message, const char *addressed)
+{
+    if (preview_busy(&a->preview)) { status(a,"A generation is already running. Esc cancels."); return; }
+    if (!a->story) show_story(a,story_add(&a->ws,"Untitled story",NULL));
+    const int parent = number(a->story,"head");
+    Text actor = {0};
+    world_active_character(a->story,parent,&actor);
+    const int id = story_push(&a->ws,a->story,parent,"user",message);
+    Json *node = story_pick(a->story,id);
+    if (actor.len) set(node,"speaker",str(&actor));
+    if (addressed && *addressed) set(node,"addressed",addressed);
+    close_panel(a);
+    a->scroll = INT_MAX;
+    save(a);
+    begin(a,NARRATE,"",id,addressed);
+    release(&actor);
+}
+
+static void rpg_narration(App *a, bool talk, char *argument)
+{
+    if (!a->roleplay || !a->story) { status(a,"Open a roleplay story first."); return; }
+    if (preview_busy(&a->preview)) { status(a,"A generation is already running. Esc cancels."); return; }
+    char *target = strchr(argument,'|');
+    if (target) { *target++ = 0; target = trim_piece(target); }
+    char *name = trim_piece(argument);
+    Text input = {0}, speaker = {0};
+    if (talk) {
+        if (!*name || !target || !*target) status(a,"Use /talk CHARACTER | MESSAGE.");
+        else {
+            format(&input,"@%s: %s",name,target);
+            const char *message;
+            if (world_address(a->story,str(&input),&speaker,&message) && speaker.len)
+                roleplay_action(a,message,str(&speaker));
+            else status(a,"Choose a character present in this room.");
+        }
+    } else if (!*name) status(a,"Use /use ITEM [| TARGET].");
+    else if (!world_item_available(a->story,name)) status(a,"That item is unavailable here.");
+    else {
+        format(&input,"I use %s",name);
+        if (target && *target) format(&input," on %s",target);
+        append(&input,".");
+        roleplay_action(a,str(&input),nullptr);
+    }
+    release(&input);
+    release(&speaker);
+}
+
 static void slash_command(App *a, char *line)
 {
     char *arg = line;
@@ -1873,8 +1939,10 @@ static void slash_command(App *a, char *line)
         return;
     }
     if (a->browser && !strcmp(line, "quit")) { status(a, "Close this tab to leave the workspace."); return; }
+    if (!strcmp(line,"talk") || !strcmp(line,"use")) { rpg_narration(a,!strcmp(line,"talk"),arg); return; }
     const char *const world_commands[] = {"world", "room", "connect", "go", "item",
-        "take", "drop", "wear", "remove", "npc", "weather", "say", "map", "inspect", "inventory", "who", "exits"};
+        "take", "drop", "wear", "remove", "npc", "weather", "say", "map", "inspect", "inventory", "who", "exits",
+        "look","examine","character","party","give"};
     for (size_t i = 0; i < sizeof world_commands / sizeof *world_commands; i++) {
         if (!strcmp(line, world_commands[i])) { world_command(a, line, arg); return; }
     }
@@ -1966,8 +2034,8 @@ static void slash_command(App *a, char *line)
         Text transcript = {0};
         Json *path = story_path(a->story, number(a->story, "head")), *node;
         cJSON_ArrayForEach(node, path)
-            format(&transcript, "%s\n%s\n\n", !strcmp(js(node, "role"), "user") ? "Player" :
-                   *js(node, "speaker") ? js(node, "speaker") : "Narrator",
+            format(&transcript, "%s\n%s\n\n", *js(node,"speaker") ? js(node,"speaker") :
+                   !strcmp(js(node,"role"),"user") ? "Player" : "Narrator",
                    js(node, "content"));
         Json *scene = transcript.len <= EDIT_LIMIT ? scene_add(&a->ws, arg) : NULL;
         if (scene && scene_edit(&a->ws, scene, str(&transcript), "roleplay transcript")) {
@@ -2129,10 +2197,34 @@ static void remember(App *a, const char *line)
     }
     a->history[a->history_count++] = copy(line);
 }
+static char *classic_input(char *input)
+{
+    const char *const verbs[] = {"look","inventory","exits","who","party","go","take","drop","examine",
+                                 "wear","remove","say","talk","use","give","character"};
+    size_t length = 0;
+    bool upper = true;
+    while (input[length] && !isspace((unsigned char)input[length])) {
+        if (!isupper((unsigned char)input[length])) upper = false;
+        ++length;
+    }
+    for (size_t v=0; v<sizeof verbs/sizeof *verbs; ++v) {
+        if (strlen(verbs[v]) != length || (!upper && (v >= 5 || input[length]))) continue;
+        size_t i = 0;
+        while (i<length && tolower((unsigned char)input[i]) == verbs[v][i]) ++i;
+        if (i != length) continue;
+        Text command = {0};
+        format(&command,"/%s%s",verbs[v],input+length);
+        free(input);
+        return command.data;
+    }
+    return input;
+}
+
 static void submit(App *a)
 {
     if (!*trim_left(str(&a->prompt))) return;
     char *data = copy(trim_left(str(&a->prompt)));
+    if (*data != '/' && a->roleplay) data = classic_input(data);
     if (*data != '/' && a->roleplay && preview_busy(&a->preview)) {
         status(a, "A generation is already running. Esc cancels.");
         free(data);
@@ -2152,15 +2244,8 @@ static void submit(App *a)
     a->slash = false;
     a->prompt_history = a->history_count;
     if (*data == '/') slash_command(a, data + 1);
-    else if (a->roleplay) {
-        if (!a->story) show_story(a, story_add(&a->ws, "Untitled story", NULL));
-        int id = story_push(&a->ws, a->story, number(a->story, "head"), "user", message);
-        if (speaker.len) set(story_pick(a->story, id), "addressed", str(&speaker));
-        close_panel(a);
-        a->scroll = INT_MAX;
-        save(a);
-        begin(a, NARRATE, "", id, speaker.len ? str(&speaker) : NULL);
-    } else begin(a, CONTINUE, data, 0, NULL);
+    else if (a->roleplay) roleplay_action(a,message,speaker.len ? str(&speaker) : nullptr);
+    else begin(a, CONTINUE, data, 0, NULL);
     release(&speaker);
     free(data);
 }
