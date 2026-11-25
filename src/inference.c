@@ -242,7 +242,12 @@ static bool transfer(Inference *j, Response *r, long *status)
         char buffer[8192];
         DWORD n = 0;
         do {
-            ok = !cancelled(j) && WinHttpReadData(req, buffer, sizeof buffer, &n);
+            DWORD available;
+            ok = !cancelled(j) && WinHttpQueryDataAvailable(req, &available);
+            if (!ok) break;
+            DWORD count = available > sizeof buffer ? sizeof buffer : available;
+            /* Confirm EOF with a read when WinHTTP reports no available bytes. */
+            ok = WinHttpReadData(req, buffer, count ? count : 1, &n);
             if (ok && n) ok = receive(r, buffer, n);
         } while (ok && n && !r->end_marker);
     }
