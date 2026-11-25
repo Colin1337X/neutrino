@@ -1,4 +1,5 @@
 #include "neutrino.h"
+#include "socket_io.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -6,24 +7,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <winsock2.h>
-#include <ws2tcpip.h>
-typedef SOCKET Socket;
-typedef int Count;
-#define BAD_SOCKET INVALID_SOCKET
-#else
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
-typedef int Socket;
-typedef ssize_t Count;
-#define BAD_SOCKET (-1)
-#endif
 
 enum { READY_LIMIT = 16, HEADER_CLIENTS = 4, BODY_CLIENTS = 4,
        CLIENTS = READY_LIMIT + HEADER_CLIENTS + BODY_CLIENTS,
@@ -59,36 +42,12 @@ typedef struct {
 } Client;
 typedef struct {
     Client clients[CLIENTS];
+    const char *host;
     int workers;
     uint64_t last_provider_result;
     bool provider_ok;
 } Gateway;
 
-static void close_socket(Socket s)
-{
-#ifdef _WIN32
-    closesocket(s);
-#else
-    close(s);
-#endif
-}
-static bool nonblocking(Socket s)
-{
-#ifdef _WIN32
-    u_long value = 1;
-    return ioctlsocket(s, FIONBIO, &value) == 0;
-#else
-    return fcntl(s, F_SETFL, O_NONBLOCK) == 0;
-#endif
-}
-static bool would_block(void)
-{
-#ifdef _WIN32
-    return WSAGetLastError() == WSAEWOULDBLOCK;
-#else
-    return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
-#endif
-}
 static const char *server_model(void) { return env("NEUTRINO_MODEL", ""); }
 
 static bool route_for(const char *name, Route *route)
@@ -286,7 +245,10 @@ static void parse_headers(Client *c, const char *token, const Gateway *gateway)
             auth_seen = true;
             authorized = !*token || bearer_matches(value, (size_t)(end - value), token);
         } else if (field_is(line, name_len, "Host")) {
-            if (has_host || !local_host(value, end)) { http_error(c, 400, "Invalid Host"); return; }
+            if (has_host || (!local_host(value, end) &&
+                (!*gateway->host || !field_is(value, (size_t)(end - value), gateway->host)))) {
+                http_error(c, 400, "Invalid Host"); return;
+            }
             has_host = true;
         } else if (field_is(line, name_len, "Content-Length")) {
             if (has_length || value == end) { http_error(c, 400, "Bad Request"); return; }
@@ -512,18 +474,27 @@ int inference_server(int port, const volatile sig_atomic_t *stop)
         return 2;
     }
     const int workers = configured_workers[0] - '0';
+    const char *token = env("NEUTRINO_SERVER_TOKEN", "");
+    const char *bind_to = env("NEUTRINO_SERVER_BIND", "127.0.0.1");
+    const char *host = env("NEUTRINO_SERVER_HOST", "");
 #ifdef _WIN32
     WSADATA data;
     if (WSAStartup(MAKEWORD(2, 2), &data)) return 1;
 #else
     signal(SIGPIPE, SIG_IGN);
 #endif
-    const char *token = env("NEUTRINO_SERVER_TOKEN", "");
-    Socket listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     struct sockaddr_in address = {0};
     address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     address.sin_port = htons((unsigned short)port);
+    if (inet_pton(AF_INET, bind_to, &address.sin_addr) != 1 ||
+        ((*host || (ntohl(address.sin_addr.s_addr) >> 24) != 127) && (!*host || strlen(token) < 16))) {
+        fputs("Configure an IPv4 gateway bind. Remote access requires NEUTRINO_SERVER_HOST and a token of at least 16 characters.\n", stderr);
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return 2;
+    }
+    Socket listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 #ifndef _WIN32
     int reuse = 1;
     if (listener != BAD_SOCKET) setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof reuse);
@@ -531,12 +502,12 @@ int inference_server(int port, const volatile sig_atomic_t *stop)
     int code = 0;
     if (listener == BAD_SOCKET || !nonblocking(listener) ||
         bind(listener, (struct sockaddr *)&address, sizeof address) || listen(listener, CLIENTS)) {
-        fprintf(stderr, "Could not listen on 127.0.0.1:%d.\n", port);
+        fprintf(stderr, "Could not listen on %s:%d.\n", bind_to, port);
         code = 1;
     } else {
-        printf("Neutrino server listening on http://127.0.0.1:%d/v1\n", port);
+        printf("Neutrino server listening on http://%s:%d/v1\n", bind_to, port);
         fflush(stdout);
-        Gateway gateway = {.workers = workers};
+        Gateway gateway = {.host = host, .workers = workers};
         Client *clients = gateway.clients;
         for (int i = 0; i < CLIENTS; i++) clients[i].socket = BAD_SOCKET;
         while (!*stop) {

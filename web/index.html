@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111519">
+  <title>Neutrino</title>
+  <link rel="stylesheet" href="/app.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <header class="bar">
+    <a class="brand" href="/" aria-label="Neutrino home"><span aria-hidden="true">✦</span> Neutrino</a>
+    <nav class="modes" aria-label="Workspace mode">
+      <button id="manuscript-mode" type="button">Manuscript</button>
+      <button id="roleplay-mode" type="button">Roleplay</button>
+    </nav>
+    <div class="bar-tools">
+      <button class="mobile-library" id="library-toggle" type="button" aria-controls="library" aria-expanded="false">Library</button>
+      <button id="command-toggle" class="command-trigger" type="button" aria-haspopup="dialog">Commands <kbd>/</kbd></button>
+    </div>
+  </header>
+  <div class="workspace" id="workspace">
+    <aside class="library" id="library" aria-labelledby="library-title">
+      <div class="section-top"><h2 id="library-title">Library</h2><button id="create" type="button" aria-label="Create">+</button></div>
+      <div id="items" class="items"></div>
+      <details class="files" id="files">
+        <summary>Files</summary>
+        <div class="file-options">
+          <button type="button" data-upload="import">Import workspace or card</button>
+          <button type="button" data-upload="lore">Attach lorebook</button>
+          <button type="button" data-upload="preset">Attach preset</button>
+          <button type="button" data-download="export">Download workspace</button>
+        </div>
+      </details>
+    </aside>
+    <main class="stage">
+      <div class="stage-heading">
+        <div><p id="section-label">Workspace</p><h1 id="title">Connecting…</h1></div>
+        <button id="tools-toggle" class="mobile-tools" type="button" aria-controls="tools" aria-expanded="false">Tools</button>
+      </div>
+      <div id="content" class="content">
+        <section id="roleplay" class="story" aria-label="Conversation" hidden>
+          <button type="button" id="earlier" hidden>Load earlier messages</button>
+          <div id="messages"></div>
+          <div id="stream" hidden></div>
+        </section>
+        <section id="manuscript" class="manuscript" hidden>
+          <label class="visually-hidden" for="editor">Manuscript text</label>
+          <textarea id="editor" spellcheck="true" placeholder="Begin writing here…"></textarea>
+          <div class="editor-tools">
+            <button id="save" type="button">Save manuscript</button>
+            <button id="select" type="button">Use selection</button>
+          </div>
+        </section>
+      </div>
+      <form id="composer" class="composer">
+        <label for="prompt" id="prompt-label">Prompt</label>
+        <div class="composer-line">
+          <textarea id="prompt" rows="2" placeholder="Write a message or enter a /command" required></textarea>
+          <button class="primary" type="submit">Send <span aria-hidden="true">↑</span></button>
+        </div>
+        <div class="composer-footer"><p id="status" role="status"></p><button type="button" id="cancel" hidden>Stop</button></div>
+      </form>
+    </main>
+    <aside class="tools" id="tools" aria-labelledby="tools-title">
+      <div class="section-top"><h2 id="tools-title">Workspace tools</h2><button id="close-panel" type="button" aria-label="Close tools">×</button></div>
+      <div id="quick-tools" class="quick-tools"></div>
+      <section id="panel" class="panel" hidden>
+        <h3 id="panel-title"></h3>
+        <div id="panel-actions" class="panel-actions"></div>
+        <div id="panel-body"></div>
+      </section>
+    </aside>
+  </div>
+  <dialog id="commands" aria-labelledby="commands-title">
+    <div class="dialog-top"><h2 id="commands-title">Commands</h2><form method="dialog"><button aria-label="Close commands">×</button></form></div>
+    <label class="visually-hidden" for="command-search">Search commands</label>
+    <input id="command-search" type="search" placeholder="Search commands">
+    <div id="command-results"></div>
+  </dialog>
+  <dialog id="login" aria-labelledby="login-title">
+    <form id="login-form">
+      <h2 id="login-title">Open workspace</h2>
+      <label for="token">Browser access token</label>
+      <input id="token" type="password" autocomplete="off" required>
+      <p id="login-error" role="status"></p>
+      <button class="primary" type="submit">Connect</button>
+    </form>
+  </dialog>
+  <input id="upload" type="file" hidden>
+</body>
+</html>

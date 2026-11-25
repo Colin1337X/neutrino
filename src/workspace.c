@@ -475,6 +475,10 @@ Json *story_pick(const Json *story, int id)
 {
     return id > 0 ? cJSON_GetArrayItem(at(story, "nodes"), id - 1) : NULL;
 }
+Json *story_find(const Workspace *ws, const char *id)
+{
+    return *id ? find_in(at(ws->root, "stories"), "id", id) : NULL;
+}
 int story_push(Workspace *ws, Json *story, int parent, const char *role, const char *content)
 {
     Json *node = cJSON_CreateObject(), *nodes = at(story, "nodes");
@@ -741,7 +745,7 @@ static Json *import_journal(Workspace *ws, char *input)
     return story;
 }
 
-static Json *import_sillytavern(Workspace *ws, char *input)
+static Json *import_sillytavern(Workspace *ws, const char *input)
 {
     const char *following = strchr(input, '\n');
     if (!following) return NULL;
@@ -826,15 +830,26 @@ Json *workspace_import(Workspace *ws, const char *path, Text *error)
     size_t size;
     char *data = read_bytes(path, &size);
     if (!data) { append(error, "Could not read import file."); return NULL; }
+    Json *result = workspace_import_data(ws, path, data, size, error);
+    free(data);
+    return result;
+}
+
+Json *workspace_import_data(Workspace *ws, const char *name, const char *data, size_t size, Text *error)
+{
     Json *input = NULL, *result = NULL;
-    if (size >= 8 && !memcmp(data, "\x89PNG\r\n\x1a\n", 8)) input = png_card((unsigned char *)data, size);
+    if (size >= 8 && !memcmp(data, "\x89PNG\r\n\x1a\n", 8)) input = png_card((const unsigned char *)data, size);
     else if (!memchr(data, 0, size)) {
-        char *json = size >= 3 && !memcmp(data, "\xef\xbb\xbf", 3) ? data + 3 : data;
+        const char *json = size >= 3 && !memcmp(data, "\xef\xbb\xbf", 3) ? data + 3 : data;
         input = cJSON_ParseWithOpts(json, NULL, 1);
         if (!input) {
             bool dirty = ws->dirty;
             result = import_sillytavern(ws, json);
-            if (!result) result = import_journal(ws, json);
+            if (!result) {
+                char *journal = copy(json);
+                result = import_journal(ws, journal);
+                free(journal);
+            }
             if (!result) ws->dirty = dirty;
         }
     }
@@ -872,11 +887,10 @@ Json *workspace_import(Workspace *ws, const char *path, Text *error)
                 ws->dirty = true;
             }
         }
-    } else if (story_lorebook(input)) result = import_lorebook(ws, input, path);
+    } else if (story_lorebook(input)) result = import_lorebook(ws, input, name);
     else if (input) result = import_card(ws, input);
     if (!result && !error->len) append(error, "Expected a workspace, journal, solo SillyTavern chat, JSON/PNG card, or World Info JSON.");
     cJSON_Delete(input);
-    free(data);
     return result;
 }
 

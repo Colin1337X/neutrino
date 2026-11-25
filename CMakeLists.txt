@@ -18,10 +18,21 @@ else()
 endif()
 
 find_package(CURL 7.62 REQUIRED)
+set(browser_header "${CMAKE_CURRENT_BINARY_DIR}/browser_assets.h")
+set(browser_assets "")
+foreach(asset IN ITEMS index.html app.css app.js)
+    set(path "${CMAKE_CURRENT_SOURCE_DIR}/web/${asset}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${path}")
+    string(MAKE_C_IDENTIFIER "${asset}" identifier)
+    file(READ "${path}" data HEX)
+    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," data "${data}")
+    string(APPEND browser_assets "static const unsigned char ${identifier}[] = {${data}0};\n")
+endforeach()
+file(GENERATE OUTPUT "${browser_header}" CONTENT "${browser_assets}")
 add_executable(neutrino src/main.c src/workspace.c src/terminal.c src/inference.c src/gateway.c src/memory.c src/facts.c src/world.c src/ui.c src/web.c
-    src/simulation.c src/physics.c src/measurements.c src/ray_gpu.c src/prose.c
+    src/simulation.c src/physics.c src/measurements.c src/ray_gpu.c src/prose.c src/browser.c
     third_party/cjson/cJSON.c)
-target_include_directories(neutrino PRIVATE third_party/cjson)
+target_include_directories(neutrino PRIVATE third_party/cjson "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(neutrino PRIVATE CURL::libcurl)
 if(MSVC)
     target_compile_options(neutrino PRIVATE /W4)

@@ -75,7 +75,7 @@ typedef struct {
     Workspace ws;
     Json *scene, *story;
     bool roleplay, demo, quit, compact, editing, slash, view_panel;
-    bool panel_preview, panel_neofetch, selected, ssh_session;
+    bool panel_preview, panel_neofetch, selected, ssh_session, browser;
     Focus focus;
     Text screen, prompt, edit, info, status, trace, server_address;
     Text research_scope, research_pending_scope, research_data, research_reply;
@@ -91,6 +91,14 @@ typedef struct {
     Neofetch neo;
     const char *server_override;
 } App;
+
+typedef struct Browser Browser;
+typedef enum { BROWSER_STATE, BROWSER_HISTORY, BROWSER_ACTION, BROWSER_IMPORT,
+               BROWSER_LORE, BROWSER_PRESET, BROWSER_EXPORT, BROWSER_TRACE, BROWSER_CANDIDATE } BrowserRoute;
+Browser *browser_open(int port);
+void browser_poll(Browser *web, App *app);
+void browser_close(Browser *web);
+int app_browser_response(App *app, BrowserRoute route, const Text *input, Text *output);
 
 typedef struct { const char *name, *args, *summary; } Command;
 enum { COMMAND_MATCH_LIMIT = 96 };

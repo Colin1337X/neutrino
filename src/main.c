@@ -1660,13 +1660,11 @@ static void set_selection(App *a, const char *arg)
     status(a, a->selected ? "Manuscript selection set" : "Manuscript is empty");
 }
 
-static void attach_story_file(App *a, const char *field, const char *path)
+static void attach_story_data(App *a, const char *field, const char *data)
 {
     if (!a->roleplay || !a->story) { status(a, "Open a roleplay story first."); return; }
     if (preview_busy(&a->preview)) { status(a, "Wait for generation to finish."); return; }
-    char *data = read_file(path);
     Json *value = data ? cJSON_ParseWithOpts(!strncmp(data, "\xef\xbb\xbf", 3) ? data + 3 : data, NULL, 1) : NULL;
-    free(data);
     bool lore = !strcmp(field, "lore");
     bool valid = lore ? story_lorebook(value) :
         cJSON_IsArray(at(value, "blocks")) || cJSON_IsArray(at(value, "prompts"));
@@ -1680,12 +1678,16 @@ static void attach_story_file(App *a, const char *field, const char *path)
     status(a, lore ? "Lorebook attached" : "Prompt preset attached");
 }
 
-static void import_file(App *a, const char *arg)
+static void attach_story_file(App *a, const char *field, const char *path)
 {
-    if (a->preview.open || preview_busy(&a->preview)) { status(a, "Close the candidate review before importing."); return; }
-    Text error = {0};
-    Json *result = workspace_import(&a->ws, arg, &error);
-    if (!result) status(a, str(&error));
+    char *data = read_file(path);
+    attach_story_data(a, field, data);
+    free(data);
+}
+
+static void finish_import(App *a, Json *result, const Text *error)
+{
+    if (!result) status(a, str(error));
     else if (result != a->ws.root) {
         show_story(a, result);
         status(a, "Roleplay imported");
@@ -1695,6 +1697,14 @@ static void import_file(App *a, const char *arg)
         show_scene(a, scene);
         status(a, "Workspace imported");
     }
+}
+
+static void import_file(App *a, const char *arg)
+{
+    if (a->preview.open || preview_busy(&a->preview)) { status(a, "Close the candidate review before importing."); return; }
+    Text error = {0};
+    Json *result = workspace_import(&a->ws, arg, &error);
+    finish_import(a, result, &error);
     release(&error);
 }
 
@@ -1850,12 +1860,14 @@ static void slash_command(App *a, char *line)
     while (*arg && !isspace((unsigned char)*arg)) arg++;
     if (*arg) *arg++ = 0;
     arg = trim_piece(arg);
-    if (a->ssh_session && (!strcmp(line, "import") || !strcmp(line, "export") ||
+    if ((a->ssh_session || a->browser) && (!strcmp(line, "import") || !strcmp(line, "export") ||
         !strcmp(line, "lore") || !strcmp(line, "preset") || !strcmp(line, "preview-save") ||
         !strcmp(line, "server") || (!strcmp(line, "trace") && *arg))) {
-        status(a, "That command requires a local workspace session.");
+        status(a, a->browser ? "Use the browser file controls. The server address is set on the host." :
+                   "That command requires a local workspace session.");
         return;
     }
+    if (a->browser && !strcmp(line, "quit")) { status(a, "Close this tab to leave the workspace."); return; }
     const char *const world_commands[] = {"world", "room", "connect", "go", "item",
         "take", "drop", "wear", "remove", "npc", "weather", "say", "map", "inspect", "inventory", "who", "exits"};
     for (size_t i = 0; i < sizeof world_commands / sizeof *world_commands; i++) {
@@ -2322,9 +2334,7 @@ static void initial_selection(App *a)
     Json *selection = at(a->ws.root, "neutrinoSelection");
     if (selection) {
         a->scene = scene_find(&a->ws, js(selection, "scene"));
-        Json *story;
-        cJSON_ArrayForEach(story, at(a->ws.root, "stories"))
-            if (!strcmp(js(story, "id"), js(selection, "story"))) a->story = story;
+        a->story = story_find(&a->ws, js(selection, "story"));
         a->roleplay = cJSON_IsTrue(at(selection, "roleplay"));
     } else {
         a->scene = ui_library_at(a, 1);
@@ -2340,17 +2350,214 @@ static void restore_terminal(void)
     terminal_close();
 }
 
+static Json *browser_messages(const App *a, int limit)
+{
+    Json *result = cJSON_CreateArray();
+    if (!a->roleplay) return result;
+    Json *path = story_path(a->story, number(a->story, "head")), *node;
+    int remaining = cJSON_GetArraySize(path);
+    cJSON_ArrayForEach(node, path) {
+        if (remaining-- > limit) continue;
+        Json *entry = cJSON_CreateObject();
+        integer(entry, "id", number(node, "id"));
+        set(entry, "role", js(node, "role"));
+        set(entry, "speaker", js(node, "speaker"));
+        set(entry, "text", js(node, "content"));
+        cJSON_AddItemToArray(result, entry);
+    }
+    cJSON_Delete(path);
+    return result;
+}
+
+static Json *browser_library(const App *a)
+{
+    Json *list = cJSON_CreateArray(), *item;
+    cJSON_ArrayForEach(item, at(a->ws.root, a->roleplay ? "stories" : "records")) {
+        if (!a->roleplay && strcmp(js(item, "type"), "scene")) continue;
+        Json *row = cJSON_CreateObject();
+        const char *id = js(item, a->roleplay ? "id" : "path");
+        set(row, "id", id);
+        set(row, "title", a->roleplay ? js(item, "title") : id);
+        cJSON_AddItemToArray(list, row);
+    }
+    return list;
+}
+
+static Json *browser_telemetry(const App *a)
+{
+    Json *value = cJSON_CreateObject(), *samples = cJSON_CreateArray();
+    set(value, "error", str(&a->neo.error));
+    put(value, "samples", samples);
+    if (a->neo.server) put(value, "server", cJSON_Duplicate(a->neo.server, true));
+    for (int i = 0; i < a->neo.count; ++i) {
+        int n = (a->neo.next - a->neo.count + i + NEOFETCH_SAMPLES) % NEOFETCH_SAMPLES;
+        InferenceMetrics measure = a->neo.samples[n];
+        Json *sample = cJSON_CreateObject();
+        if (measure.has_ttft) put(sample, "ttft", cJSON_CreateNumber((double)measure.ttft_ms));
+        if (measure.tokens_per_second > 0) put(sample, "rate", cJSON_CreateNumber(measure.tokens_per_second));
+        cJSON_AddItemToArray(samples, sample);
+    }
+    return value;
+}
+
+static Json *browser_state(const App *a)
+{
+    Json *state = cJSON_CreateObject();
+    const Preview *p = &a->preview;
+    bool busy = preview_busy(p);
+    put(state, "roleplay", cJSON_CreateBool(a->roleplay));
+    put(state, "busy", cJSON_CreateBool(busy));
+    put(state, "researching", cJSON_CreateBool(a->research_job != NULL));
+    put(state, "editing", cJSON_CreateBool(a->editing));
+    put(state, "compact", cJSON_CreateBool(a->compact));
+    set(state, "id", a->roleplay ? js(a->story, "id") : js(a->scene, "path"));
+    set(state, "title", a->roleplay ? ui_story_name(a) : ui_scene_name(a));
+    set(state, "status", str(&a->status));
+    put(state, "library", browser_library(a));
+    if (a->roleplay) {
+        put(state, "messages", browser_messages(a, 80));
+        if (busy && p->count && a->story == p->story) set(state, "stream", str(&p->candidates[0].body));
+        put(state, "hasHistory", cJSON_CreateBool(cJSON_GetArraySize(at(a->story, "nodes")) > 80));
+    } else set(state, "manuscript", scene_text(&a->ws, a->scene));
+    if (a->view_panel) {
+        Json *panel = cJSON_CreateObject();
+        put(state, "panel", panel);
+        set(panel, "title", a->panel_preview ? "Candidate review" : a->info_title);
+        if (a->panel_neofetch) put(panel, "neofetch", browser_telemetry(a));
+        else if (a->panel_preview && p->count) {
+            const Candidate *candidate = &p->candidates[p->current];
+            set(panel, "text", str(candidate->error.len ? &candidate->error :
+                                     p->reasoning ? &candidate->thinking : &candidate->body));
+            set(panel, "operation", operation_names[p->op]);
+            integer(panel, "candidate", p->current + 1);
+            integer(panel, "count", p->count);
+            put(panel, "canApply", cJSON_CreateBool(!p->story && !busy && candidate->finished &&
+                candidate->body.len && !candidate->error.len && p->op != BRAINSTORM &&
+                p->op != CRITIQUE && p->op != CONTINUITY));
+        } else set(panel, "text", str(&a->info));
+    }
+    return state;
+}
+
+static int browser_action(App *a, const Json *input, Text *error)
+{
+    const char *action = js(input, "action");
+    if (!strcmp(action, "submit") && cJSON_IsString(at(input, "text"))) {
+        const char *text = js(input, "text");
+        if (strlen(text) > EDIT_LIMIT) { append(error, "Input exceeds the 2 MiB limit."); return 413; }
+        prompt_set(a, text);
+        submit(a);
+    } else if (!strcmp(action, "open") && cJSON_IsBool(at(input, "roleplay"))) {
+        const char *id = js(input, "id");
+        bool switching = !cJSON_IsString(at(input, "id"));
+        if (cJSON_IsTrue(at(input, "roleplay"))) {
+            Json *story = switching ? a->story : story_find(&a->ws, id);
+            if (!switching && !story) { append(error, "Story not found."); return 404; }
+            show_story(a, story);
+        } else {
+            Json *scene = switching ? a->scene : *id ? scene_find(&a->ws, id) : NULL;
+            if (*id && (!scene || strcmp(js(scene, "type"), "scene"))) {
+                append(error, "Scene not found.");
+                return 404;
+            }
+            show_scene(a, scene);
+        }
+    } else if (!strcmp(action, "edit") && cJSON_IsString(at(input, "text")) &&
+               cJSON_IsString(at(input, "base")) && cJSON_IsString(at(input, "id"))) {
+        if (a->roleplay || strcmp(js(input, "id"), js(a->scene, "path")) ||
+            strcmp(js(input, "base"), scene_text(&a->ws, a->scene))) {
+            append(error, "The manuscript changed or another scene opened. Copy your draft before reloading.");
+            return 409;
+        }
+        if (!scene_edit(&a->ws, a->scene, js(input, "text"), "edit")) {
+            append(error, "The manuscript exceeds the 2 MiB limit.");
+            return 413;
+        }
+        a->editing = false;
+        a->selected = false;
+        close_panel(a);
+        status(a, "Manuscript saved");
+    } else if (!strcmp(action, "cancel")) {
+        if (preview_busy(&a->preview)) {
+            cancel_preview(&a->preview);
+            status(a, "Cancelling generation…");
+        }
+    } else if (!strcmp(action, "close")) close_panel(a);
+    else { append(error, "Unknown browser action."); return 400; }
+    save(a);
+    return 200;
+}
+
+int app_browser_response(App *a, BrowserRoute route, const Text *input, Text *output)
+{
+    if (route == BROWSER_TRACE || route == BROWSER_CANDIDATE) {
+        const Text *text = route == BROWSER_TRACE ? &a->trace :
+            a->preview.open ? &a->preview.candidates[a->preview.current].body : NULL;
+        if (!text || !text->len) { append(output, "Nothing is available to download yet."); return 404; }
+        append(output, str(text));
+        return 200;
+    }
+    if (route == BROWSER_ACTION) {
+        if (memchr(str(input), 0, input->len)) {
+            append(output, "Send a text JSON action.");
+            return 400;
+        }
+        Json *command = cJSON_ParseWithOpts(str(input), NULL, true);
+        int result = browser_action(a, command, output);
+        cJSON_Delete(command);
+        if (result != 200) return result;
+    } else if (route == BROWSER_IMPORT) {
+        if (a->preview.open || preview_busy(&a->preview)) {
+            append(output, "Close the candidate review before importing.");
+            return 409;
+        }
+        Text error = {0};
+        Json *result = workspace_import_data(&a->ws, "Browser import.json", str(input), input->len, &error);
+        if (!result) append(output, str(&error));
+        else { finish_import(a, result, &error); save(a); }
+        release(&error);
+        if (!result) return 400;
+    } else if (route == BROWSER_LORE || route == BROWSER_PRESET) {
+        if (memchr(str(input), 0, input->len)) {
+            append(output, "Upload a text JSON file.");
+            return 400;
+        }
+        attach_story_data(a, route == BROWSER_LORE ? "lore" : "preset", str(input));
+        save(a);
+    }
+    Json *value = route == BROWSER_EXPORT ? a->ws.root : route == BROWSER_HISTORY ? browser_messages(a, INT_MAX) :
+        browser_state(a);
+    if (route == BROWSER_STATE) {
+        Json *list = cJSON_CreateArray();
+        for (size_t i = 0; i < command_count; ++i) {
+            Json *entry = cJSON_CreateObject();
+            set(entry, "name", commands[i].name);
+            set(entry, "args", commands[i].args);
+            set(entry, "summary", commands[i].summary);
+            cJSON_AddItemToArray(list, entry);
+        }
+        put(value, "commands", list);
+    }
+    char *encoded = cJSON_PrintUnformatted(value);
+    if (value != a->ws.root) cJSON_Delete(value);
+    if (!encoded) abort();
+    append(output, encoded);
+    cJSON_free(encoded);
+    return 200;
+}
+
 static int run(int argc, char **argv)
 {
     App a = {0};
     const char *path = env("NEUTRINO_WORKSPACE", ".neutrino.json"), *import = NULL;
     bool dump = false, serve = false;
-    int port = 4783, bench = 0;
+    int port = 0, bench = 0, code = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--demo")) a.demo = true;
         else if (!strcmp(argv[i], "--snapshot")) dump = true;
         else if (!strcmp(argv[i], "--ssh-session")) a.ssh_session = true;
         else if (!strcmp(argv[i], "--serve")) serve = true;
+        else if (!strcmp(argv[i], "--web")) a.browser = true;
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) {
             port = parse_number(argv[++i], 1, 65535);
             if (port < 0) { fputs("Invalid port.\n", stderr); return 2; }
@@ -2375,19 +2582,23 @@ static int run(int argc, char **argv)
             fputs("Usage: neutrino [--workspace FILE] [--import FILE] [--demo] [--snapshot] [--server URL]\n"
                   "       neutrino --ssh-session --workspace FILE [--server URL]\n"
                   "       neutrino --serve [--port PORT]\n"
+                  "       neutrino --web [--port 7000] [--workspace FILE] [--server URL] [--demo]\n"
                   "       neutrino bench ttft [ROUNDS] [--server URL]\n", out);
             return help ? 0 : 2;
         }
     }
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
-    if (a.ssh_session && (serve || bench || dump || import || a.demo ||
+    if (a.ssh_session && (a.browser || serve || bench || dump || import || a.demo ||
         !*env("SSH_TTY", "") || *env("SSH_ORIGINAL_COMMAND", ""))) {
         fputs("Open an interactive SSH connection with a PTY and no remote command.\n", stderr);
         return 2;
     }
-    if (serve && bench) { fputs("Start the server and benchmark in separate processes.\n", stderr); return 2; }
-    if (serve) return inference_server(port, &interrupted);
+    if ((serve && bench) || (a.browser && (serve || bench || dump))) {
+        fputs("Choose one launch mode per process.\n", stderr);
+        return 2;
+    }
+    if (serve) return inference_server(port ? port : 4783, &interrupted);
     if (bench) return bench_ttft(ui_endpoint(&a), env("NEUTRINO_SERVER_TOKEN", ""), bench, &interrupted);
     if (!workspace_open(&a.ws, a.demo ? NULL : path, !dump || import != NULL)) {
         fprintf(stderr, "Could not open workspace: %s (locked, inaccessible, or invalid JSON)\n", path);
@@ -2405,7 +2616,21 @@ static int run(int argc, char **argv)
         release(&error);
     }
     initial_selection(&a);
-    if (dump) {
+    if (a.browser) {
+        Browser *web = browser_open(port ? port : 7000);
+        if (!web) code = 1;
+        else {
+            while (!interrupted) {
+                update_generation(&a);
+                tick_neofetch(&a);
+                tick_research(&a);
+                if (memory_tick(&a)) save(&a);
+                browser_poll(web, &a);
+                pause_ms(15);
+            }
+            browser_close(web);
+        }
+    } else if (dump) {
         ui_dump(&a, 112, 30);
     } else {
         if (!terminal_open()) {
@@ -2469,7 +2694,7 @@ static int run(int argc, char **argv)
     release(&a.research_data);
     release(&a.research_reply);
     workspace_close(&a.ws);
-    return 0;
+    return code;
 }
 
 #ifdef _WIN32

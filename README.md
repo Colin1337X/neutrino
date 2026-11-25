@@ -1,17 +1,16 @@
 # Neutrino
 
-A native C terminal workspace for writing fiction and playing it out. Manuscript and Roleplay share one library, one Story Bible, and one inference server. Each roleplay story also has its own branch-aware Compendium. The interface takes cues from Claude Code and Codex CLI's keyboard-first workflows and uses its own layout, palette, and typography.
+A native C workspace for writing fiction and playing it out in a terminal or browser. Manuscript and Roleplay share one library, one Story Bible, and one inference server. Each roleplay story also has its own branch-aware Compendium. The terminal interface takes cues from Claude Code and Codex CLI's keyboard-first workflows and uses its own layout, palette, and typography.
 
 ## Build and open
 
 Use a UTF-8, VT-capable terminal. Build with CMake 3.25 or later and a compiler that reports final C23 support, such as GCC 15.2 or the Clang driver in Zig 0.15.2. Release and RelWithDebInfo use `-O3`. All builds need HTTPS-capable libcurl development files. Windows uses WinHTTP for model inference. Linux and macOS use POSIX threads. cJSON is bundled under its own [license](third_party/cjson/LICENSE).
 
 ```powershell
-# Windows, with Zig 0.15.2 on PATH and the x64 curl development archive extracted
+# Windows, with Zig 0.15.2 and Ninja on PATH and the x64 curl development archive extracted
 $curl = 'C:\path\to\curl-win64-mingw'
-New-Item -ItemType Directory -Force build | Out-Null
-$sources = (Get-ChildItem src/*.c).FullName
-zig cc -target x86_64-windows-gnu -std=c23 -O3 -municode -Ithird_party/cjson "-I$curl/include" $sources third_party/cjson/cJSON.c "$curl/lib/libcurl.dll.a" -lwinhttp -lws2_32 -o build/neutrino.exe
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_C_COMPILER=$((Get-Command zig).Source)" -DCMAKE_C_COMPILER_ARG1=cc -DCMAKE_C_COMPILER_TARGET=x86_64-windows-gnu -DCURL_NO_CURL_CMAKE=ON "-DCURL_INCLUDE_DIR=$curl/include" "-DCURL_LIBRARY=$curl/lib/libcurl.dll.a"
+cmake --build build
 Copy-Item "$curl/bin/libcurl-x64.dll" build/
 .\build\neutrino.exe --demo
 ```
@@ -24,6 +23,14 @@ cmake --build build
 ```
 
 The demo opens an original manuscript and a connected roleplay story. It runs in memory. For persistent work, start without `--demo`. Neutrino saves to `.neutrino.json` in the working directory by default. Use `--workspace FILE` or `NEUTRINO_WORKSPACE` for a different file. A sidecar lock prevents two Neutrino processes from writing to the same workspace. `--snapshot` prints a static ANSI frame for inspection.
+
+### Use Neutrino in a browser
+
+Start `neutrino --web --demo` and open [the local browser interface](http://127.0.0.1:7000). Use `neutrino --web --workspace FILE` for persistent work. The browser opens a Manuscript and Roleplay library, composer, editor, and searchable command palette. Generation streams into the same story or candidate review as in the terminal. The **Files** menu uploads cards, workspaces, lorebooks, and presets, and downloads a workspace backup. The trace and candidate panels offer their own downloads.
+
+Start the inference gateway separately as described under **Connect the inference server**. Use `--server URL` if the gateway uses a nondefault address. The web process owns one workspace and shares its current selection and generation across tabs. Close the terminal session for that workspace before opening it in the web process.
+
+The web listener defaults to IPv4 loopback and port 7000. Use `--port PORT` to override the port. To use a phone or tablet over HTTPS, forward a private hostname to the loopback listener through a TLS reverse proxy. Preserve the public `Host` header, forward using HTTP/1.1 with a content length for uploads, and set `NEUTRINO_WEB_HOST` to the exact host (including the port if the browser sends one). Set `NEUTRINO_WEB_TOKEN` to a secret of at least 16 characters and enter it in the browser. `NEUTRINO_WEB_BIND` can change the listener's IPv4 address when a separate proxy host needs to reach it. The browser assets are embedded in the executable.
 
 ### GitHub release builds
 
@@ -197,8 +204,12 @@ Open the TUI in a second terminal. Its default server address is `http://127.0.0
 | `NEUTRINO_WORKERS` | Parallel upstream requests for the default provider when unpinned. Set 1–4, default 2. A pinned llama.cpp slot or a dedicated recall endpoint runs one request at a time. |
 | `NEUTRINO_STREAM_USAGE` | Optional. Set to `1` if the default upstream provider supports OpenAI-compatible `stream_options.include_usage` and only returns token counts when asked. llama.cpp timing metrics work without this setting. |
 | `NEUTRINO_SERVER_TOKEN` | Optional credential between the TUI and Neutrino's server. Set it in both processes when enabled. |
+| `NEUTRINO_SERVER_BIND` | Inference gateway IPv4 listen address. Defaults to `127.0.0.1`. |
+| `NEUTRINO_SERVER_HOST` | Allowed non-loopback HTTP Host header, including the port when sent by the client. |
 
-The server listens on loopback. To use a server on another machine, forward the port over SSH, for example `ssh -N -L 4783:127.0.0.1:4783 user@server`. The TUI still needs a connection to Neutrino's server. It has no provider credentials or provider endpoint to configure. Use `--serve --port PORT` to change the listener and `--server URL`, `NEUTRINO_SERVER`, or `/server URL` to change the client address. The slash command applies to the current TUI session. A reverse proxy must pass HTTP/1.1 with a loopback Host header and stream responses without buffering.
+The gateway listens on loopback by default. To reach it through SSH, use `ssh -N -L 4783:127.0.0.1:4783 user@server`. To listen on all IPv4 interfaces, set `NEUTRINO_SERVER_BIND=0.0.0.0`, set `NEUTRINO_SERVER_HOST` to the exact address and port that remote clients use, and set `NEUTRINO_SERVER_TOKEN` to a secret of at least 16 characters. For the browser listener, use the corresponding `NEUTRINO_WEB_BIND`, `NEUTRINO_WEB_HOST`, and `NEUTRINO_WEB_TOKEN` variables. The browser process also needs the gateway token when connecting to an authenticated gateway.
+
+Use `--serve --port PORT` to change the gateway port and `--server URL`, `NEUTRINO_SERVER`, or `/server URL` to change the TUI's client address. The slash command applies to the current TUI session. A reverse proxy must pass HTTP/1.1 with a loopback or configured Host header and stream responses without buffering.
 
 The gateway gives clients five seconds to finish sending headers and twelve more seconds to finish sending the body after header validation. Unfinished headers and bodies each have a four-connection budget, separate from the sixteen requests that may be queued or running.
 
