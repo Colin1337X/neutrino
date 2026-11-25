@@ -8,6 +8,9 @@
    Direction defines the parameterization. A negative hit means a miss. */
 enum { RAY_VALUES = 12 };
 bool ray_gpu(const float *rays, size_t count, float *hits);
+#ifdef NEUTRINO_VULKAN
+const char *ray_vulkan(const float *rays, size_t count, float *hits, bool hardware_only);
+#endif
 
 #define RAY_SLAB_BODY \
     float low = 0.0f, high = 3.402823466e38f; \

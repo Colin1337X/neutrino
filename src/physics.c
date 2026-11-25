@@ -90,7 +90,7 @@ static bool ray(const Json *args, Text *out)
 
 enum { RAY_BATCH_MAX = 128 };
 typedef struct { double lo[3], hi[3]; } Box;
-typedef enum { BACKEND_AUTO, BACKEND_CPU, BACKEND_GPU, BACKEND_INVALID } Backend;
+typedef enum { BACKEND_AUTO, BACKEND_CPU, BACKEND_GPU, BACKEND_VULKAN, BACKEND_INVALID } Backend;
 
 static Backend backend(const Json *args)
 {
@@ -98,6 +98,7 @@ static Backend backend(const Json *args)
     if (!at(args, "backend") || !strcmp(name, "auto")) return BACKEND_AUTO;
     if (!strcmp(name, "cpu")) return BACKEND_CPU;
     if (!strcmp(name, "gpu")) return BACKEND_GPU;
+    if (!strcmp(name, "vulkan")) return BACKEND_VULKAN;
     return BACKEND_INVALID;
 }
 static bool read_box(const Json *json, Box *box)
@@ -126,13 +127,27 @@ static float trace_cpu(const float *row)
 }
 static const char *trace_batch(Backend selected, const float *rays, size_t count, float *hits)
 {
+    if (!count) return "CPU";
+#ifdef NEUTRINO_VULKAN
+    if (selected == BACKEND_VULKAN || (selected == BACKEND_AUTO && count >= 32)) {
+        const char *engine = ray_vulkan(rays, count, hits, selected == BACKEND_AUTO);
+        if (engine) return engine;
+    }
+#endif
+    if (selected == BACKEND_VULKAN) return nullptr;
     if ((selected == BACKEND_GPU || (selected == BACKEND_AUTO && count >= 32)) &&
         ray_gpu(rays, count, hits)) return "OpenCL GPU";
     if (selected == BACKEND_GPU && count) return nullptr;
     for (size_t i = 0; i < count; ++i) hits[i] = trace_cpu(rays + i * RAY_VALUES);
     return "CPU";
 }
-static bool rays(const Json *args, Text *out)
+
+static const char *backend_unavailable(Backend selected)
+{
+    return selected == BACKEND_VULKAN ? "Vulkan compute unavailable for this session." :
+        "OpenCL GPU unavailable for this session.";
+}
+static bool rays(const Json *args, Text *out, PhysicsReading *reading)
 {
     const Json *entries = at(args, "rays"), *entry;
     Box box;
@@ -151,7 +166,11 @@ static bool rays(const Json *args, Text *out)
         pack_ray(rows + index++ * RAY_VALUES, o, d, &box);
     }
     const char *engine = trace_batch(selected, rows, (size_t)count, hits);
-    if (!engine) { append(out, "OpenCL GPU unavailable for this session."); return true; }
+    if (!engine) {
+        if (reading) reading->unavailable = true;
+        append(out, backend_unavailable(selected));
+        return true;
+    }
     format(out, "%s ray batch (%d) hit distances in m:", engine, count);
     for (int i = 0; i < count; ++i) {
         if (hits[i] < 0) append(out, " miss");
@@ -323,7 +342,11 @@ static bool acoustic(const Json *args, const Json *settings, Text *out, PhysicsR
         }
     }
     const char *engine = trace_batch(selected, rows, total, hits);
-    if (!engine) { append(out, "OpenCL GPU unavailable for this session."); return true; }
+    if (!engine) {
+        if (reading) reading->unavailable = true;
+        append(out, backend_unavailable(selected));
+        return true;
+    }
     bool blocked[PHYSICS_ACOUSTIC_PATHS] = {0};
     for (size_t j = 0; j < total; ++j)
         if (hits[j] >= 0 && hits[j] < 1.0f) blocked[path_of[j]] = true;
@@ -420,7 +443,7 @@ bool physics_run_reading(const char *name, const Json *args, const Json *setting
 {
     if (reading) *reading = (PhysicsReading){0};
     if (!strcmp(name, "ray")) return ray(args, out);
-    if (!strcmp(name, "rays")) return rays(args, out);
+    if (!strcmp(name, "rays")) return rays(args, out, reading);
     if (!strcmp(name, "acoustic")) return acoustic(args, settings, out, reading);
     if (!strcmp(name, "fluid")) return fluid(args, settings, out, reading);
     if (!strcmp(name, "gas")) return gas(args, settings, out);

@@ -214,7 +214,7 @@ static const char tool_help[] =
     "inventory: action (add/edit/take/drop), name, description for add/edit. Requires a defined room.\n"
     "tune: setting and numeric value. gravity (0.1–30 m/s²), outlet_coefficient (0.1–1), ambient_kelvin (150–400 K), wall_reflectivity (0–1).\n"
     "ray: origin, direction, min, max (three-number arrays in metres, min/max are box corners).\n"
-    "rays: min, max, rays (array of origin/direction objects), backend (auto/cpu/gpu).\n"
+    "rays: min, max, rays (array of origin/direction objects), backend (auto/cpu/gpu/vulkan).\n"
     "acoustic: min/max room corners, source, listener, optional blockers (min/max boxes) and backend. Reports direct path and reflections.\n"
     "For acoustic material transmission set a blocker's material to {loss_db_per_m, reflectivity (0–1 amplitude)}. "
     "Optional medium has loss_db_per_m and speed_m_s; min_level_db sets the relative cutoff.\n"
@@ -238,6 +238,10 @@ void simulation_prompt(const Preview *p, Text *system)
                "one compact JSON array starting with [ and ending with ]. Include one complete tool object per requested "
                "measurement, separated by commas. Use the supplied values once. End the reply after the closing bracket. "
                "For a single tool or state edit, return one object. Every tool object has a neutrino_tool field. "
+               "For dependent changes and measurements, return one object with an actions array, "
+               "for example {\"actions\":[{\"neutrino_tool\":\"tune\",\"setting\":\"gravity\",\"value\":3}]}. "
+               "Put prerequisites before dependent actions. The simulator applies actions in array order "
+               "and rejects the entire sequence if an action fails. Never narrate a dependent result before its action. "
                "Stage only changes established by this scene. "
                "Do not take or drop the player's items on their behalf unless requested. "
                "When no calculation or edit is needed, write story prose.\n");
@@ -326,7 +330,8 @@ static void player_reference(Text *out, const char *action, bool acoustic_only)
         const char *end;
         Json *example = cJSON_ParseWithOpts(start, &end, false);
         const Json *request = cJSON_IsArray(example) ? example->child : example;
-        bool tool_example = *js(request, "neutrino_tool");
+        bool tool_example = *js(request, "neutrino_tool") ||
+            (!acoustic_only && cJSON_IsArray(at(example, "actions")));
         if (acoustic_only)
             for (; tool_example && request; request = request->next)
                 tool_example = !strcmp(js(request, "neutrino_tool"), "acoustic");
@@ -525,6 +530,80 @@ static bool execute_read_only_batch(Preview *p, const Json *batch, const char *j
     return true;
 }
 
+static bool execute_action_order(Preview *p, const Json *plan)
+{
+    const Json *actions = at(plan, "actions");
+    if (!actions) return false;
+    int count = cJSON_GetArraySize(actions), index = 0;
+    Text results = {0}, feedback = {0}, failure = {0};
+    Json *pending = cJSON_CreateArray(), *accepted = cJSON_CreateArray();
+    Json *story = cJSON_Duplicate(p->story, true), *state = state_at(story, p->parent), *op;
+    PhysicsReading readings[SIM_TOOL_LIMIT];
+    int measured = 0;
+    bool valid = !actions->next && plan->child == actions && cJSON_IsArray(actions) &&
+                 count > 0 && count <= SIM_TOOL_LIMIT - p->tool_rounds;
+    cJSON_ArrayForEach(op, p->tool_pending)
+        if (!apply_tool(story, p->parent, state, op, false)) valid = false;
+    cJSON_ArrayForEach(op, actions) {
+        if (!valid) break;
+        ++index;
+        Json *expanded = supplied_acoustic_arguments(p, op);
+        const Json *effective = expanded ? expanded : op;
+        const char *tool = js(effective, "neutrino_tool");
+        Text result = {0};
+        if (read_only_tool(tool)) {
+            PhysicsReading reading;
+            valid = physics_run_reading(tool, effective, at(state, "physics"), &result, &reading) &&
+                !reading.unavailable;
+            if (reading.unavailable) append(&failure, str(&result));
+            if (valid && reading.kind != READING_NONE) readings[measured++] = reading;
+        } else if (*tool && apply_tool(story, p->parent, state, effective, false)) {
+            cJSON_AddItemToArray(pending, cJSON_Duplicate(effective, true));
+            append(&result, "Change staged for this reply.");
+        } else valid = false;
+        if (valid) {
+            char *json = cJSON_PrintUnformatted(effective);
+            if (!json) abort();
+            format(&results, "%d. %s\n%s\n", p->tool_rounds + index, str(&result), json);
+            format(&feedback, "%d. %s\n", p->tool_rounds + index, str(&result));
+            cJSON_free(json);
+            cJSON_AddItemToArray(accepted, cJSON_Duplicate(effective, true));
+        }
+        release(&result);
+        cJSON_Delete(expanded);
+    }
+    if (valid) {
+        if (!p->tool_pending) p->tool_pending = cJSON_CreateArray();
+        if (!p->tool_requests) p->tool_requests = cJSON_CreateArray();
+        while (pending->child) cJSON_AddItemToArray(p->tool_pending, cJSON_DetachItemFromArray(pending, 0));
+        while (accepted->child) cJSON_AddItemToArray(p->tool_requests, cJSON_DetachItemFromArray(accepted, 0));
+        for (int i = 0; i < measured; ++i) p->readings[p->reading_count++] = readings[i];
+        append(&p->tool_results, "Ordered actions executed in sequence:\n");
+        append(&p->tool_results, str(&results));
+        append(&p->tool_feedback, str(&feedback));
+        p->tool_rounds += count;
+        p->tool_prose_only = true;
+    } else {
+        const char *message = index ? "An action had invalid arguments or an unmet prerequisite. The sequence was discarded." :
+            "Use an actions array within the remaining tool limit. The sequence was discarded.";
+        format(&p->tool_results, "Ordered actions rejected at step %d. %s\n", index, message);
+        format(&p->tool_feedback, "%s Put prerequisites first and retry the whole sequence.\n", message);
+        if (failure.len) {
+            format(&p->tool_results, "%s\n", str(&failure));
+            format(&p->tool_feedback, "%s\n", str(&failure));
+        }
+        if (++p->tool_rounds >= SIM_TOOL_LIMIT) p->tool_prose_only = true;
+    }
+    cJSON_Delete(story);
+    cJSON_Delete(state);
+    cJSON_Delete(pending);
+    cJSON_Delete(accepted);
+    release(&results);
+    release(&feedback);
+    release(&failure);
+    return true;
+}
+
 static Json *read_only_sequence(const char *body)
 {
     if (*body != '{') return nullptr;
@@ -580,7 +659,7 @@ SimulationReply simulation_tool_reply(Preview *p, const char *body)
     if (length <= 4000) append_n(&json, body, length);
     Json *op = cJSON_ParseWithOpts(str(&json), nullptr, true);
     if (!op) op = read_only_sequence(str(&json));
-    if (execute_read_only_batch(p, op, str(&json))) {
+    if (execute_action_order(p, op) || execute_read_only_batch(p, op, str(&json))) {
         release(&json);
         cJSON_Delete(op);
         return SIM_REGENERATE;
@@ -667,6 +746,24 @@ static Json *clock_command(const char *arg)
     return op;
 }
 
+static void player_action_order(App *a, const Json *plan, int head)
+{
+    Preview sequence = {.story = a->story, .parent = head};
+    execute_action_order(&sequence, plan);
+    if (sequence.tool_prose_only) {
+        Json *state = state_at(a->story, head), *op;
+        cJSON_ArrayForEach(op, sequence.tool_pending) apply_tool(a->story, head, state, op, false);
+        if (sequence.tool_pending && sequence.tool_pending->child) a->ws.dirty = true;
+        cJSON_Delete(state);
+    }
+    app_info(a, "Ordered simulation results");
+    append(&a->info, str(&sequence.tool_results));
+    cJSON_Delete(sequence.tool_pending);
+    cJSON_Delete(sequence.tool_requests);
+    release(&sequence.tool_results);
+    release(&sequence.tool_feedback);
+}
+
 void simulation_command(App *a, const char *verb, const char *arg)
 {
     if (!a->story || !a->roleplay) { app_status(a, "Open a roleplay story first."); return; }
@@ -698,6 +795,11 @@ void simulation_command(App *a, const char *verb, const char *arg)
         return;
     }
     Json *op = clock ? clock_command(arg) : strlen(arg) <= 4000 ? cJSON_ParseWithOpts(arg, nullptr, true) : nullptr;
+    if (at(op, "actions")) {
+        player_action_order(a, op, head);
+        cJSON_Delete(op);
+        return;
+    }
     const char *tool = js(op, "neutrino_tool");
     Json *state = state_at(a->story, head);
     Text result = {0};

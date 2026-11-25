@@ -114,6 +114,14 @@ Use `/sim` for the available tool arguments. Player edits work with narrator too
 
 `/stats on` allows the narrator to request up to three tools before a prose reply. The narrator can send one JSON tool object or group read-only physics requests in a JSON array. The TUI validates each request and returns its result in the next prompt. State and inventory edits are staged until the reply is accepted and follow that reply's branch. Cancelling or exhausting the tool limit without prose discards staged changes. `/trace` includes requests and results. With tools off, Neutrino omits tracked state from the prompt and pauses automatic clock advancement.
 
+For dependent narrator actions, use an object with an `actions` array. Operations run in array order against a staged copy of the scene. Each calculation sees only changes that precede it. If a step has invalid arguments or an unmet prerequisite, the entire sequence is discarded and `/trace` identifies the failed step. A valid sequence commits its changes when the narrator reply saves.
+
+To run the same sequence directly, paste its JSON after `/sim`. The panel shows each result, and a valid sequence applies its changes to the current branch immediately.
+
+```json
+{"actions":[{"neutrino_tool":"tune","setting":"gravity","value":1},{"neutrino_tool":"fluid","height":1,"tank_area":2,"outlet_area":0.003,"seconds":10}]}
+```
+
 The included calculators are geometric ray–box intersection, a draining tank estimate and an ideal-gas room with a constant leak. They use SI inputs and execute locally. The narrator can stage a `tune` call to change the scene's gravity, tank outlet coefficient, or default gas temperature. Later calculations in the same reply use the staged settings. Accepted changes follow the reply's branch and show up in `/stats`. Players can use the same tool through `/sim`.
 
 `/sim` also provides batched ray–box intersections and geometric acoustics. Acoustics traces a direct path and one specular reflection per visible room wall or material surface. A blocker without a material is opaque. Give a blocker a `material` with `loss_db_per_m` and amplitude `reflectivity` (0–1) to split the sound at its surfaces. The transmitted branch loses energy at entry and exit and attenuates over the distance traveled inside. The reflected branch uses the surface's reflectivity. Losses add where materials overlap.
@@ -133,7 +141,9 @@ Levels are relative to the direct source at one metre. In material mode `min_lev
 /sim {"neutrino_tool":"prop_load","strength":"fragile","load":"heavy"}
 ```
 
-The ray batch and acoustic opaque-box visibility tests accept `backend` values `auto`, `cpu`, and `gpu`. Material crossings and attenuation run on the CPU. Automatic mode uses the CPU for small batches and tries a GPU for 32 or more intersection tests. The GPU backend loads the host's OpenCL runtime dynamically and falls back to the CPU in automatic mode when a GPU runtime is unavailable. There is no OpenCL build dependency. [Khronos OpenCL specification](https://registry.khronos.org/OpenCL/specs/unified/html/OpenCL_API.html)
+The ray batch and acoustic visibility tests accept `backend` values `auto`, `cpu`, `gpu` (OpenCL), and `vulkan`. Material crossings and attenuation run on the CPU. Automatic mode uses the CPU for small batches. At 32 or more intersection tests it tries a Vulkan hardware device when built in, then OpenCL, then CPU. Explicit Vulkan requests also work on software Vulkan implementations, which the result identifies as such.
+
+Build the optional Vulkan compute backend on Windows or Linux with `-DNEUTRINO_VULKAN=ON`. It needs Vulkan headers and `glslangValidator` when building and loads the installed Vulkan runtime on demand. The default build keeps its existing OpenCL and CPU backends. Run `scene_physics_test --vulkan` for a runtime ray and acoustics check. [Khronos Vulkan compute guide](https://docs.vulkan.org/guide/latest/compute_shaders.html)
 
 `/memory items` shows the active branch's filed props and their evidence. Multiple named props can be kept from a single sentence when the narrator establishes their actions or locations. Use `/inventory` for the player-controlled world inventory.
 

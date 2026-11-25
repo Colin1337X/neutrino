@@ -31,7 +31,7 @@ typedef struct {
     double seconds, level_m, drained_l, remaining_l, flow_lps, initial_flow_lps;
     struct { bool blocked, faded; double delay_ms, level_db; } arrival[PHYSICS_ACOUSTIC_PATHS];
     int arrivals;
-    bool material_acoustics;
+    bool material_acoustics, unavailable;
 } PhysicsReading;
 typedef struct {
     Operation op;

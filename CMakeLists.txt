@@ -93,3 +93,36 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME web_reader COMMAND web_reader_test)
 endif()
+
+option(NEUTRINO_VULKAN "Enable optional Vulkan compute for ray batches on Windows and Linux" OFF)
+if(NEUTRINO_VULKAN)
+    if(NOT WIN32 AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "The Vulkan compute backend supports Windows and Linux.")
+    endif()
+    find_path(NEUTRINO_VULKAN_INCLUDE_DIR vulkan/vulkan.h
+        HINTS "$ENV{VULKAN_SDK}" PATH_SUFFIXES Include include REQUIRED)
+    set(NEUTRINO_VULKAN_SHADER_HEADER "" CACHE FILEPATH "Precompiled C header for the Vulkan ray shader")
+    set(shader_header "${CMAKE_CURRENT_BINARY_DIR}/neutrino_ray_spv.h")
+    if(NEUTRINO_VULKAN_SHADER_HEADER)
+        configure_file("${NEUTRINO_VULKAN_SHADER_HEADER}" "${shader_header}" COPYONLY)
+    else()
+        find_program(NEUTRINO_GLSLANG NAMES glslangValidator glslang
+            HINTS "$ENV{VULKAN_SDK}" PATH_SUFFIXES Bin bin REQUIRED)
+        add_custom_command(OUTPUT "${shader_header}"
+            COMMAND "${NEUTRINO_GLSLANG}" -V --target-env vulkan1.0
+                --vn neutrino_ray_spv -o "${shader_header}" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/trace_rays.comp"
+            DEPENDS shaders/trace_rays.comp
+            VERBATIM)
+        add_custom_target(neutrino_vulkan_shader DEPENDS "${shader_header}")
+    endif()
+    foreach(target IN ITEMS neutrino scene_physics_test)
+        if(TARGET "${target}")
+            target_sources("${target}" PRIVATE src/ray_vulkan.c)
+            target_compile_definitions("${target}" PRIVATE NEUTRINO_VULKAN=1)
+            target_include_directories("${target}" PRIVATE "${NEUTRINO_VULKAN_INCLUDE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
+            if(TARGET neutrino_vulkan_shader)
+                add_dependencies("${target}" neutrino_vulkan_shader)
+            endif()
+        endif()
+    endforeach()
+endif()

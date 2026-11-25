@@ -93,6 +93,36 @@ static bool tool_protocol(void)
     return ok;
 }
 
+static bool ordered_protocol(void)
+{
+    const char *fluid = "{\"neutrino_tool\":\"fluid\",\"height\":1,\"tank_area\":2,\"outlet_area\":0.003,\"seconds\":10}";
+    const char *gravity = "{\"neutrino_tool\":\"tune\",\"setting\":\"gravity\",\"value\":1}";
+    const char *treat = "{\"neutrino_tool\":\"treat\",\"actor\":\"Iona\",\"part\":\"hand\",\"kind\":\"cut\"}";
+    const char *injury = "{\"neutrino_tool\":\"injury\",\"actor\":\"Iona\",\"part\":\"hand\",\"kind\":\"cut\",\"severity\":\"mild\"}";
+    Text plan = {0};
+    Preview p = {.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    format(&plan, "{\"actions\":[%s,%s,%s]}", fluid, gravity, fluid);
+    bool ok = simulation_tool_reply(&p, str(&plan)) == SIM_REGENERATE &&
+        p.tool_prose_only && p.tool_rounds == 3 && p.reading_count == 2 &&
+        p.readings[0].drained_l > p.readings[1].drained_l &&
+        cJSON_GetArraySize(p.tool_pending) == 1 && !at(p.story, "simLog") &&
+        !strstr(str(&p.tool_feedback), "neutrino_tool");
+    free_protocol(&p);
+    clear(&plan);
+    p = (Preview){.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    format(&plan, "{\"actions\":[%s,%s,%s]}", gravity, treat, fluid);
+    ok = ok && simulation_tool_reply(&p, str(&plan)) == SIM_REGENERATE &&
+        !p.tool_pending && !p.reading_count && !p.tool_prose_only &&
+        strstr(str(&p.tool_results), "rejected at step 2");
+    clear(&plan);
+    format(&plan, "{\"actions\":[%s,%s]}", injury, treat);
+    ok = ok && simulation_tool_reply(&p, str(&plan)) == SIM_REGENERATE &&
+        cJSON_GetArraySize(p.tool_pending) == 2 && !at(p.story, "simLog");
+    free_protocol(&p);
+    release(&plan);
+    return ok;
+}
+
 static bool measurement_protocol(void)
 {
     Preview p = {.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
@@ -326,17 +356,21 @@ int main(int argc, char **argv)
     cJSON_Delete(invalid);
     cJSON_Delete(tune);
     cJSON_Delete(settings);
-    if (argc > 1 && !strcmp(argv[1], "--gpu")) {
+    if (!ordered_protocol()) { fputs("Ordered simulation protocol failed.\n", stderr); failures++; }
+    if (argc > 1 && (!strcmp(argv[1], "--gpu") || !strcmp(argv[1], "--vulkan"))) {
+        bool vulkan = !strcmp(argv[1], "--vulkan");
         Json *batch = cJSON_Parse(cases[3].json);
-        set(batch, "backend", "gpu");
+        set(batch, "backend", vulkan ? "vulkan" : "gpu");
         if (!physics_run("rays", batch, nullptr, &result) ||
-            !strstr(str(&result), "OpenCL GPU ray batch (2) hit distances in m: 2 miss")) failures++;
+            !strstr(str(&result), vulkan ? "Vulkan " : "OpenCL GPU") ||
+            !strstr(str(&result), "ray batch (2) hit distances in m: 2 miss")) failures++;
         puts(str(&result));
         clear(&result);
         Json *room = cJSON_Parse(cases[5].json);
-        set(room, "backend", "gpu");
+        set(room, "backend", vulkan ? "vulkan" : "gpu");
         if (!physics_run("acoustic", room, nullptr, &result) ||
-            !strstr(str(&result), "OpenCL GPU visibility") || !strstr(str(&result), "Direct blocked.")) failures++;
+            !strstr(str(&result), vulkan ? "Vulkan " : "OpenCL GPU visibility") ||
+            !strstr(str(&result), "Direct blocked.")) failures++;
         puts(str(&result));
         release(&result);
         cJSON_Delete(room);
