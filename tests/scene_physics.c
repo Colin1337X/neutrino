@@ -10,6 +10,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 void app_info(App *app, const char *title) { (void)app; (void)title; }
 void app_status(App *app, const char *message) { (void)app; (void)message; }
@@ -718,7 +722,31 @@ static bool sensory_branch_state(void)
     return ok;
 }
 
-static int propagation_timing(bool dense)
+static double benchmark_seconds(void)
+{
+#ifdef _WIN32
+    LARGE_INTEGER counter, frequency;
+    QueryPerformanceCounter(&counter);
+    QueryPerformanceFrequency(&frequency);
+    return (double)counter.QuadPart/frequency.QuadPart;
+#else
+    struct timespec sample;
+    clock_gettime(CLOCK_MONOTONIC,&sample);
+    return sample.tv_sec+1e-9*sample.tv_nsec;
+#endif
+}
+
+static void print_propagation(const char *tool, const PhysicsReading *reading, const Text *trace)
+{
+    printf("%s\n%s\n%d %d %d %.17g %.17g %.17g %d\n", tool, str(trace), reading->recursive_arrivals,
+           reading->recursive_limited, reading->optical_direct_blocked, reading->optical_power,
+           reading->optical_first_ns, reading->optical_first_power, reading->optical_first_bounces);
+    for (int i = 0; i < reading->arrivals; ++i)
+        printf("%d %d %d %.17g %.17g\n", reading->arrival[i].blocked, reading->arrival[i].faded,
+               reading->arrival[i].bounces, reading->arrival[i].delay_ms, reading->arrival[i].level_db);
+}
+
+static int propagation_timing(bool dense, bool proof)
 {
     Json *settings = cJSON_CreateObject();
     Json *args = cJSON_Parse("{\"source\":[2,2,2],\"listener\":[8,2,2],\"wall_reflectivity\":0.8,\"backend\":\"cpu\"}");
@@ -736,22 +764,23 @@ static int propagation_timing(bool dense)
             valid = rigid_actions(settings, str(&out));
         }
     }
-    puts("signal,depth,repetition,batches,mean_us,received_recursive_paths");
+    if (!proof) puts("signal,depth,repetition,batches,mean_us,received_recursive_paths");
     for (int optical = 0; valid && optical < 2; ++optical) {
         const char *tool = optical ? "scene_light" : "scene_acoustic";
         for (int depth = dense ? 4 : 0; valid && depth <= 4; ++depth) {
             integer(args, "max_bounces", depth);
-            for (int rep = 0; valid && rep <= 5; ++rep) {
+            for (int rep = 0; valid && rep <= (proof ? 0 : 5); ++rep) {
                 PhysicsReading reading;
-                const int batches = dense ? 120 : depth < 2 ? 4000 : 800;
-                const clock_t start = clock();
+                const int batches = proof ? 1 : dense ? 400 : depth < 2 ? 4000 : 800;
+                const double start = benchmark_seconds();
                 for (int j = 0; valid && j < batches; ++j) {
                     clear(&out);
                     valid = physics_run_reading(tool, args, settings, &out, &reading) && !reading.unavailable;
                 }
-                const clock_t end = clock();
+                const double end = benchmark_seconds();
+                if (valid && proof) print_propagation(tool,&reading,&out);
                 if (valid && rep) printf("%s,%d,%d,%d,%.6f,%d\n", tool, depth, rep, batches,
-                    1e6 * (end - start) / (CLOCKS_PER_SEC * (double)batches), reading.recursive_arrivals);
+                    1e6 * (end-start)/batches, reading.recursive_arrivals);
             }
         }
     }
@@ -1396,7 +1425,7 @@ static int ventilation_timing(void)
 
 static bool pressure_cfd(void)
 {
-    const double length[] = {4,3,2}, near[] = {3.75,1.6875,1.125}, far[] = {.25,1.6875,1.125};
+    const double length[] = {4,3,2}, near_probe[] = {3.75,1.6875,1.125}, far_probe[] = {.25,1.6875,1.125};
     Json *args = cJSON_Parse("{\"method\":\"cfd\",\"resolution\":8,\"seconds\":2,\"boundary\":\"closed\","
         "\"viscosity\":0,\"diffusivity\":0,\"concentration\":0,\"boundaries\":{"
         "\"x_min\":{\"type\":\"pressure\",\"pressure_pa\":0},"
@@ -1408,15 +1437,15 @@ static bool pressure_cfd(void)
         fabs(f.inflow_m3_s - f.outflow_m3_s) < .002 && f.inflow_m3_s == f.backflow_m3_s &&
         f.tracer_in > .18 && f.tracer_in == f.backflow_tracer_in &&
         fabs(f.tracer_in - f.tracer_out - 24*f.tracer_mean) < 1e-10 &&
-        flow_sample(&f, near) > .05 && flow_sample(&f, far) < 1e-8;
+        flow_sample(&f, near_probe) > .05 && flow_sample(&f, far_probe) < 1e-8;
     if (!ok) fprintf(stderr, "Pressure test: %s, in %.9g, out %.9g, backflow %.9g, tracer in %.9g, near %.9g\n",
-        f.fallback ? f.fallback : "", f.inflow_m3_s, f.outflow_m3_s, f.backflow_m3_s, f.tracer_in, flow_sample(&f,near));
+        f.fallback ? f.fallback : "", f.inflow_m3_s, f.outflow_m3_s, f.backflow_m3_s, f.tracer_in, flow_sample(&f,near_probe));
     char *saved = flow_encode(&f);
     FlowConfig restored = c;
     restored.seconds = 0;
     FlowField resume = flow_resume_domain(&restored, nullptr, 0, saved ? saved : "");
     ok &= saved && strlen(saved) == flow_snapshot_bytes(&c) && resume.grid &&
-        flow_sample(&resume, near) == flow_sample(&f, near) &&
+        flow_sample(&resume, near_probe) == flow_sample(&f, near_probe) &&
         resume.backflow_m3_s == f.backflow_m3_s && resume.outflow_m3_s == f.outflow_m3_s;
     flow_release(&resume);
     restored.seconds = 1;
@@ -1443,7 +1472,7 @@ static bool pressure_cfd(void)
     return ok;
 }
 
-static int pressure_timing(void)
+static int pressure_timing(bool prescribed)
 {
     const double length[] = {4,3,2};
     const int sizes[] = {8,12,24};
@@ -1453,8 +1482,9 @@ static int pressure_timing(void)
     Json *exhaust = at(at(args, "boundaries"), "x_max");
     bool ok = true;
     for (size_t i = 0; ok && i < sizeof sizes / sizeof *sizes; ++i) {
+        if (prescribed && sizes[i] != 24) continue;
         integer(args, "resolution", sizes[i]);
-        for (int pressure = 0; ok && pressure < 2; ++pressure) {
+        for (int pressure = 0; ok && pressure < (prescribed ? 1 : 2); ++pressure) {
             set(exhaust, "type", pressure ? "pressure" : "outflow");
             if (pressure) integer(exhaust, "pressure_pa", 0);
             else cJSON_DeleteItemFromObjectCaseSensitive(exhaust,"pressure_pa");
@@ -1463,8 +1493,7 @@ static int pressure_timing(void)
             for (int rep = 0; ok && rep <= 5; ++rep) {
                 const int batches = sizes[i] == 24 ? 2 : 16;
                 double tracer = 0, divergence = 0, in = 0, out = 0, backflow = 0;
-                struct timespec start, end;
-                timespec_get(&start, TIME_UTC);
+                const double start = benchmark_seconds();
                 for (int j = 0; ok && j < batches; ++j) {
                     FlowField f = flow_solve(&c);
                     ok = f.grid && fabs(f.inflow_m3_s - 3) < .1 && fabs(f.outflow_m3_s - 3) < .4;
@@ -1475,8 +1504,7 @@ static int pressure_timing(void)
                     in = f.inflow_m3_s; out = f.outflow_m3_s; backflow = f.backflow_m3_s;
                     flow_release(&f);
                 }
-                timespec_get(&end, TIME_UTC);
-                const double elapsed = 1000.0*(end.tv_sec-start.tv_sec) + 1e-6*(end.tv_nsec-start.tv_nsec);
+                const double elapsed = 1000.0*(benchmark_seconds()-start);
                 if (ok && rep) printf("%d,%s,%d,%d,%.6f,%.9g,%.9g,%.9g,%.9g,%.9g\n",
                     sizes[i], pressure ? "pressure" : "prescribed", rep,batches,
                     elapsed/batches,in,out,backflow,tracer,divergence);
@@ -1485,6 +1513,29 @@ static int pressure_timing(void)
     }
     cJSON_Delete(args);
     return !ok;
+}
+
+static int scaling_proof(void)
+{
+    const double length[] = {4,3,2};
+    Json *args = cJSON_Parse(ventilated_room);
+    integer(args,"resolution",24);
+    integer(args,"seconds",1);
+    FlowConfig config;
+    const bool valid = flow_parse(args,length,&config);
+    cJSON_Delete(args);
+    if (!valid) return 1;
+    FlowField field = flow_solve(&config);
+    char *state = flow_encode(&field);
+    if (state) {
+        printf("CFD %.17g %.17g %.17g %.17g %.17g %.17g %.17g\n%s\n", field.inflow_m3_s,
+               field.outflow_m3_s, field.tracer_in, field.tracer_out, field.tracer_mean,
+               field.speed, field.divergence, state);
+    }
+    const bool saved = state != nullptr;
+    free(state);
+    flow_release(&field);
+    return !saved || propagation_timing(true,true);
 }
 
 static void cell_scan_reference(const FlowConfig *c, const PhysicsBox *boxes, int count, unsigned char *solid)
@@ -2158,10 +2209,12 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "--persistent-cfd-timing")) return persistent_cfd_timing();
     if (argc > 1 && !strcmp(argv[1], "--raster-timing")) return raster_timing();
     if (argc > 1 && !strcmp(argv[1], "--ventilation-timing")) return ventilation_timing();
-    if (argc > 1 && !strcmp(argv[1], "--pressure-timing")) return pressure_timing();
+    if (argc > 1 && !strcmp(argv[1], "--pressure-timing"))
+        return pressure_timing(argc > 2 && !strcmp(argv[2], "prescribed"));
+    if (argc > 1 && !strcmp(argv[1], "--scaling-proof")) return scaling_proof();
     if (argc > 1 && !strcmp(argv[1], "--parallel-fixture")) return parallel_fixture();
     if (argc > 1 && !strcmp(argv[1], "--propagation-timing"))
-        return propagation_timing(argc > 2 && !strcmp(argv[2], "dense"));
+        return propagation_timing(argc > 2 && !strcmp(argv[2], "dense"),false);
     if (argc > 1 && !strcmp(argv[1], "--cfd-timing")) return cfd_timing();
     const struct {
         const char *name, *json, *expected;

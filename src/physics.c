@@ -963,8 +963,8 @@ static const char *const face_name[] = {"X-min", "X-max", "Y-min", "Y-max", "Z-m
 
 typedef struct {
     const Box *box;
-    double reflection_db;
-    int face, object;
+    double reflection_db, coordinate, listener_offset;
+    int face, object, axis, side;
 } Reflector;
 
 typedef struct {
@@ -1018,13 +1018,7 @@ static void record_echo(ReflectionSearch *search, double delay, double level, in
     r->arrival[slot].level_db = level;
 }
 
-static double plane(const Reflector *face)
-{
-    int axis = face->face / 2;
-    return face->face % 2 ? face->box->hi[axis] : face->box->lo[axis];
-}
-
-enum { REFLECTION_PARALLEL_MIN = 4096 };
+enum { REFLECTION_PARALLEL_MIN = 4096, REFLECTION_TILE = 256, INLINE_REFLECTIONS = 4 };
 
 typedef struct {
     double distance, level;
@@ -1035,12 +1029,24 @@ typedef struct {
 typedef struct {
     const Reflector *sequence[MAX_BOUNCES];
     ReflectionResult result;
+    int depth;
 } ReflectionCandidate;
 
 typedef struct {
+    size_t start, end;
+} ReflectionDepth;
+
+typedef struct {
+    ReflectionCandidate inline_paths[INLINE_REFLECTIONS], *overflow;
+    size_t received;
+    int faded;
+    bool failed;
+} ReflectionTile;
+
+typedef struct {
     const ReflectionSearch *search;
-    ReflectionCandidate *candidates;
-    int depth;
+    ReflectionDepth depths[MAX_BOUNCES-1];
+    ReflectionTile tiles[REFLECTION_CANDIDATE_LIMIT/REFLECTION_TILE];
 } ReflectionBatch;
 
 static ReflectionResult evaluate_reflection(const ReflectionSearch *search, int depth, double reflection_db,
@@ -1051,9 +1057,8 @@ static ReflectionResult evaluate_reflection(const ReflectionSearch *search, int 
     memcpy(points[depth + 1], search->listener, sizeof points[0]);
     for (int i = depth; i > 0; --i) {
         const Reflector *face = sequence[i - 1];
-        int axis = face->face / 2;
-        const double wall = plane(face), *after = points[i + 1], *image = images[i];
-        const int side = (face->face % 2 ? 1 : -1) * (face->object < 0 ? -1 : 1);
+        const int axis = face->axis, side = face->side;
+        const double wall = face->coordinate, *after = points[i + 1], *image = images[i];
         const double from_wall = after[axis] - wall, image_offset = image[axis] - wall;
         if (side * from_wall <= 1e-9 || side * image_offset >= -1e-9) return (ReflectionResult){0};
         const double fraction = from_wall / (from_wall - image_offset);
@@ -1090,31 +1095,58 @@ typedef struct {
 static void reflect_image(double images[][3], int depth, const Reflector *face)
 {
     memcpy(images[depth+1],images[depth],sizeof images[0]);
-    const int axis = face->face / 2;
-    images[depth+1][axis] = 2 * plane(face) - images[depth][axis];
+    images[depth+1][face->axis] = 2 * face->coordinate - images[depth][face->axis];
 }
 
-static void evaluate_subtree(const ReflectionBatch *batch, PartialReflection *path,
-                             int depth, double reflection_db, size_t first, size_t end,
-                             size_t ordinal, size_t span)
+/* A candidate with the listener behind its final face has no specular path. */
+static bool final_face_visible(const Reflector *face)
 {
-    const ReflectionSearch *search = batch->search;
-    if (depth == batch->depth) {
-        ReflectionCandidate *candidate = &batch->candidates[ordinal];
-        candidate->result = evaluate_reflection(search,depth,reflection_db,path->sequence,path->images);
-        if (candidate->result.distance)
+    return face->side * face->listener_offset > 1e-9;
+}
+
+typedef struct {
+    const ReflectionSearch *search;
+    PartialReflection path;
+    ReflectionTile *tile;
+    size_t strides[MAX_BOUNCES];
+    size_t first, end;
+    int target;
+} ReflectionSlice;
+
+static ReflectionCandidate *next_reflection(ReflectionTile *tile)
+{
+    if (tile->received < INLINE_REFLECTIONS) return &tile->inline_paths[tile->received++];
+    if (!tile->overflow) {
+        tile->overflow = malloc((REFLECTION_TILE-INLINE_REFLECTIONS)*sizeof *tile->overflow);
+        if (!tile->overflow) { tile->failed = true; return nullptr; }
+    }
+    return &tile->overflow[tile->received++ - INLINE_REFLECTIONS];
+}
+
+static void evaluate_subtree(ReflectionSlice *slice, int depth, double reflection_db, size_t ordinal)
+{
+    const ReflectionSearch *search = slice->search;
+    PartialReflection *path = &slice->path;
+    if (depth == slice->target) {
+        const ReflectionResult result = evaluate_reflection(search,depth,reflection_db,path->sequence,path->images);
+        if (result.faded) ++slice->tile->faded;
+        if (result.distance) {
+            ReflectionCandidate *candidate = next_reflection(slice->tile);
+            if (!candidate) return;
+            candidate->result = result;
+            candidate->depth = depth;
             memcpy(candidate->sequence,path->sequence,(size_t)depth*sizeof path->sequence[0]);
+        }
         return;
     }
-    size_t child_span = span / (size_t)(search->count - (depth > 0));
-    for (int i = 0; i < search->count && ordinal < end; ++i) {
+    const size_t child_span = slice->strides[depth];
+    for (int i = 0; i < search->count && ordinal < slice->end && !slice->tile->failed; ++i) {
         const Reflector *face = &search->faces[i];
         if (depth && face == path->sequence[depth-1]) continue;
-        if (ordinal + child_span > first) {
+        if (ordinal + child_span > slice->first && (depth+1 < slice->target || final_face_visible(face))) {
             path->sequence[depth] = face;
             reflect_image(path->images,depth,face);
-            evaluate_subtree(batch,path,depth+1,reflection_db+face->reflection_db,
-                             first,end,ordinal,child_span);
+            evaluate_subtree(slice,depth+1,reflection_db+face->reflection_db,ordinal);
         }
         ordinal += child_span;
     }
@@ -1122,13 +1154,23 @@ static void evaluate_subtree(const ReflectionBatch *batch, PartialReflection *pa
 
 static void evaluate_reflections(void *context, size_t first, size_t end)
 {
-    const ReflectionBatch *batch = context;
-    const ReflectionSearch *search = batch->search;
-    size_t span = (size_t)search->count;
-    for (int depth = 1; depth < batch->depth; ++depth) span *= (size_t)(search->count-1);
-    PartialReflection path;
-    memcpy(path.images[0],search->images[0],sizeof path.images[0]);
-    evaluate_subtree(batch,&path,0,0,first,end,0,span);
+    ReflectionBatch *batch = context;
+    for (size_t i = first; i < end; ++i) {
+        const size_t begin = i*REFLECTION_TILE, stop = begin+REFLECTION_TILE;
+        ReflectionSlice slice = {.search=batch->search, .tile=&batch->tiles[i]};
+        memcpy(slice.path.images[0],batch->search->images[0],sizeof slice.path.images[0]);
+        for (int depth = 2; depth <= batch->search->max_depth && !slice.tile->failed; ++depth) {
+            const ReflectionDepth group = batch->depths[depth-2];
+            if (group.start >= stop || group.end <= begin) continue;
+            slice.target = depth;
+            slice.first = begin > group.start ? begin-group.start : 0;
+            slice.end = (stop < group.end ? stop : group.end)-group.start;
+            slice.strides[depth-1] = 1;
+            for (int j = depth-2; j >= 0; --j)
+                slice.strides[j] = slice.strides[j+1]*(size_t)(batch->search->count-1);
+            evaluate_subtree(&slice,0,0,0);
+        }
+    }
 }
 
 static void record_reflection(ReflectionSearch *search, int depth, const Reflector *const *sequence, ReflectionResult result)
@@ -1163,27 +1205,53 @@ static void find_reflections(ReflectionSearch *search, int depth, int target, do
     for (int i = 0; i < search->count && !search->limited; ++i) {
         const Reflector *face = &search->faces[i];
         if (depth && search->sequence[depth - 1] == face) continue;
+        if (depth+1 == target && !final_face_visible(face)) {
+            if (search->tested == REFLECTION_CANDIDATE_LIMIT) search->limited = true;
+            else ++search->tested;
+            continue;
+        }
         search->sequence[depth] = face;
         reflect_image(search->images,depth,face);
         find_reflections(search,depth+1,target,reflection_db+face->reflection_db);
     }
 }
 
-static void find_parallel_reflections(ReflectionSearch *search, Parallel *workers, ReflectionCandidate *candidates)
+static bool find_parallel_reflections(ReflectionSearch *search, Parallel *workers)
 {
+    ReflectionBatch batch = {.search=search};
     const size_t radix = (size_t)search->count - 1;
-    size_t combinations = (size_t)search->count;
-    for (int depth = 2; depth <= search->max_depth && !search->limited; ++depth) {
+    size_t combinations = (size_t)search->count, offset = 0;
+    bool limited = false;
+    for (int depth = 2; depth <= search->max_depth; ++depth) {
         combinations *= radix;
-        const size_t remaining = REFLECTION_CANDIDATE_LIMIT - (size_t)search->tested;
+        const size_t remaining = REFLECTION_CANDIDATE_LIMIT - offset;
         const size_t count = combinations < remaining ? combinations : remaining;
-        ReflectionBatch batch = {search,candidates,depth};
-        parallel_run(workers,count,evaluate_reflections,&batch);
-        /* Consume candidates in depth-first order to keep arrival selection and trace stable. */
-        for (size_t i = 0; i < count; ++i) record_reflection(search,depth,candidates[i].sequence,candidates[i].result);
-        search->tested += (int)count;
-        search->limited = combinations > remaining;
+        batch.depths[depth-2] = (ReflectionDepth){offset,offset+count};
+        offset += count;
+        if (combinations > remaining) { limited = true; break; }
     }
+    const size_t tiles = (offset+REFLECTION_TILE-1)/REFLECTION_TILE;
+    parallel_run(workers,tiles,evaluate_reflections,&batch);
+    bool complete = true;
+    for (size_t i = 0; i < tiles; ++i) complete &= !batch.tiles[i].failed;
+    /* Compact each tile independently, then commit in candidate order. */
+    for (size_t i = 0; i < tiles; ++i) {
+        const ReflectionTile *tile = &batch.tiles[i];
+        if (complete) {
+            for (size_t j = 0; j < tile->received; ++j) {
+                const ReflectionCandidate *candidate = j < INLINE_REFLECTIONS ?
+                    &tile->inline_paths[j] : &tile->overflow[j-INLINE_REFLECTIONS];
+                record_reflection(search,candidate->depth,candidate->sequence,candidate->result);
+            }
+            search->faded += tile->faded;
+        }
+        free(tile->overflow);
+    }
+    if (complete) {
+        search->tested = (int)offset;
+        search->limited = limited;
+    }
+    return complete;
 }
 
 static void recursive_reflections(ReflectionSearch *search, const double source[3], double wall)
@@ -1194,21 +1262,25 @@ static void recursive_reflections(ReflectionSearch *search, const double source[
         const double amplitude = i < 0 ? wall : search->objects[i].reflection;
         if (amplitude <= 0) continue;
         const double reflection_db = 20 * log10(amplitude);
-        for (int face = 0; face < 6; ++face)
-            search->faces[search->count++] = (Reflector){i < 0 ? search->room : &search->objects[i].box,
-                                                       reflection_db, face, i};
+        const Box *box = i < 0 ? search->room : &search->objects[i].box;
+        for (int face = 0; face < 6; ++face) {
+            const int axis = face/2, side = (face%2 ? 1 : -1)*(i < 0 ? -1 : 1);
+            const double coordinate = face%2 ? box->hi[axis] : box->lo[axis];
+            search->faces[search->count++] = (Reflector){box,reflection_db,coordinate,
+                search->listener[axis]-coordinate,face,i,axis,side};
+        }
     }
-    size_t combinations = (size_t)search->count;
-    for (int depth = 2; depth <= search->max_depth && combinations < REFLECTION_CANDIDATE_LIMIT; ++depth)
+    size_t combinations = (size_t)search->count, work = 0;
+    for (int depth = 2; depth <= search->max_depth && work < REFLECTION_CANDIDATE_LIMIT; ++depth) {
         combinations *= search->count > 1 ? (size_t)search->count - 1 : 0;
-    const size_t work = combinations < REFLECTION_CANDIDATE_LIMIT ? combinations : REFLECTION_CANDIDATE_LIMIT;
+        work += combinations;
+    }
+    if (work > REFLECTION_CANDIDATE_LIMIT) work = REFLECTION_CANDIDATE_LIMIT;
     Parallel *workers = work >= REFLECTION_PARALLEL_MIN ? parallel_open_batch(work,1024) : nullptr;
-    ReflectionCandidate *candidates = workers ? malloc(work * sizeof *candidates) : nullptr;
-    if (candidates) find_parallel_reflections(search,workers,candidates);
-    else for (int target = 2; target <= search->max_depth && !search->limited; ++target)
-        find_reflections(search,0,target,0);
+    const bool completed = workers && find_parallel_reflections(search,workers);
     parallel_close(workers);
-    free(candidates);
+    if (!completed) for (int target = 2; target <= search->max_depth && !search->limited; ++target)
+        find_reflections(search,0,target,0);
     if (search->reading) {
         search->reading->recursive_arrivals = search->received;
         search->reading->recursive_limited = search->limited;

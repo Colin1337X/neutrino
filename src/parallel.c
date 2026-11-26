@@ -1,5 +1,6 @@
 #include "parallel.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 
 #ifdef _WIN32
@@ -38,9 +39,6 @@ typedef struct {
     Parallel *group;
     unsigned lane;
     Thread thread;
-#ifdef _WIN32
-    PTP_WORK work;
-#endif
 } Worker;
 
 struct Parallel {
@@ -52,7 +50,8 @@ struct Parallel {
     size_t epoch;
     bool stopping;
 #ifdef _WIN32
-    bool shared;
+    PTP_WORK work;
+    atomic_uint next_lane;
 #endif
     size_t count;
     ParallelRange range;
@@ -92,8 +91,8 @@ static void CALLBACK shared_worker(PTP_CALLBACK_INSTANCE instance, void *argumen
 {
     (void)instance;
     (void)work;
-    const Worker *worker = argument;
-    run_lane(worker->group, worker->lane);
+    Parallel *group = argument;
+    run_lane(group,atomic_fetch_add_explicit(&group->next_lane,1,memory_order_relaxed));
 }
 #endif
 
@@ -105,14 +104,13 @@ static unsigned worker_limit(void)
     const long online = sysconf(_SC_NPROCESSORS_ONLN);
     unsigned available = online > 0 ? (unsigned)online : 1;
 #endif
-    unsigned limit = DEFAULT_LIMIT;
     const char *setting = getenv("NEUTRINO_PHYSICS_WORKERS");
     if (setting && *setting) {
         char *end;
         unsigned long requested = strtoul(setting, &end, 10);
-        if (!*end && requested > 0 && requested <= MAX_WORKERS) limit = (unsigned)requested;
+        if (!*end && requested > 0 && requested <= MAX_WORKERS) return (unsigned)requested;
     }
-    return available < limit ? available : limit;
+    return available < DEFAULT_LIMIT ? available : DEFAULT_LIMIT;
 }
 
 static Parallel *open_group(size_t work, size_t minimum_per_worker, bool shared)
@@ -125,12 +123,16 @@ static Parallel *open_group(size_t work, size_t minimum_per_worker, bool shared)
     Parallel *group = calloc(1, sizeof *group);
     if (!group) return nullptr;
 #ifdef _WIN32
-    group->shared = shared;
-    if (!shared) {
-        InitializeSRWLock(&group->mutex);
-        InitializeConditionVariable(&group->changed);
-        InitializeConditionVariable(&group->finished);
+    if (shared) {
+        group->lanes = (unsigned)lanes;
+        group->work = CreateThreadpoolWork(shared_worker,group,nullptr);
+        if (group->work) return group;
+        free(group);
+        return nullptr;
     }
+    InitializeSRWLock(&group->mutex);
+    InitializeConditionVariable(&group->changed);
+    InitializeConditionVariable(&group->finished);
 #else
     (void)shared;
     if (pthread_mutex_init(&group->mutex, nullptr)) { free(group); return nullptr; }
@@ -151,13 +153,8 @@ static Parallel *open_group(size_t work, size_t minimum_per_worker, bool shared)
         worker->lane = group->lanes;
         worker->group = group;
 #ifdef _WIN32
-        if (shared) {
-            worker->work = CreateThreadpoolWork(shared_worker, worker, nullptr);
-            if (!worker->work) break;
-        } else {
-            worker->thread = (HANDLE)_beginthreadex(nullptr, 0, worker_main, worker, 0, nullptr);
-            if (!worker->thread) break;
-        }
+        worker->thread = (HANDLE)_beginthreadex(nullptr,0,worker_main,worker,0,nullptr);
+        if (!worker->thread) break;
 #else
         if (pthread_create(&worker->thread, nullptr, worker_main, worker)) break;
 #endif
@@ -184,14 +181,14 @@ void parallel_run(Parallel *group, size_t count, ParallelRange range, void *cont
         return;
     }
 #ifdef _WIN32
-    if (group->shared) {
+    if (group->work) {
         group->count = count;
         group->range = range;
         group->context = context;
-        for (unsigned i = 0; i < group->lanes - 1; ++i) SubmitThreadpoolWork(group->workers[i].work);
+        atomic_store_explicit(&group->next_lane,1,memory_order_relaxed);
+        for (unsigned i = 0; i < group->lanes - 1; ++i) SubmitThreadpoolWork(group->work);
         run_lane(group,0);
-        for (unsigned i = 0; i < group->lanes - 1; ++i)
-            WaitForThreadpoolWorkCallbacks(group->workers[i].work,FALSE);
+        WaitForThreadpoolWorkCallbacks(group->work,FALSE);
         return;
     }
 #endif
@@ -213,8 +210,8 @@ void parallel_close(Parallel *group)
 {
     if (!group) return;
 #ifdef _WIN32
-    if (group->shared) {
-        for (unsigned i = 0; i < group->lanes - 1; ++i) CloseThreadpoolWork(group->workers[i].work);
+    if (group->work) {
+        CloseThreadpoolWork(group->work);
         free(group);
         return;
     }

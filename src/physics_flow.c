@@ -17,6 +17,7 @@ static const double reference_air_density = 1.2;
 static const char frame_alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 static_assert(sizeof(double) == sizeof(uint64_t) && DBL_MANT_DIG == 53 && DBL_MAX_EXP == 1024);
 static_assert(FLOW_MAX_CELLS <= UINT16_MAX);
+static_assert(PRESSURE_SWEEPS % 2 == 0 && VENT_SWEEPS % 2 == 0);
 
 size_t flow_frame_bytes(int resolution)
 {
@@ -647,6 +648,68 @@ static void jacobi_stencil(void *context, size_t first, size_t end)
     }
 }
 
+static double sealed_cell(const double *row, const double *below, const double *above,
+                          const double *w, double rhs, int x, int y, int z, int n)
+{
+    double adjacent = 0, diagonal = 0;
+    if (x) { adjacent += w[0]*row[x-1]; diagonal += w[0]; }
+    if (x+1 < n) { adjacent += w[0]*row[x+1]; diagonal += w[0]; }
+    if (y) { adjacent += w[1]*row[x-n]; diagonal += w[1]; }
+    if (y+1 < n) { adjacent += w[1]*row[x+n]; diagonal += w[1]; }
+    if (z) { adjacent += w[2]*below[x]; diagonal += w[2]; }
+    if (z+1 < n) { adjacent += w[2]*above[x]; diagonal += w[2]; }
+    return row[x] + (2.0/3) * ((adjacent-rhs)/diagonal - row[x]);
+}
+
+static void sealed_plane(const JacobiStencil *job, int z, const double *below,
+                         const double *plane, const double *above, double *output)
+{
+    const int n = job->domain->config->resolution;
+    const double *w = job->weights, *rhs = job->rhs + z*n*n;
+    for (int y = 0; y < n; ++y) {
+        const int offset = y*n;
+        const double *row = plane+offset, *lower = below+offset, *upper = above+offset;
+        if (!z || z+1 == n || !y || y+1 == n) {
+            for (int x = 0; x < n; ++x)
+                output[offset+x] = sealed_cell(row,lower,upper,w,rhs[offset+x],x,y,z,n);
+            continue;
+        }
+        output[offset] = sealed_cell(row,lower,upper,w,rhs[offset],0,y,z,n);
+        for (int x = 1; x+1 < n; ++x) {
+            double adjacent = 0;
+            adjacent += w[0]*row[x-1];
+            adjacent += w[0]*row[x+1];
+            adjacent += w[1]*row[x-n];
+            adjacent += w[1]*row[x+n];
+            adjacent += w[2]*lower[x];
+            adjacent += w[2]*upper[x];
+            output[offset+x] = row[x] + (2.0/3)*((adjacent-rhs[offset+x])/job->diagonal - row[x]);
+        }
+        output[offset+n-1] = sealed_cell(row,lower,upper,w,rhs[offset+n-1],n-1,y,z,n);
+    }
+}
+
+static void sealed_sweeps(void *context, size_t first, size_t end)
+{
+    const JacobiStencil *job = context;
+    const int n = job->domain->config->resolution, pitch = n*n;
+    const int start = (int)first, stop = (int)end;
+    const int halo_start = start ? start-1 : start;
+    double tile[3][FACE_CELLS];
+    /* Recompute the two neighbor planes locally so two passes need only one rendezvous. */
+    for (int z = halo_start; z <= stop; ++z) {
+        if (z < n) {
+            const double *plane = job->input + z*pitch;
+            sealed_plane(job,z,z ? plane-pitch : plane,plane,z+1 < n ? plane+pitch : plane,tile[z%3]);
+        }
+        if (z <= start) continue;
+        const int ready = z-1;
+        const double *plane = tile[ready%3];
+        sealed_plane(job,ready,ready ? tile[(ready-1)%3] : plane,plane,z < n ? tile[z%3] : plane,
+                     job->output + ready*pitch);
+    }
+}
+
 typedef struct {
     const FlowDomain *domain;
     const double *inv, *pressure;
@@ -719,6 +782,20 @@ static bool project(const FlowDomain *d, const double inv[3], double *const v[3]
         if (!*valid) return false;
         sweeps = 0;
     } else if (!accelerated) memset(a,0,cells*sizeof *a);
+    if (sweeps && closed && !solid) {
+        /* Preserve the six additions used for an interior cell of the generic stencil. */
+        double sealed_diagonal = 0;
+        for (int axis = 0; axis < 3; ++axis) {
+            sealed_diagonal += w[axis];
+            sealed_diagonal += w[axis];
+        }
+        for (int pass = 0; pass < sweeps; pass += 2) {
+            JacobiStencil stencil = {d,w,rhs,a,b,sealed_diagonal};
+            parallel_run(d->workers,(size_t)n,sealed_sweeps,&stencil);
+            double *swap=a; a=b; b=swap;
+        }
+        sweeps = 0;
+    }
     for (int pass=0; !accelerated && pass<sweeps; ++pass) {
         JacobiStencil stencil = {d, w, rhs, a, b, diagonal};
         parallel_run(d->workers, (size_t)n, jacobi_stencil, &stencil);
