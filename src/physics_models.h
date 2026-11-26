@@ -8,10 +8,10 @@ bool physics_vector(const Json *args, const char *key, double value[3]);
 bool physics_optional(const Json *args, const char *key, double low, double high, double initial, double *value);
 bool physics_model_tool(const char *name);
 bool physics_model_run(const char *name, const Json *args, double gravity, Text *out, bool *unavailable);
-typedef enum { FLOW_FREE_SLIP, FLOW_NO_SLIP, FLOW_INFLOW, FLOW_OUTFLOW } FlowBoundary;
+typedef enum { FLOW_FREE_SLIP, FLOW_NO_SLIP, FLOW_INFLOW, FLOW_OUTFLOW, FLOW_PRESSURE } FlowBoundary;
 typedef struct {
     FlowBoundary type;
-    double min[2], max[2], speed, tracer;
+    double min[2], max[2], speed, tracer, pressure_pa;
 } FlowFace;
 
 typedef struct {
@@ -41,7 +41,7 @@ typedef struct {
     double permeability, porosity, porous_min[3], porous_max[3], porous_drive[3];
     int resolution;
     FlowFace faces[6];
-    bool cfd, mapped, gpu, porous, conservative, closed, no_slip, ventilated;
+    bool cfd, mapped, gpu, porous, conservative, closed, no_slip, ventilated, pressure_open;
 } FlowConfig;
 
 typedef struct { double lo[3], hi[3]; } PhysicsBox;
@@ -52,10 +52,10 @@ bool rigid_tool(const char *name);
 
 typedef struct {
     FlowConfig config;
-    double *grid;
+    double *grid, *pressure_high;
     unsigned char *solid;
     double divergence, speed, tracer_mean, porous_speed, pore_volume;
-    double inflow_m3_s, outflow_m3_s, tracer_in, tracer_out;
+    double inflow_m3_s, outflow_m3_s, backflow_m3_s, tracer_in, tracer_out, backflow_tracer_in;
     size_t porous_cells, unresolved_boxes;
     const char *method;
     const char *memory;
@@ -75,6 +75,7 @@ size_t flow_rasterize(const FlowConfig *config, const PhysicsBox *boxes, size_t 
 PhysicsCost flow_cost(const FlowConfig *config);
 PhysicsCost flow_step_cost(const FlowConfig *config, bool resumed);
 size_t flow_frame_bytes(int resolution);
+size_t flow_snapshot_bytes(const FlowConfig *config);
 char *flow_encode(const FlowField *field);
 FlowField flow_solve(const FlowConfig *config);
 FlowField flow_solve_domain(const FlowConfig *config, const PhysicsBox *solids, size_t count);

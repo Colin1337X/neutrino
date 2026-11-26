@@ -279,6 +279,7 @@ Open the TUI in a second terminal. Its default server address is `http://127.0.0
 | `NEUTRINO_RECALL_MODEL` | Recall model. Defaults to the agent model. |
 | `NEUTRINO_RECALL_ENDPOINT`, `NEUTRINO_RECALL_API_KEY` | Optional dedicated recall provider and its bearer credential. |
 | `NEUTRINO_WORKERS` | Parallel upstream requests for the default provider when unpinned. Set 1–4, default 2. A pinned llama.cpp slot or a dedicated recall endpoint runs one request at a time. |
+| `NEUTRINO_PHYSICS_WORKERS` | Maximum CPU workers per physics calculation, including the caller. Set 1–16, default 4. Small workloads run on the calling thread. |
 | `NEUTRINO_STREAM_USAGE` | Optional. Set to `1` if the default upstream provider supports OpenAI-compatible `stream_options.include_usage` and only returns token counts when asked. llama.cpp timing metrics work without this setting. |
 | `NEUTRINO_SERVER_TOKEN` | Optional credential between the TUI and Neutrino's server. Set it in both processes when enabled. |
 | `NEUTRINO_SERVER_BIND` | Inference gateway IPv4 listen address. Defaults to `127.0.0.1`. |

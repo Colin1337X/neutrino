@@ -2,6 +2,7 @@
 #include "rigid_spin.h"
 #include "spill.h"
 #include "runoff.h"
+#include "parallel.h"
 
 #include <float.h>
 #include <math.h>
@@ -137,7 +138,7 @@ static void consider(Impact *hit, double fraction, int a, int b, int axis, int s
         *hit = (Impact){fmax(0, fraction), a, b, axis, sign};
 }
 
-static void pair_impact(Impact *hit, const Body *a, const Body *b, const double da[AXES],
+static Impact pair_impact(const Body *a, const Body *b, const double da[AXES],
                         const double db[AXES], int i, int j)
 {
     double entry = -DBL_MAX, exit = DBL_MAX;
@@ -146,7 +147,7 @@ static void pair_impact(Impact *hit, const Body *a, const Body *b, const double 
         double relative = da[k] - db[k];
         if (fabs(relative) < epsilon) {
             if (a->box.hi[k] - b->box.lo[k] <= epsilon || b->box.hi[k] - a->box.lo[k] <= epsilon)
-                return;
+                return (Impact){.a = -1};
             continue;
         }
         double first = (b->box.lo[k] - a->box.hi[k]) / relative;
@@ -156,7 +157,8 @@ static void pair_impact(Impact *hit, const Body *a, const Body *b, const double 
         exit = fmin(exit, fmax(first, last));
     }
     if (axis >= 0 && exit > fmax(0, entry) && inverse_mass(a, axis) + inverse_mass(b, axis) > 0)
-        consider(hit, entry, i, j, axis, sign);
+        return (Impact){entry, i, j, axis, sign};
+    return (Impact){.a = -1};
 }
 
 static bool release_water(const Body *body, SpillSet *spills, double time)
@@ -232,8 +234,33 @@ static void contact(Body *body, int other, double energy, double time)
     }
 }
 
+typedef struct {
+    const Body *bodies;
+    const double (*delta)[AXES];
+    Impact *candidates;
+    int count;
+} ImpactSearch;
+
+static void find_pairs(void *context, size_t first, size_t end)
+{
+    const ImpactSearch *search = context;
+    for (int i = (int)first; i < (int)end; ++i) {
+        Impact *row = search->candidates + (size_t)i * MAX_BODIES;
+        for (int j = i+1; j < search->count; ++j)
+            row[j] = search->bodies[i].axes || search->bodies[j].axes ?
+                pair_impact(&search->bodies[i], &search->bodies[j], search->delta[i], search->delta[j], i, j) :
+                (Impact){.a = -1};
+    }
+}
+
+static void choose_pair(Impact *hit, Impact candidate)
+{
+    if (candidate.a >= 0)
+        consider(hit, candidate.fraction, candidate.a, candidate.b, candidate.axis, candidate.sign);
+}
+
 static bool advance(Body *bodies, int *count, const PhysicsBox *room, double gravity,
-                    double start, double duration, SpillSet *spills)
+                    double start, double duration, SpillSet *spills, Parallel *workers, Impact *candidates)
 {
     double remaining = duration;
     for (int event = 0; event < MAX_IMPACTS && remaining > 1e-10; ++event) {
@@ -253,10 +280,19 @@ static bool advance(Body *bodies, int *count, const PhysicsBox *room, double gra
                     consider(&hit, (room->hi[axis] - body->box.hi[axis]) / d, i, MAX_BODIES, axis, -1);
             }
         }
-        for (int i = 0; i < *count; ++i)
-            for (int j = i + 1; j < *count; ++j)
-                if (bodies[i].axes || bodies[j].axes)
-                    pair_impact(&hit, &bodies[i], &bodies[j], delta[i], delta[j], i, j);
+        if (candidates) {
+            ImpactSearch search = {bodies, delta, candidates, *count};
+            parallel_run(workers, (size_t)*count, find_pairs, &search);
+            /* Reduce in the original order to preserve the tie-breaking rules. */
+            for (int i = 0; i < *count; ++i)
+                for (int j = i + 1; j < *count; ++j)
+                    choose_pair(&hit, candidates[(size_t)i * MAX_BODIES + j]);
+        } else {
+            for (int i = 0; i < *count; ++i)
+                for (int j = i + 1; j < *count; ++j)
+                    if (bodies[i].axes || bodies[j].axes)
+                        choose_pair(&hit, pair_impact(&bodies[i], &bodies[j], delta[i], delta[j], i, j));
+        }
         const double elapsed = remaining * hit.fraction;
         for (int i = 0; i < *count; ++i) {
             for (int k = 0; k < AXES; ++k) {
@@ -470,12 +506,14 @@ static bool step_room(Json *room, const Json *materials, const PhysicsBox *bound
     double start = stored(room, "rigid_time_s");
     int steps = (int)ceil(seconds * HZ);
     double dt = seconds / steps;
+    Parallel *workers = valid && any ? parallel_open((size_t)count, 24) : nullptr;
+    Impact *candidates = workers ? malloc(sizeof *candidates * MAX_BODIES * MAX_BODIES) : nullptr;
     for (int tick = 0; valid && any && tick < steps; ++tick) {
         double now = start + tick*dt;
         rotate_bodies(bodies, count, bounds, dt);
-        valid = advance(bodies, &count, bounds, gravity, now, dt, &spills);
+        valid = advance(bodies, &count, bounds, gravity, now, dt, &spills, workers, candidates);
         if (valid && spills.count) {
-            spill_advance(&spills, bounds, surfaces, surface_count, gravity, now, now+dt);
+            spill_advance(&spills, bounds, surfaces, surface_count, gravity, now, now+dt, workers);
             valid = runoff_advance(&runoff, &spills, dt);
         }
     }
@@ -488,6 +526,8 @@ static bool step_room(Json *room, const Json *materials, const PhysicsBox *bound
         num(room, "rigid_time_s", start + seconds);
         spill_store(&spills, room);
     }
+    parallel_close(workers);
+    free(candidates);
     spill_release(&spills);
     runoff_release(&runoff);
     free(bodies);

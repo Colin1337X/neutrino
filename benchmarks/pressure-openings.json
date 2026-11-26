@@ -1,0 +1,41 @@
+[
+  {
+    "plan": {
+      "neutrino_tool":"sim_plan","mode":"hypothetical","name":"relay pressure exhaust",
+      "actions":[
+        {"neutrino_tool":"scene_room","min":[0,0,0],"max":[4,3,2]},
+        {"neutrino_tool":"scene_medium","method":"cfd","resolution":8,"seconds":0,"wind":[0.5,0,0],"sigma_m":1000,"viscosity":0.04,"diffusivity":0.01,"boundary":"no_slip","boundaries":{"x_min":{"type":"inflow","speed_m_s":0.5,"tracer":0},"x_max":{"type":"pressure","pressure_pa":0}}},
+        {"neutrino_tool":"scene_flow_step","seconds":1},
+        {"neutrino_tool":"scene_flow","probe":[3.75,1.6875,1.125]}
+      ],
+      "queries":[
+        {"id":"inlet","predicate":"flow.inflow_exceeds","step":4,"threshold":2.99},
+        {"id":"exhaust","predicate":"flow.outflow_exceeds","step":4,"threshold":2.99},
+        {"id":"backflow","predicate":"flow.backflow_exceeds","step":4,"threshold":0.001},
+        {"id":"clock","predicate":"flow.time_exceeds","step":4,"threshold":0.99}
+      ]
+    },
+    "results":{"inlet":"TRUE","exhaust":"TRUE","backflow":"FALSE","clock":"TRUE"},
+    "measurements":{"inlet":{"value":3},"clock":{"value":1}}
+  },
+  {
+    "plan": {
+      "neutrino_tool":"sim_plan","mode":"hypothetical","name":"relay reverse pressure tracer",
+      "actions":[
+        {"neutrino_tool":"scene_room","min":[0,0,0],"max":[4,3,2]},
+        {"neutrino_tool":"scene_medium","method":"cfd","resolution":8,"seconds":0,"concentration":0,"boundary":"closed","boundaries":{"x_min":{"type":"pressure","pressure_pa":0},"x_max":{"type":"pressure","pressure_pa":0.12,"backflow_tracer":2}}},
+        {"neutrino_tool":"scene_flow_step","seconds":1},
+        {"neutrino_tool":"scene_flow","probe":[3.75,1.6875,1.125]},
+        {"neutrino_tool":"scene_flow","probe":[0.25,1.6875,1.125]}
+      ],
+      "queries":[
+        {"id":"reverse_in","predicate":"flow.backflow_exceeds","step":4,"threshold":0.149},
+        {"id":"reverse_out","predicate":"flow.outflow_exceeds","step":5,"threshold":0.149},
+        {"id":"entered_tracer","predicate":"fluid.concentration_exceeds","step":4,"threshold":0.05},
+        {"id":"distant_tracer","predicate":"fluid.concentration_exceeds","step":5,"threshold":0.05}
+      ]
+    },
+    "results":{"reverse_in":"TRUE","reverse_out":"TRUE","entered_tracer":"TRUE","distant_tracer":"FALSE"},
+    "measurements":{"reverse_in":{"value":0.15},"reverse_out":{"value":0.15}}
+  }
+]

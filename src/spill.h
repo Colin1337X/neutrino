@@ -1,6 +1,7 @@
 #ifndef NEUTRINO_SPILL_H
 #define NEUTRINO_SPILL_H
 #include "physics_models.h"
+#include "parallel.h"
 
 enum { SPILL_PARCELS = 25, SPILL_LIMIT = 128 };
 typedef struct {
@@ -23,6 +24,6 @@ bool spill_load(SpillSet *set, const Json *room);
 void spill_store(const SpillSet *set, Json *room);
 void spill_release(SpillSet *set);
 void spill_advance(SpillSet *set, const PhysicsBox *room, const SpillSurface surfaces[], int count,
-                   double gravity, double start, double end);
+                   double gravity, double start, double end, Parallel *workers);
 bool spill_evidence(const Json *room, const char *source, const char *target, Json *evidence, double *litres);
 #endif

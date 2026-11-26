@@ -132,16 +132,31 @@ static void advance_parcel(SpillParcel *parcel, const PhysicsBox *room, const Sp
     }
 }
 
-void spill_advance(SpillSet *spills, const PhysicsBox *room, const SpillSurface surfaces[], int count,
-                   double gravity, double start, double end)
+typedef struct {
+    SpillSet *spills;
+    const PhysicsBox *room;
+    const SpillSurface *surfaces;
+    int count;
+    double gravity, start, end;
+} SpillAdvance;
+
+static void advance_spills(void *context, size_t first, size_t end)
 {
-    for (int i = 0; i < spills->count; ++i) {
-        Spill *spill = &spills->items[i];
-        double dt = end - fmax(start, spill->released_s);
+    const SpillAdvance *job = context;
+    for (size_t i = first; i < end; ++i) {
+        Spill *spill = &job->spills->items[i];
+        double dt = job->end - fmax(job->start, spill->released_s);
         if (dt <= 0) continue;
         for (int j = 0; j < SPILL_PARCELS; ++j)
-            if (!*spill->parcels[j].surface) advance_parcel(&spill->parcels[j], room, surfaces, count, gravity, dt);
+            if (!*spill->parcels[j].surface) advance_parcel(&spill->parcels[j], job->room, job->surfaces, job->count, job->gravity, dt);
     }
+}
+
+void spill_advance(SpillSet *spills, const PhysicsBox *room, const SpillSurface surfaces[], int count,
+                   double gravity, double start, double end, Parallel *workers)
+{
+    SpillAdvance job = {spills, room, surfaces, count, gravity, start, end};
+    parallel_run(workers, (size_t)spills->count, advance_spills, &job);
 }
 
 bool spill_evidence(const Json *room, const char *source, const char *target, Json *evidence, double *litres)

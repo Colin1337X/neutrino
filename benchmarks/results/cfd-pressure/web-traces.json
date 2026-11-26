@@ -1,0 +1,153 @@
+{
+  "binary": "build-comparison/fixed-cpu/neutrino.exe",
+  "bytes": 775168,
+  "idle_rss_bytes": [
+    7131136,
+    7077888,
+    7077888,
+    7077888,
+    7077888,
+    7077888,
+    7077888,
+    7077888,
+    7077888,
+    7077888,
+    7077888,
+    7077888,
+    7077888,
+    7077888,
+    7077888
+  ],
+  "plans": [
+    {
+      "name": "relay pressure exhaust",
+      "times_ms": [
+        159.58629999659024,
+        123.09060001280159,
+        109.8307000065688,
+        90.71350000158418,
+        123.94599999242928,
+        95.30739999900106,
+        87.55029999883845
+      ],
+      "report": {
+        "simulation": "relay pressure exhaust",
+        "mode": "hypothetical",
+        "status": "completed",
+        "pending_commit": false,
+        "steps": 4,
+        "consequences": [
+          {
+            "id": "inlet",
+            "predicate": "flow.inflow_exceeds",
+            "step": 4,
+            "solver": "CFD pressure openings",
+            "value": 3,
+            "threshold": 2.99,
+            "units": "m³/s",
+            "result": "TRUE"
+          },
+          {
+            "id": "exhaust",
+            "predicate": "flow.outflow_exceeds",
+            "step": 4,
+            "solver": "CFD pressure openings",
+            "value": 2.999999651788352,
+            "threshold": 2.99,
+            "units": "m³/s",
+            "result": "TRUE"
+          },
+          {
+            "id": "backflow",
+            "predicate": "flow.backflow_exceeds",
+            "step": 4,
+            "solver": "CFD pressure openings",
+            "value": 0,
+            "threshold": 0.001,
+            "units": "m³/s",
+            "result": "FALSE"
+          },
+          {
+            "id": "clock",
+            "predicate": "flow.time_exceeds",
+            "step": 4,
+            "solver": "saved CFD field",
+            "value": 1,
+            "threshold": 0.99,
+            "units": "s",
+            "result": "TRUE"
+          }
+        ]
+      },
+      "median_ms": 109.8307000065688,
+      "trace": "Ordered actions executed in sequence:\n1. Change staged for this reply.\n{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[4,3,2]}\n2. Change staged for this reply.\n{\"neutrino_tool\":\"scene_medium\",\"method\":\"cfd\",\"resolution\":8,\"seconds\":0,\"wind\":[0.5,0,0],\"sigma_m\":1000,\"viscosity\":0.04,\"diffusivity\":0.01,\"boundary\":\"no_slip\",\"boundaries\":{\"x_min\":{\"type\":\"inflow\",\"speed_m_s\":0.5,\"tracer\":0},\"x_max\":{\"type\":\"pressure\",\"pressure_pa\":0}}}\n3. Initialized and advanced CFD field from 0 to 1 s · 3D incompressible Navier-Stokes, CPU pressure openings · 23894 encoded bytes. Ventilation: inlet 3 m³/s, exhaust 2.9999997 m³/s; tracer in 0, out 2.9999948 concentration-m³ this step. Pressure-opening backflow 0 m³/s; tracer admitted by backflow 0 concentration-m³ this step.\n{\"neutrino_tool\":\"scene_flow_step\",\"seconds\":1}\n4. Restored CFD field at 1 s. 3D incompressible Navier-Stokes, CPU pressure openings. Probe concentration 1.00000016. RMS divergence 8.54144339e-07 s^-1. Mean speed 0.500633321 m/s. Ventilation: inlet 3 m³/s, exhaust 2.9999997 m³/s; tracer in 0, out 0 concentration-m³ this step. Pressure-opening backflow 0 m³/s; tracer admitted by backflow 0 concentration-m³ this step.\n{\"neutrino_tool\":\"scene_flow\",\"probe\":[3.75,1.6875,1.125]}\n{\"simulation\":\"relay pressure exhaust\",\"mode\":\"hypothetical\",\"status\":\"completed\",\"pending_commit\":false,\"steps\":4,\"consequences\":[{\"id\":\"inlet\",\"predicate\":\"flow.inflow_exceeds\",\"step\":4,\"solver\":\"CFD pressure openings\",\"value\":3,\"threshold\":2.99,\"units\":\"m³/s\",\"result\":\"TRUE\"},{\"id\":\"exhaust\",\"predicate\":\"flow.outflow_exceeds\",\"step\":4,\"solver\":\"CFD pressure openings\",\"value\":2.999999651788352,\"threshold\":2.99,\"units\":\"m³/s\",\"result\":\"TRUE\"},{\"id\":\"backflow\",\"predicate\":\"flow.backflow_exceeds\",\"step\":4,\"solver\":\"CFD pressure openings\",\"value\":0,\"threshold\":0.001,\"units\":\"m³/s\",\"result\":\"FALSE\"},{\"id\":\"clock\",\"predicate\":\"flow.time_exceeds\",\"step\":4,\"solver\":\"saved CFD field\",\"value\":1,\"threshold\":0.99,\"units\":\"s\",\"result\":\"TRUE\"}]}\n"
+    },
+    {
+      "name": "relay reverse pressure tracer",
+      "times_ms": [
+        75.47199999680743,
+        46.47319999639876,
+        43.130999998538755,
+        79.7008000081405,
+        55.15300000843126,
+        75.46219999494497,
+        107.43560000264551
+      ],
+      "report": {
+        "simulation": "relay reverse pressure tracer",
+        "mode": "hypothetical",
+        "status": "completed",
+        "pending_commit": false,
+        "steps": 5,
+        "consequences": [
+          {
+            "id": "reverse_in",
+            "predicate": "flow.backflow_exceeds",
+            "step": 4,
+            "solver": "CFD pressure openings",
+            "value": 0.15000000000000033,
+            "threshold": 0.149,
+            "units": "m³/s",
+            "result": "TRUE"
+          },
+          {
+            "id": "reverse_out",
+            "predicate": "flow.outflow_exceeds",
+            "step": 5,
+            "solver": "CFD pressure openings",
+            "value": 0.15000000000000022,
+            "threshold": 0.149,
+            "units": "m³/s",
+            "result": "TRUE"
+          },
+          {
+            "id": "entered_tracer",
+            "predicate": "fluid.concentration_exceeds",
+            "step": 4,
+            "solver": "room medium",
+            "boundary": "pressure",
+            "flow_time_s": 1,
+            "value": 0.07437000000000013,
+            "threshold": 0.05,
+            "units": "relative tracer",
+            "result": "TRUE"
+          },
+          {
+            "id": "distant_tracer",
+            "predicate": "fluid.concentration_exceeds",
+            "step": 5,
+            "solver": "room medium",
+            "boundary": "pressure",
+            "flow_time_s": 1,
+            "value": 0,
+            "threshold": 0.05,
+            "units": "relative tracer",
+            "result": "FALSE"
+          }
+        ]
+      },
+      "median_ms": 75.46219999494497,
+      "trace": "Ordered actions executed in sequence:\n1. Change staged for this reply.\n{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[4,3,2]}\n2. Change staged for this reply.\n{\"neutrino_tool\":\"scene_medium\",\"method\":\"cfd\",\"resolution\":8,\"seconds\":0,\"concentration\":0,\"boundary\":\"closed\",\"boundaries\":{\"x_min\":{\"type\":\"pressure\",\"pressure_pa\":0},\"x_max\":{\"type\":\"pressure\",\"pressure_pa\":0.12,\"backflow_tracer\":2}}}\n3. Initialized and advanced CFD field from 0 to 1 s · 3D incompressible Navier-Stokes, CPU pressure openings · 23894 encoded bytes. Ventilation: inlet 0.15 m³/s, exhaust 0.15 m³/s; tracer in 0.225, out 0 concentration-m³ this step. Pressure-opening backflow 0.15 m³/s; tracer admitted by backflow 0.225 concentration-m³ this step.\n{\"neutrino_tool\":\"scene_flow_step\",\"seconds\":1}\n4. Restored CFD field at 1 s. 3D incompressible Navier-Stokes, CPU pressure openings. Probe concentration 0.07437. RMS divergence 4.17055809e-17 s^-1. Mean speed 0.025 m/s. Ventilation: inlet 0.15 m³/s, exhaust 0.15 m³/s; tracer in 0, out 0 concentration-m³ this step. Pressure-opening backflow 0.15 m³/s; tracer admitted by backflow 0 concentration-m³ this step.\n{\"neutrino_tool\":\"scene_flow\",\"probe\":[3.75,1.6875,1.125]}\n5. Reused CFD field. 3D incompressible Navier-Stokes, CPU pressure openings. Probe concentration 0. RMS divergence 4.17055809e-17 s^-1. Mean speed 0.025 m/s. Ventilation: inlet 0.15 m³/s, exhaust 0.15 m³/s; tracer in 0, out 0 concentration-m³ this step. Pressure-opening backflow 0.15 m³/s; tracer admitted by backflow 0 concentration-m³ this step.\n{\"neutrino_tool\":\"scene_flow\",\"probe\":[0.25,1.6875,1.125]}\n{\"simulation\":\"relay reverse pressure tracer\",\"mode\":\"hypothetical\",\"status\":\"completed\",\"pending_commit\":false,\"steps\":5,\"consequences\":[{\"id\":\"reverse_in\",\"predicate\":\"flow.backflow_exceeds\",\"step\":4,\"solver\":\"CFD pressure openings\",\"value\":0.15000000000000033,\"threshold\":0.149,\"units\":\"m³/s\",\"result\":\"TRUE\"},{\"id\":\"reverse_out\",\"predicate\":\"flow.outflow_exceeds\",\"step\":5,\"solver\":\"CFD pressure openings\",\"value\":0.15000000000000022,\"threshold\":0.149,\"units\":\"m³/s\",\"result\":\"TRUE\"},{\"id\":\"entered_tracer\",\"predicate\":\"fluid.concentration_exceeds\",\"step\":4,\"solver\":\"room medium\",\"boundary\":\"pressure\",\"flow_time_s\":1,\"value\":0.07437000000000013,\"threshold\":0.05,\"units\":\"relative tracer\",\"result\":\"TRUE\"},{\"id\":\"distant_tracer\",\"predicate\":\"fluid.concentration_exceeds\",\"step\":5,\"solver\":\"room medium\",\"boundary\":\"pressure\",\"flow_time_s\":1,\"value\":0,\"threshold\":0.05,\"units\":\"relative tracer\",\"result\":\"FALSE\"}]}\n"
+    }
+  ]
+}

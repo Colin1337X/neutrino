@@ -138,42 +138,85 @@ static double requested(const Runoff *grid, const double *total, int i, int j, d
     return (diff > 0 && total[i] > 0) || (diff < 0 && total[j] > 0) ? diff*coefficient : 0;
 }
 
-static void transfer(double *change, const double *film, const double *total, const double *out,
-                     int i, int j, double flow)
+typedef struct {
+    const Runoff *grid;
+    const SpillSet *spills;
+    double *total, *out, *right, *down, *change, *film;
+    double coefficient_x, coefficient_y;
+} RunoffSweep;
+
+static void runoff_depth(void *context, size_t first, size_t end)
 {
-    if (flow == 0) return;
-    if (flow < 0) { int swap = i; i = j; j = swap; flow = -flow; }
-    double amount = flow * film[i] / fmax(total[i], out[i]);
-    change[i] -= amount;
-    change[j] += amount;
+    const RunoffSweep *sweep = context;
+    for (int i = (int)first; i < (int)end; ++i) {
+        double total = 0;
+        for (int s = 0; s < sweep->spills->count; ++s) {
+            const double *film = sweep->spills->items[s].film;
+            if (film) total += film[i];
+        }
+        sweep->total[i] = total;
+    }
+}
+
+static void runoff_flux(void *context, size_t first, size_t end)
+{
+    const RunoffSweep *sweep = context;
+    const Runoff *grid = sweep->grid;
+    const int width = grid->width;
+    for (int i = (int)first; i < (int)end; ++i) {
+        sweep->right[i] = (i+1)%width ?
+            requested(grid,sweep->total,i,i+1,sweep->coefficient_x) : 0;
+        sweep->down[i] = i+width < grid->count ?
+            requested(grid,sweep->total,i,i+width,sweep->coefficient_y) : 0;
+    }
+}
+
+static void runoff_outgoing(void *context, size_t first, size_t end)
+{
+    const RunoffSweep *sweep = context;
+    const int width = sweep->grid->width;
+    for (int i = (int)first; i < (int)end; ++i) {
+        double up = i >= width ? sweep->down[i-width] : 0;
+        double left = i%width ? sweep->right[i-1] : 0;
+        sweep->out[i] = fmax(0,-up) + fmax(0,-left) + fmax(0,sweep->right[i]) + fmax(0,sweep->down[i]);
+    }
+}
+
+static double film_flux(const RunoffSweep *sweep, int first, int second, double flow)
+{
+    if (!flow) return 0;
+    const int source = flow > 0 ? first : second;
+    return flow * sweep->film[source] / fmax(sweep->total[source], sweep->out[source]);
+}
+
+static void runoff_film(void *context, size_t first, size_t end)
+{
+    const RunoffSweep *sweep = context;
+    const int width = sweep->grid->width;
+    for (int i = (int)first; i < (int)end; ++i) {
+        double change = 0;
+        if (i >= width) change += film_flux(sweep,i-width,i,sweep->down[i-width]);
+        if (i%width) change += film_flux(sweep,i-1,i,sweep->right[i-1]);
+        change -= film_flux(sweep,i,i+1,sweep->right[i]);
+        change -= film_flux(sweep,i,i+width,sweep->down[i]);
+        sweep->change[i] = fmax(0,sweep->film[i]+change);
+    }
 }
 
 static void relax(Runoff *grid, SpillSet *spills, double dt)
 {
-    int n = grid->count, width = grid->width;
-    double *total = grid->scratch, *out = total+n, *right = out+n, *down = right+n, *change = down+n;
-    memset(total, 0, sizeof *total * (size_t)n);
-    memset(out, 0, sizeof *out * (size_t)n);
+    const size_t n = (size_t)grid->count;
+    const double ratio = grid->cell[1]/grid->cell[0], coefficient = 1000 * dt * grid->conductivity;
+    RunoffSweep sweep = {grid,spills,grid->scratch,grid->scratch+n,grid->scratch+2*n,
+                         grid->scratch+3*n,grid->scratch+4*n,nullptr,coefficient*ratio,coefficient/ratio};
+    parallel_run(grid->workers,n,runoff_depth,&sweep);
+    parallel_run(grid->workers,n,runoff_flux,&sweep);
+    parallel_run(grid->workers,n,runoff_outgoing,&sweep);
     for (int s = 0; s < spills->count; ++s) {
-        const double *film = spills->items[s].film;
-        if (film) for (int i = 0; i < n; ++i) total[i] += film[i];
-    }
-    double ratio = grid->cell[1]/grid->cell[0], coefficient = 1000 * dt * grid->conductivity;
-    for (int i = 0; i < n; ++i) {
-        right[i] = (i+1)%width ? requested(grid, total, i, i+1, coefficient*ratio) : 0;
-        down[i] = i+width < n ? requested(grid, total, i, i+width, coefficient/ratio) : 0;
-        if (right[i]) out[right[i] > 0 ? i : i+1] += fabs(right[i]);
-        if (down[i]) out[down[i] > 0 ? i : i+width] += fabs(down[i]);
-    }
-    for (int s = 0; s < spills->count; ++s) {
-        double *film = spills->items[s].film;
-        if (!film) continue;
-        memset(change, 0, sizeof *change * (size_t)n);
-        for (int i = 0; i < n; ++i) {
-            transfer(change, film, total, out, i, i+1, right[i]);
-            transfer(change, film, total, out, i, i+width, down[i]);
-        }
-        for (int i = 0; i < n; ++i) film[i] = fmax(0, film[i]+change[i]);
+        sweep.film = spills->items[s].film;
+        if (!sweep.film) continue;
+        parallel_run(grid->workers,n,runoff_film,&sweep);
+        memcpy(sweep.film,sweep.change,n*sizeof *sweep.film);
     }
 }
 
@@ -183,8 +226,11 @@ bool runoff_advance(Runoff *grid, SpillSet *spills, double dt)
     bool wet = false;
     if (!seed(grid, spills, &wet)) return false;
     if (!wet || dt <= 0) return true;
-    if (!grid->scratch) grid->scratch = calloc((size_t)grid->count*5, sizeof *grid->scratch);
-    if (!grid->scratch) return false;
+    if (!grid->scratch) {
+        grid->scratch = calloc((size_t)grid->count*5, sizeof *grid->scratch);
+        if (!grid->scratch) return false;
+        grid->workers = parallel_open((size_t)grid->count, 1024);
+    }
     int steps = (int)ceil(dt/grid->stable_dt);
     for (int i = 0; i < steps; ++i) relax(grid, spills, dt/steps);
     return true;
@@ -194,6 +240,7 @@ void runoff_release(Runoff *grid)
 {
     free(grid->bed);
     free(grid->scratch);
+    parallel_close(grid->workers);
     *grid = (Runoff){0};
 }
 

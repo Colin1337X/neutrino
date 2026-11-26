@@ -49,7 +49,7 @@ Hypothetical or rejected plans leave the saved field unchanged. Accepted frames 
 
 Set `"boundary":"closed"` on a CFD medium to seal the outer domain. This sets normal velocity to zero at the exterior faces, applies zero normal diffusion flux, and keeps interpolation within the grid. The default `"boundary":"periodic"` wraps the domain. The periodic OpenCL pressure kernel remains available for eligible calculations. A closed exterior uses CPU pressure projection, including when the requested backend is GPU.
 
-Use `"boundary":"no_slip"` for stationary exterior walls and `boundaries` to override individual faces. Face keys are `x_min`, `x_max`, `y_min`, `y_max`, `z_min`, and `z_max`. Use one boundary per face. Boundary types are `inflow`, `outflow`, `no_slip`, and `free_slip`. A vent covers the whole face by default. To define a rectangular vent, supply `min_m` and `max_m` in the two room-local axes tangent to the face, in X/Y/Z order with the face's normal axis omitted. For an X face these pairs are Y/Z.
+Use `"boundary":"no_slip"` for stationary exterior walls and `boundaries` to override individual faces. Face keys are `x_min`, `x_max`, `y_min`, `y_max`, `z_min`, and `z_max`. Use one boundary per face. Boundary types are `inflow`, `outflow`, `pressure`, `no_slip`, and `free_slip`. A vent covers the whole face by default. To define a rectangular vent, supply `min_m` and `max_m` in the two room-local axes tangent to the face, in X/Y/Z order with the face's normal axis omitted. For an X face these pairs are Y/Z.
 
 ```json
 {
@@ -64,7 +64,11 @@ Use `"boundary":"no_slip"` for stationary exterior walls and `boundaries` to ove
 }
 ```
 
-An inlet prescribes inward normal speed and upstream tracer concentration. An outlet prescribes outward normal flow. Supply `speed_m_s` for a fixed exhaust or omit it to balance the remaining inlet flow over the available exhaust area. The solver uses uncovered face cells for the balance and rejects unresolved openings or unbalanced, disconnected compartments. Exterior no-slip enforces zero normal flow and zero tangential velocity at stationary walls. Internal voxel solids still use the existing slip stencil. Ventilated tracer transport accounts for tracer entering and leaving by advection. The trace reports flow rates in m³/s and the tracer balance over the step. Pressure-driven openings and moving walls are outside this model.
+An inlet prescribes inward normal speed and upstream tracer concentration. An outlet prescribes outward normal flow. Supply `speed_m_s` for a fixed exhaust or omit it to balance the remaining inlet flow over the available exhaust area. The solver uses uncovered face cells for the balance and rejects unresolved openings or unbalanced, disconnected compartments. Exterior no-slip enforces zero normal flow and zero tangential velocity at stationary walls. Internal voxel solids use the slip stencil. Ventilated tracer transport accounts for tracer entering and leaving by advection. The trace reports flow rates in m³/s and the tracer balance over the step.
+
+Replace the example outlet with `{"type":"pressure","pressure_pa":0,"backflow_tracer":0}` to solve for its flow. Pressure is exterior gauge pressure in pascals. Each opening cell can independently admit or discharge air, and an entering cell uses the exterior `backflow_tracer` concentration. The incompressible CPU projection uses a reference air density of 1.2 kg/m³. Pair pressure openings with other pressure openings, prescribed inlets, or fixed-speed exhausts. An automatically balanced exhaust requires a room without pressure openings. The `flow.backflow_exceeds` predicate measures total inward flow through pressure openings. The [pressure-opening fixtures](../benchmarks/pressure-openings.json) exercise discharge and reversal.
+
+CPU worker groups divide large CFD grids, ray batches, recursive sound and light path evaluation, rigid collision searches, spill updates, runoff grids, and soft-body node integration. Set `NEUTRINO_PHYSICS_WORKERS=1` for a single-worker comparison. Pressure iterations, collision resolution, soft-body spring projection, and scene commits run in order.
 
 With `solid_geometry:true`, the default `"raster":"center"` marks cells whose centers fall inside geometry and reports any boxes that occupy zero cells. Select `"raster":"conservative"` to mark every cell with positive-volume overlap. This resolves thin walls at coarse resolution and can widen a wall or close a sub-cell opening. The [sealed-room fixture](../benchmarks/closed-cfd.json) exercises both exterior modes and both raster rules.
 
@@ -116,6 +120,7 @@ Emission checks the configured receivers belonging to characters still in the cu
 | flow.porous_speed_exceeds | step with scene_flow, threshold in m/s. Reports mean speed across resolved porous cells and the modeled pore volume |
 | flow.time_exceeds | step with scene_flow, threshold in seconds. Reports elapsed time in a saved field |
 | flow.inflow_exceeds / flow.outflow_exceeds | step with scene_flow, threshold in m³/s. Reports the resolved inlet or exhaust rate |
+| flow.backflow_exceeds | step with scene_flow, threshold in m³/s. Reports total inward flow through pressure openings |
 | mass_transfer.transferred_exceeds | step with a mass-transfer tool, threshold in kg. Positive is uptake, negative is release |
 | mass_transfer.final_exceeds | step with a mass-transfer tool, threshold in kg. Reports final target mass |
 

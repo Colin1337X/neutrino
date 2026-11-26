@@ -41,9 +41,9 @@ typedef struct {
     double tracer_concentration;
     double flow_time_s;
     double porous_speed, pore_volume;
-    bool voxel_flow, porous_flow, stored_flow, closed_flow, ventilated_flow;
+    bool voxel_flow, porous_flow, stored_flow, closed_flow, ventilated_flow, pressure_flow;
     int unresolved_obstacles;
-    double inflow_m3_s, outflow_m3_s;
+    double inflow_m3_s, outflow_m3_s, backflow_m3_s;
     const char *transfer_method;
     double transferred_kg, final_kg, equilibrium_kg, gas_kg;
     bool closed_transfer;

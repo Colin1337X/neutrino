@@ -12,6 +12,7 @@ typedef struct {
     int width, height, count;
     RunoffCell *bed;
     double *scratch;
+    Parallel *workers;
 } Runoff;
 
 bool runoff_configure(Json *room, const PhysicsBox *bounds, const Json *args);

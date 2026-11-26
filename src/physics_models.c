@@ -1,4 +1,7 @@
 #include "physics_models.h"
+#include "parallel.h"
+
+#include <stdatomic.h>
 
 #include <math.h>
 #include <stdlib.h>
@@ -149,6 +152,53 @@ static void soft_project(SoftNode *nodes, size_t count, const size_t shape[3], c
     }
 }
 
+typedef struct {
+    SoftNode *nodes;
+    const size_t *shape;
+    const double *spacing, *initial, *load, *acceleration;
+    size_t fixed, top, top_count;
+    double dt, decay, node_mass;
+    atomic_bool invalid;
+} SoftIntegration;
+
+static void soft_initialize(void *context, size_t first, size_t end)
+{
+    const SoftIntegration *job = context;
+    for (size_t node = first; node < end; ++node) {
+        soft_rest(node,job->shape,job->spacing,job->nodes[node].position);
+        if (node >= job->fixed) memcpy(job->nodes[node].velocity,job->initial,sizeof job->nodes[node].velocity);
+    }
+}
+
+static void soft_predict(void *context, size_t first, size_t end)
+{
+    const SoftIntegration *job = context;
+    for (size_t node = first + job->fixed; node < end + job->fixed; ++node) {
+        SoftNode *point = &job->nodes[node];
+        for (int axis = 0; axis < 3; ++axis) {
+            double acceleration = job->acceleration[axis];
+            if (node >= job->top) acceleration += job->load[axis]/(job->top_count*job->node_mass);
+            point->previous[axis] = point->position[axis];
+            point->velocity[axis] = job->decay*(point->velocity[axis]+job->dt*acceleration);
+            point->position[axis] += job->dt*point->velocity[axis];
+        }
+    }
+}
+
+static void soft_update_velocity(void *context, size_t first, size_t end)
+{
+    SoftIntegration *job = context;
+    for (size_t node = first + job->fixed; node < end + job->fixed; ++node) for (int axis = 0; axis < 3; ++axis) {
+        SoftNode *point = &job->nodes[node];
+        const double position = point->position[axis];
+        if (!isfinite(position) || fabs(position) > 1e6) {
+            atomic_store_explicit(&job->invalid, true, memory_order_relaxed);
+            return;
+        }
+        point->velocity[axis] = (position-point->previous[axis])/job->dt;
+    }
+}
+
 static bool softbody(const Json *args, double gravity, Text *out, bool *unavailable)
 {
     double size[3], load[3] = {0}, mass, stiffness, damping, seconds;
@@ -181,10 +231,6 @@ static bool softbody(const Json *args, double gravity, Text *out, bool *unavaila
             format(out,"Could not allocate %zu bytes for all %zu soft-body nodes.",count*sizeof *nodes,count);
             return true;
         }
-        for (size_t node = 0; node < count; ++node) {
-            soft_rest(node,shape,spacing,nodes[node].position);
-            if (node >= fixed) memcpy(nodes[node].velocity,initial,sizeof initial);
-        }
         SoftSpring springs[13];
         size_t spring_count = 0;
         for (int z=0; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
@@ -195,27 +241,23 @@ static bool softbody(const Json *args, double gravity, Text *out, bool *unavaila
         const int steps = (int)fmax(1,ceil(seconds*120));
         const double dt = seconds/steps, decay = exp(-damping*dt);
         const double node_mass = mass/count, compliance = node_mass/(stiffness*dt*dt);
+        SoftIntegration job = {.nodes=nodes, .shape=shape, .spacing=spacing, .initial=initial, .load=load,
+            .acceleration=acceleration, .fixed=fixed, .top=top, .top_count=top_count,
+            .dt=dt, .decay=decay, .node_mass=node_mass};
+        Parallel *workers = parallel_open(count, 4096);
+        parallel_run(workers,count,soft_initialize,&job);
         for (int step = 0; step < steps; ++step) {
-            for (size_t node = fixed; node < count; ++node) {
-                for (int axis = 0; axis < 3; ++axis) {
-                    double a = acceleration[axis];
-                    if (node >= top) a += load[axis]/(top_count*node_mass);
-                    nodes[node].previous[axis] = nodes[node].position[axis];
-                    nodes[node].velocity[axis] = decay*(nodes[node].velocity[axis]+dt*a);
-                    nodes[node].position[axis] += dt*nodes[node].velocity[axis];
-                }
-            }
+            parallel_run(workers,count-fixed,soft_predict,&job);
             soft_project(nodes,count,shape,springs,spring_count,fixed,compliance,(step & 1) != 0);
-            for (size_t node = fixed; node < count; ++node) for (int axis = 0; axis < 3; ++axis) {
-                double position = nodes[node].position[axis];
-                if (!isfinite(position) || fabs(position) > 1e6) {
-                    physics_memory_free(nodes,mapped);
-                    if (unavailable) *unavailable = true;
-                    format(out,"Soft-body state became invalid while integrating all %zu nodes.",count);
-                    return true;
-                }
-                nodes[node].velocity[axis] = (position-nodes[node].previous[axis])/dt;
-            }
+            parallel_run(workers,count-fixed,soft_update_velocity,&job);
+            if (atomic_load_explicit(&job.invalid, memory_order_relaxed)) break;
+        }
+        parallel_close(workers);
+        if (atomic_load_explicit(&job.invalid, memory_order_relaxed)) {
+            physics_memory_free(nodes,mapped);
+            if (unavailable) *unavailable = true;
+            format(out,"Soft-body state became invalid while integrating all %zu nodes.",count);
+            return true;
         }
         for (size_t node = top; node < count; ++node) {
             double initial[3];

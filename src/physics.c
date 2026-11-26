@@ -1,5 +1,6 @@
 #include "app.h"
 #include "ray.h"
+#include "parallel.h"
 #include "physics_models.h"
 #include "spill.h"
 #include "runoff.h"
@@ -316,9 +317,10 @@ static bool edit_scene(Json *settings, const Json *op)
         const Json *frame = at(op, "frame"), *data = at(frame, "data");
         FlowConfig config;
         double elapsed;
-        if (strcmp(js(settings, "active3d"), js(op, "layout")) || number(frame, "version") != 1 ||
+        if (strcmp(js(settings, "active3d"), js(op, "layout")) ||
             !room_flow(at(room, "medium"), &bounds, &config) || !config.cfd ||
-            !cJSON_IsString(data) || strlen(data->valuestring) != flow_frame_bytes(config.resolution) ||
+            number(frame, "version") != (config.pressure_open ? 2 : 1) ||
+            !cJSON_IsString(data) || strlen(data->valuestring) != flow_snapshot_bytes(&config) ||
             !physics_scalar(frame, "seconds", 0, 1e12, &elapsed)) return false;
         Json *copy = cJSON_Duplicate(frame, true);
         if (!copy) return false;
@@ -524,7 +526,8 @@ Json *physics_prepare_flow_step(const Json *settings, const Json *op, Text *out)
         append(out, "Configure a CFD scene_medium and specify positive seconds before advancing the field.");
         return nullptr;
     }
-    if (frame && (number(frame, "version") != 1 || !physics_scalar(frame, "seconds", 0, 1e12, &elapsed) ||
+    if (frame && (number(frame, "version") != (config.pressure_open ? 2 : 1) ||
+        !physics_scalar(frame, "seconds", 0, 1e12, &elapsed) ||
         elapsed + config.seconds > 1e12 || elapsed + config.seconds <= elapsed)) {
         append(out, "CFD field time is invalid or cannot represent this increment.");
         return nullptr;
@@ -540,14 +543,14 @@ Json *physics_prepare_flow_step(const Json *settings, const Json *op, Text *out)
     Json *result = cJSON_CreateObject(), *saved = cJSON_CreateObject();
     set(result, "neutrino_tool", flow_frame_event);
     set(result, "layout", js(settings, "active3d"));
-    integer(saved, "version", 1);
+    integer(saved, "version", config.pressure_open ? 2 : 1);
     put(saved, "seconds", cJSON_CreateNumber(elapsed + config.seconds));
     set(saved, "data", encoded);
     free(encoded);
     put(result, "frame", saved);
     format(out, "%s CFD field from %.9g to %.9g s · %s · %zu encoded bytes.",
            frame ? "Advanced saved" : "Initialized and advanced", elapsed, elapsed + config.seconds,
-           field.method, flow_frame_bytes(config.resolution));
+           field.method, flow_snapshot_bytes(&config));
     if (field.fallback) format(out, " %s.", field.fallback);
     flow_geometry_summary(&field, out);
     flow_boundary_summary(&field, out);
@@ -592,7 +595,15 @@ static RtRay rt_ray(const double origin[3], const double direction[3], const dou
     return result;
 }
 #endif
-static const char *trace_batch(Backend selected, const float *rays, size_t count, float *hits)
+typedef struct { const float *rows; float *hits; } CpuRayBatch;
+
+static void trace_cpu_range(void *context, size_t first, size_t end)
+{
+    const CpuRayBatch *batch = context;
+    for (size_t i = first; i < end; ++i) batch->hits[i] = trace_cpu(batch->rows + i * RAY_VALUES);
+}
+
+static const char *trace_batch(Backend selected, const float *rays, size_t count, float *hits, Parallel *workers)
 {
     if (!count) return "CPU";
 #ifdef NEUTRINO_VULKAN
@@ -605,7 +616,8 @@ static const char *trace_batch(Backend selected, const float *rays, size_t count
     if ((selected == BACKEND_GPU || (selected == BACKEND_AUTO && count >= 32)) &&
         ray_gpu(rays, count, hits)) return "OpenCL GPU";
     if (selected == BACKEND_GPU && count) return nullptr;
-    for (size_t i = 0; i < count; ++i) hits[i] = trace_cpu(rays + i * RAY_VALUES);
+    CpuRayBatch batch = {rays, hits};
+    parallel_run(workers, count, trace_cpu_range, &batch);
     return "CPU";
 }
 
@@ -652,7 +664,12 @@ static bool rays(const Json *args, Text *out, PhysicsReading *reading)
         }
     } else
 #endif
-        engine = trace_batch(selected, rows, (size_t)count, hits);
+    {
+        Parallel *workers = selected == BACKEND_CPU || selected == BACKEND_AUTO ?
+                            parallel_open((size_t)count, 1024) : nullptr;
+        engine = trace_batch(selected, rows, (size_t)count, hits, workers);
+        parallel_close(workers);
+    }
     if (!engine) {
         if (reading) reading->unavailable = true;
         append(out, backend_unavailable(selected));
@@ -720,6 +737,8 @@ static bool scene_rays(const Json *args, const Json *scene, const Box *bounds,
     const Json *objects = at(scene,"objects");
     const char *engine = nullptr;
     unsigned int base = 1;
+    Parallel *workers = objects && objects->child && (selected == BACKEND_CPU || selected == BACKEND_AUTO) ?
+                        parallel_open((size_t)count, 1024) : nullptr;
 #ifdef NEUTRINO_VULKAN_RT
     RtRay rt_rays[RAY_BATCH_MAX];
     if (selected == BACKEND_RT)
@@ -752,9 +771,9 @@ static bool scene_rays(const Json *args, const Json *scene, const Box *bounds,
 #endif
         } else {
             Box shape;
-            if (!read_box(object,&shape)) return false;
+            if (!read_box(object,&shape)) { parallel_close(workers); return false; }
             for (int i=0; i<count; ++i) pack_ray(rows+i*RAY_VALUES,origin,vectors[i],&shape);
-            engine = trace_batch(selected,rows,count,hits);
+            engine = trace_batch(selected,rows,count,hits,workers);
             if (!engine) goto unavailable;
             for (int i=0; i<count; ++i) {
                 if (hits[i] >= 0 && (hits[i] < nearest[i] || (!winner[i] && hits[i] == nearest[i]))) {
@@ -766,6 +785,7 @@ static bool scene_rays(const Json *args, const Json *scene, const Box *bounds,
             object = object->next;
         }
     }
+    parallel_close(workers);
     unsigned int sample[12];
     memcpy(sample,winner,(size_t)(count<12 ? count : 12)*sizeof *sample);
     format(out,"3D scene raycast (%s): %d rays. First contacts:",engine ? engine : "analytic room boundary",count);
@@ -790,6 +810,7 @@ static bool scene_rays(const Json *args, const Json *scene, const Box *bounds,
     return true;
 
 unavailable:
+    parallel_close(workers);
     if (reading) reading->unavailable = true;
     append(out,backend_unavailable(selected));
     return true;
@@ -962,15 +983,33 @@ static double plane(const Reflector *face)
     return face->face % 2 ? face->box->hi[axis] : face->box->lo[axis];
 }
 
-static void receive_reflection(ReflectionSearch *search, int depth, double reflection_db)
+enum { REFLECTION_BATCH_SIZE = 256 };
+
+typedef struct {
+    const Reflector *sequence[MAX_BOUNCES];
+    double images[MAX_BOUNCES + 1][3];
+    double reflection_db, distance, level;
+    int depth, crossings;
+    bool faded;
+} ReflectionCandidate;
+
+typedef struct {
+    ReflectionSearch *search;
+    Parallel *workers;
+    ReflectionCandidate candidates[REFLECTION_BATCH_SIZE];
+    size_t count;
+} ReflectionBatch;
+
+static void evaluate_reflection(const ReflectionSearch *search, ReflectionCandidate *candidate)
 {
+    const int depth = candidate->depth;
     double points[MAX_BOUNCES + 2][3];
-    memcpy(points[0], search->images[0], sizeof points[0]);
+    memcpy(points[0], candidate->images[0], sizeof points[0]);
     memcpy(points[depth + 1], search->listener, sizeof points[0]);
     for (int i = depth; i > 0; --i) {
-        const Reflector *face = search->sequence[i - 1];
+        const Reflector *face = candidate->sequence[i - 1];
         int axis = face->face / 2;
-        const double wall = plane(face), *after = points[i + 1], *image = search->images[i];
+        const double wall = plane(face), *after = points[i + 1], *image = candidate->images[i];
         const int side = (face->face % 2 ? 1 : -1) * (face->object < 0 ? -1 : 1);
         const double from_wall = after[axis] - wall, image_offset = image[axis] - wall;
         if (side * from_wall <= 1e-9 || side * image_offset >= -1e-9) return;
@@ -990,21 +1029,38 @@ static void receive_reflection(ReflectionSearch *search, int depth, double refle
         }
         distance += separation(points[i], points[i + 1]);
     }
-    double budget = reflection_db - 20 * log10(distance) - search->cutoff_db;
+    double budget = candidate->reflection_db - 20 * log10(distance) - search->cutoff_db;
     int crossings = 0;
     for (int i = 0; budget > 0 && i <= depth; ++i)
         if (!attenuate_path(search->objects, search->objects_count, -1, points[i], points[i + 1],
                             search->air_loss, search->room, search->field, search->field_loss, &budget, &crossings))
             break;
-    if (budget <= 0) { ++search->faded; return; }
-    const double level = budget + search->cutoff_db;
+    if (budget <= 0) { candidate->faded = true; return; }
+    candidate->distance = distance;
+    candidate->level = budget + search->cutoff_db;
+    candidate->crossings = crossings;
+}
+
+static void evaluate_reflections(void *context, size_t first, size_t end)
+{
+    ReflectionBatch *batch = context;
+    for (size_t i = first; i < end; ++i)
+        evaluate_reflection(batch->search, &batch->candidates[i]);
+}
+
+static void record_reflection(ReflectionSearch *search, const ReflectionCandidate *candidate)
+{
+    if (candidate->faded) { ++search->faded; return; }
+    if (!candidate->distance) return;
+    const int depth = candidate->depth, crossings = candidate->crossings;
+    const double distance = candidate->distance, level = candidate->level;
     const double delay = distance / search->speed;
     if (search->optical) record_light(search->reading, pow(10, level / 10), delay, depth);
     else record_echo(search, delay, level, depth);
     if (++search->received > REFLECTION_TRACE_LIMIT) return;
     format(search->out, "\n%d-bounce %s [", depth, search->optical ? "reflection" : "echo");
     for (int i = 0; i < depth; ++i) {
-        const Reflector *face = search->sequence[i];
+        const Reflector *face = candidate->sequence[i];
         if (i) append(search->out, " → ");
         if (face->object >= 0) format(search->out, "object %d ", face->object + 1);
         append(search->out, face_name[face->face]);
@@ -1013,12 +1069,24 @@ static void receive_reflection(ReflectionSearch *search, int depth, double refle
            distance, delay, search->optical ? "ns" : "ms", level, crossings);
 }
 
-static void find_reflections(ReflectionSearch *search, int depth, int target, double reflection_db)
+static void flush_reflections(ReflectionBatch *batch)
 {
+    parallel_run(batch->workers, batch->count, evaluate_reflections, batch);
+    for (size_t i = 0; i < batch->count; ++i) record_reflection(batch->search, &batch->candidates[i]);
+    batch->count = 0;
+}
+
+static void find_reflections(ReflectionBatch *batch, int depth, int target, double reflection_db)
+{
+    ReflectionSearch *search = batch->search;
     if (depth == target) {
         if (search->tested == REFLECTION_CANDIDATE_LIMIT) { search->limited = true; return; }
         ++search->tested;
-        receive_reflection(search, depth, reflection_db);
+        ReflectionCandidate *candidate = &batch->candidates[batch->count++];
+        *candidate = (ReflectionCandidate){.depth=depth, .reflection_db=reflection_db};
+        memcpy(candidate->sequence, search->sequence, (size_t)depth * sizeof candidate->sequence[0]);
+        memcpy(candidate->images, search->images, (size_t)(depth+1) * sizeof candidate->images[0]);
+        if (batch->count == REFLECTION_BATCH_SIZE) flush_reflections(batch);
         return;
     }
     for (int i = 0; i < search->count && !search->limited; ++i) {
@@ -1028,7 +1096,7 @@ static void find_reflections(ReflectionSearch *search, int depth, int target, do
         memcpy(search->images[depth + 1], search->images[depth], sizeof search->images[0]);
         const int axis = face->face / 2;
         search->images[depth + 1][axis] = 2 * plane(face) - search->images[depth][axis];
-        find_reflections(search, depth + 1, target, reflection_db + 20 * log10(face->amplitude));
+        find_reflections(batch, depth + 1, target, reflection_db + 20 * log10(face->amplitude));
     }
 }
 
@@ -1043,8 +1111,15 @@ static void recursive_reflections(ReflectionSearch *search, const double source[
             search->faces[search->count++] = (Reflector){i < 0 ? search->room : &search->objects[i].box,
                                                        amplitude, face, i};
     }
+    size_t combinations = (size_t)search->count;
+    for (int depth = 2; depth <= search->max_depth && combinations < REFLECTION_BATCH_SIZE; ++depth)
+        combinations *= search->count > 1 ? (size_t)search->count - 1 : 0;
+    const size_t work = combinations > REFLECTION_BATCH_SIZE ? REFLECTION_BATCH_SIZE : combinations;
+    ReflectionBatch batch = {.search=search, .workers=parallel_open(work,64)};
     for (int target = 2; target <= search->max_depth && !search->limited; ++target)
-        find_reflections(search, 0, target, 0);
+        find_reflections(&batch, 0, target, 0);
+    flush_reflections(&batch);
+    parallel_close(batch.workers);
     if (search->reading) {
         search->reading->recursive_arrivals = search->received;
         search->reading->recursive_limited = search->limited;
@@ -1115,7 +1190,12 @@ static const char *opaque_visibility(const AcousticObject *blockers, int obstacl
                 }
             }
         }
-        if (total) engine = trace_batch(selected, rows, total, hits);
+        if (total) {
+            Parallel *workers = selected == BACKEND_CPU || selected == BACKEND_AUTO ?
+                                parallel_open(total,1024) : nullptr;
+            engine = trace_batch(selected, rows, total, hits, workers);
+            parallel_close(workers);
+        }
         if (engine)
             for (size_t j = 0; j < total; ++j)
                 if (hits[j] >= 0 && hits[j] < 1.0f) blocked[path_of[j]] = true;
@@ -1373,7 +1453,8 @@ static const FlowField *scene_field(PhysicsCache *cache, const Json *room, const
         const Json *frame = at(room, "flowFrame");
         if (frame) query.seconds = 0;
         double elapsed;
-        if (frame && (number(frame, "version") != 1 || !physics_scalar(frame, "seconds", 0, 1e12, &elapsed)))
+        if (frame && (number(frame, "version") != (config->pressure_open ? 2 : 1) ||
+            !physics_scalar(frame, "seconds", 0, 1e12, &elapsed)))
             cache->flow = (FlowField){.fallback = "Invalid saved CFD frame metadata"};
         else {
             cache->flow = room_flow_solve(room, bounds, &query, frame ? js(frame, "data") : nullptr);
@@ -1484,6 +1565,8 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
                 reading->ventilated_flow = config.ventilated;
                 reading->inflow_m3_s = field->inflow_m3_s;
                 reading->outflow_m3_s = field->outflow_m3_s;
+                reading->pressure_flow = config.pressure_open;
+                reading->backflow_m3_s = field->backflow_m3_s;
                 reading->unresolved_obstacles = (int)field->unresolved_boxes;
                 reading->porous_flow = config.porous;
                 reading->porous_speed = field->porous_speed;

@@ -1,5 +1,6 @@
 #include "physics_models.h"
 #include "ray.h"
+#include "parallel.h"
 
 #include <float.h>
 #include <math.h>
@@ -10,7 +11,9 @@
 #include <windows.h>
 #endif
 
-enum { FLOW_STEPS = 96, PRESSURE_SWEEPS = 32, VENT_SWEEPS = 96, FACE_CELLS = FLOW_MAX_RESOLUTION * FLOW_MAX_RESOLUTION };
+enum { FLOW_STEPS = 96, PRESSURE_SWEEPS = 32, VENT_SWEEPS = 96, OPEN_SWEEPS = 160,
+       FACE_CELLS = FLOW_MAX_RESOLUTION * FLOW_MAX_RESOLUTION };
+static const double reference_air_density = 1.2;
 static const char frame_alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 static_assert(sizeof(double) == sizeof(uint64_t) && DBL_MANT_DIG == 53 && DBL_MAX_EXP == 1024);
 static_assert(FLOW_MAX_CELLS <= UINT16_MAX);
@@ -21,18 +24,31 @@ size_t flow_frame_bytes(int resolution)
     return (4 * n * n * n * 64 + 5) / 6;
 }
 
+static size_t pressure_values(const FlowConfig *c)
+{
+    return c->pressure_open ? (size_t)3 * c->resolution * c->resolution : 0;
+}
+
+size_t flow_snapshot_bytes(const FlowConfig *c)
+{
+    const size_t n = (size_t)c->resolution;
+    return ((4*n*n*n + pressure_values(c))*64 + 5)/6;
+}
+
 char *flow_encode(const FlowField *field)
 {
     if (!field->grid) return nullptr;
-    const size_t n = (size_t)field->config.resolution, values = 4 * n * n * n;
-    char *encoded = malloc(flow_frame_bytes(field->config.resolution) + 1);
+    const size_t n = (size_t)field->config.resolution, bulk = 4*n*n*n;
+    const size_t values = bulk + pressure_values(&field->config);
+    char *encoded = malloc(flow_snapshot_bytes(&field->config) + 1);
     if (!encoded) return nullptr;
     size_t end = 0;
     uint32_t buffer = 0;
     unsigned bits = 0;
     for (size_t i = 0; i < values; ++i) {
         uint64_t word;
-        memcpy(&word, &field->grid[i], sizeof word);
+        const double *sample = i < bulk ? &field->grid[i] : &field->pressure_high[i - bulk];
+        memcpy(&word, sample, sizeof word);
         for (unsigned byte = 0; byte < 64; byte += 8) {
             buffer = buffer << 8 | (uint8_t)(word >> byte);
             bits += 8;
@@ -46,8 +62,9 @@ char *flow_encode(const FlowField *field)
 
 static bool flow_decode(FlowField *field, const char *encoded)
 {
-    const size_t n = (size_t)field->config.resolution, values = 4 * n * n * n;
-    if (strlen(encoded) != flow_frame_bytes(field->config.resolution)) return false;
+    const size_t n = (size_t)field->config.resolution, bulk = 4*n*n*n;
+    const size_t values = bulk + pressure_values(&field->config);
+    if (strlen(encoded) != flow_snapshot_bytes(&field->config)) return false;
     uint32_t buffer = 0;
     unsigned bits = 0;
     for (size_t i = 0; i < values; ++i) {
@@ -61,8 +78,9 @@ static bool flow_decode(FlowField *field, const char *encoded)
             }
             word |= (uint64_t)((buffer >> (bits -= 8)) & 255) << byte;
         }
-        memcpy(&field->grid[i], &word, sizeof word);
-        if (!isfinite(field->grid[i])) return false;
+        double *sample = i < bulk ? &field->grid[i] : &field->pressure_high[i - bulk];
+        memcpy(sample, &word, sizeof word);
+        if (!isfinite(*sample)) return false;
     }
     return !(buffer & ((1u << bits) - 1));
 }
@@ -95,29 +113,37 @@ static bool flow_boundaries(const Json *args, FlowConfig *c)
         ((at(args, "boundary") || faces) && !c->cfd) ||
         (faces && (!cJSON_IsObject(faces) || !faces->child || !strcmp(boundary, "periodic")))) return false;
     const char *const names[6] = {"x_min","x_max","y_min","y_max","z_min","z_max"};
-    const char *const types[] = {"free_slip","no_slip","inflow","outflow"};
+    const char *const types[] = {"free_slip","no_slip","inflow","outflow","pressure"};
     const Json *entry;
     cJSON_ArrayForEach(entry, faces) {
         int face = 0;
         while (face < 6 && (!entry->string || strcmp(entry->string, names[face]))) ++face;
         if (face == 6 || at(faces, names[face]) != entry || !cJSON_IsObject(entry)) return false;
         int type = 0;
-        while (type < 4 && strcmp(js(entry, "type"), types[type])) ++type;
-        if (type == 4) return false;
+        while (type < 5 && strcmp(js(entry, "type"), types[type])) ++type;
+        if (type == 5) return false;
         FlowFace *f = &c->faces[face];
         f->type = (FlowBoundary)type;
         c->ventilated |= type >= FLOW_INFLOW;
+        c->pressure_open |= type == FLOW_PRESSURE;
         const Json *field;
         cJSON_ArrayForEach(field, entry) {
             const char *key = field->string;
-            if (!key || at(entry, key) != field ||
-                (strcmp(key, "type") && (type < FLOW_INFLOW || (strcmp(key, "min_m") && strcmp(key, "max_m") &&
-                  strcmp(key, "speed_m_s") && (type != FLOW_INFLOW || strcmp(key, "tracer")))))) return false;
+            if (!key || at(entry, key) != field) return false;
+            if (!strcmp(key, "type") || (type >= FLOW_INFLOW &&
+                (!strcmp(key, "min_m") || !strcmp(key, "max_m")))) continue;
+            if ((type == FLOW_INFLOW && !strcmp(key, "tracer")) ||
+                ((type == FLOW_INFLOW || type == FLOW_OUTFLOW) && !strcmp(key, "speed_m_s")) ||
+                (type == FLOW_PRESSURE && (!strcmp(key, "pressure_pa") || !strcmp(key, "backflow_tracer")))) continue;
+            return false;
         }
         if (type < FLOW_INFLOW) continue;
         if (type == FLOW_INFLOW) {
             if (!physics_scalar(entry, "speed_m_s", .000001, 25, &f->speed) ||
                 !physics_optional(entry, "tracer", 0, 1000, 0, &f->tracer)) return false;
+        } else if (type == FLOW_PRESSURE) {
+            if (!physics_scalar(entry, "pressure_pa", -1000, 1000, &f->pressure_pa) ||
+                !physics_optional(entry, "backflow_tracer", 0, 1000, 0, &f->tracer)) return false;
         } else if (at(entry, "speed_m_s") && !physics_scalar(entry, "speed_m_s", .000001, 25, &f->speed)) return false;
         int j = 0;
         for (int axis = 0; axis < 3; ++axis)
@@ -132,15 +158,16 @@ static bool flow_boundaries(const Json *args, FlowConfig *c)
         }
     }
     /* An absent override is distinguished by initializing its wall type below. */
-    bool inlet = false, outlet = false, sticky = c->no_slip;
+    bool inlet = false, outlet = false, automatic = false, sticky = c->no_slip;
     for (int face = 0; face < 6; ++face) {
         if (!at(faces, names[face])) c->faces[face].type = c->no_slip ? FLOW_NO_SLIP : FLOW_FREE_SLIP;
         const FlowBoundary type = c->faces[face].type;
         inlet |= type == FLOW_INFLOW;
         outlet |= type == FLOW_OUTFLOW;
+        automatic |= type == FLOW_OUTFLOW && !c->faces[face].speed;
         sticky |= type == FLOW_NO_SLIP;
     }
-    return inlet == outlet && (!sticky || c->viscosity > 0);
+    return (c->pressure_open ? !automatic : inlet == outlet) && (!sticky || c->viscosity > 0);
 }
 
 bool flow_parse(const Json *args, const double length[3], FlowConfig *config)
@@ -248,6 +275,7 @@ void flow_release(FlowField *field)
     physics_memory_free(field->grid, field->mapped);
     free(field->solid);
     field->grid = NULL;
+    field->pressure_high = NULL;
     field->solid = NULL;
 }
 
@@ -346,7 +374,9 @@ typedef struct {
     const FlowConfig *config;
     const unsigned char *solid;
     unsigned char mode[6][FACE_CELLS];
-    double inward[6];
+    double inward[6], pressure[6];
+    double *pressure_high;
+    Parallel *workers;
 } FlowDomain;
 
 static int face_cell(int n, int axis, int x, int y, int z)
@@ -354,10 +384,18 @@ static int face_cell(int n, int axis, int x, int y, int z)
     return axis == 0 ? y*n + z : axis == 1 ? x*n + z : x*n + y;
 }
 
+static bool is_pressure(const FlowDomain *d, int face, int x, int y, int z)
+{
+    return d->config->pressure_open &&
+        d->mode[face][face_cell(d->config->resolution, face/2,x,y,z)] == FLOW_PRESSURE;
+}
+
 static double wall_velocity(const FlowDomain *d, int face, int x, int y, int z)
 {
     if (!d->config->ventilated) return 0;
-    const int cell = face_cell(d->config->resolution, face/2, x, y, z);
+    const int n = d->config->resolution, cell = face_cell(n, face/2, x, y, z);
+    if (d->mode[face][cell] == FLOW_PRESSURE)
+        return face % 2 ? d->pressure_high[(face/2)*n*n+cell] : 0;
     return d->mode[face][cell] >= FLOW_INFLOW ? (face % 2 ? -d->inward[face] : d->inward[face]) : 0;
 }
 
@@ -366,6 +404,9 @@ static bool build_faces(FlowDomain *d, const double inv[3], FlowField *field)
     const FlowConfig *c = d->config;
     const int n = c->resolution;
     double out_auto_area = 0, area[6] = {0};
+    double reference = 0;
+    for (int face = 0; face < 6; ++face)
+        if (c->faces[face].type == FLOW_PRESSURE) { reference = c->faces[face].pressure_pa; break; }
     for (int face = 0; face < 6; ++face) {
         const FlowFace *f = &c->faces[face];
         const int axis = face/2;
@@ -392,6 +433,10 @@ static bool build_faces(FlowDomain *d, const double inv[3], FlowField *field)
             field->fallback = "A CFD vent has no uncovered face cells at this resolution";
             return false;
         }
+        if (f->type == FLOW_PRESSURE) {
+            d->pressure[face] = f->pressure_pa - reference;
+            continue;
+        }
         if (f->type == FLOW_INFLOW) {
             d->inward[face] = f->speed;
             field->inflow_m3_s += area[face] * f->speed;
@@ -400,6 +445,7 @@ static bool build_faces(FlowDomain *d, const double inv[3], FlowField *field)
             field->outflow_m3_s += area[face] * f->speed;
         } else out_auto_area += area[face];
     }
+    if (c->pressure_open) return true;
     const double scale = fmax(field->inflow_m3_s, field->outflow_m3_s);
     const double remaining = field->inflow_m3_s - field->outflow_m3_s;
     const double speed = out_auto_area ? remaining / out_auto_area : 0;
@@ -440,6 +486,7 @@ static bool balanced_components(const FlowDomain *d, const double inv[3])
         seen[initial] = 1;
         queue[count++] = (uint16_t)initial;
         double net = 0, total = 0;
+        bool anchored = false;
         for (size_t k = 0; k < count; ++k) {
             const size_t i = queue[k];
             const int x = i%n, y = (i/n)%n, z = i/(n*n);
@@ -451,6 +498,7 @@ static bool balanced_components(const FlowDomain *d, const double inv[3])
                 for (int side = 0; side < 2; ++side) {
                     const size_t neighbor = adjacent[side];
                     if (neighbor == i) {
+                        if (is_pressure(d,2*axis+side,x,y,z)) { anchored = true; continue; }
                         const double flux = (side ? -1 : 1) * area * wall_velocity(d,2*axis+side,x,y,z);
                         net += flux;
                         total += fabs(flux);
@@ -461,7 +509,7 @@ static bool balanced_components(const FlowDomain *d, const double inv[3])
                 }
             }
         }
-        if (fabs(net) > 1e-10 * total) return false;
+        if (!anchored && fabs(net) > 1e-10 * total) return false;
     }
     return true;
 }
@@ -478,13 +526,181 @@ static void close_faces(const FlowDomain *d, double *const v[3])
         neighbors(n,x,y,z,lo,hi,closed);
         for (int axis=0; axis<3; ++axis) {
             if (solid && (solid[i] || solid[lo[axis]])) v[axis][i] = 0;
-            else if (lo[axis] == i) v[axis][i] = wall_velocity(d, 2*axis, x,y,z);
+            else if (lo[axis] == i && !is_pressure(d,2*axis,x,y,z))
+                v[axis][i] = wall_velocity(d, 2*axis, x,y,z);
+        }
+    }
+}
+
+/* Pressure openings anchor the Poisson operator with a half-cell Dirichlet face. */
+typedef struct {
+    const FlowDomain *domain;
+    const double *weights, *direction;
+    double *product;
+    double curvature[FLOW_MAX_RESOLUTION];
+} PressureStencil;
+
+static void pressure_stencil(void *context, size_t first, size_t end)
+{
+    PressureStencil *stencil = context;
+    const FlowDomain *d = stencil->domain;
+    const int n = d->config->resolution;
+    const unsigned char *solid = d->solid;
+    const double *w = stencil->weights, *direction = stencil->direction;
+    double *product = stencil->product;
+    for (int z = (int)first; z < (int)end; ++z) {
+        double curvature = 0;
+        for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
+            const size_t i = index3(n,x,y,z);
+            product[i] = 0;
+            if (solid && solid[i]) continue;
+            size_t lo[3], hi[3];
+            neighbors(n,x,y,z,lo,hi,true);
+            for (int axis=0; axis<3; ++axis) {
+                const size_t adjacent[] = {lo[axis],hi[axis]};
+                for (int side=0; side<2; ++side) {
+                    const size_t j = adjacent[side];
+                    if (j == i) {
+                        if (is_pressure(d,2*axis+side,x,y,z)) product[i] += 2*w[axis]*direction[i];
+                    } else if (!solid || !solid[j]) product[i] += w[axis]*(direction[i] - direction[j]);
+                }
+            }
+            curvature += direction[i]*product[i];
+        }
+        stencil->curvature[z] = curvature;
+    }
+}
+
+static bool solve_open_pressure(const FlowDomain *d, const double inv[3], double dt,
+                                double *r, double *pressure, double *direction, double *product)
+{
+    const int n = d->config->resolution;
+    const size_t cells = (size_t)n*n*n;
+    const unsigned char *solid = d->solid;
+    const double w[] = {inv[0]*inv[0],inv[1]*inv[1],inv[2]*inv[2]};
+    const double scale = dt / reference_air_density;
+    double residual = 0;
+    memset(pressure, 0, cells * sizeof *pressure);
+    for (int z=0; z<n; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
+        const size_t i = index3(n,x,y,z);
+        const int p[] = {x,y,z};
+        r[i] = -r[i];
+        if (!solid || !solid[i]) for (int axis=0; axis<3; ++axis) {
+            if (p[axis] == 0 && is_pressure(d,2*axis,x,y,z))
+                r[i] += 2*w[axis]*d->pressure[2*axis]*scale;
+            if (p[axis] == n-1 && is_pressure(d,2*axis+1,x,y,z))
+                r[i] += 2*w[axis]*d->pressure[2*axis+1]*scale;
+        }
+        direction[i] = r[i];
+        residual += r[i]*r[i];
+    }
+    const double tolerance = fmax(1e-12 * cells, residual * 1e-14);
+    PressureStencil stencil = {.domain=d, .weights=w, .direction=direction, .product=product};
+    for (int pass=0; pass<OPEN_SWEEPS && residual>tolerance; ++pass) {
+        double curvature = 0;
+        parallel_run(d->workers, (size_t)n, pressure_stencil, &stencil);
+        for (int z = 0; z < n; ++z) curvature += stencil.curvature[z];
+        if (!(curvature > 0) || !isfinite(curvature)) return false;
+        const double alpha = residual / curvature;
+        double updated = 0;
+        for (size_t i=0; i<cells; ++i) {
+            pressure[i] += alpha*direction[i];
+            r[i] -= alpha*product[i];
+            updated += r[i]*r[i];
+        }
+        if (!isfinite(updated)) return false;
+        const double beta = updated / residual;
+        for (size_t i=0; i<cells; ++i) direction[i] = r[i] + beta*direction[i];
+        residual = updated;
+    }
+    return residual <= tolerance;
+}
+
+typedef struct {
+    const FlowDomain *domain;
+    const double *weights, *rhs, *input;
+    double *output;
+    double diagonal;
+} JacobiStencil;
+
+static void jacobi_stencil(void *context, size_t first, size_t end)
+{
+    const JacobiStencil *stencil = context;
+    const FlowDomain *d = stencil->domain;
+    const int n = d->config->resolution;
+    const bool closed = d->config->closed;
+    const unsigned char *solid = d->solid;
+    const double *w = stencil->weights, *rhs = stencil->rhs, *a = stencil->input;
+    double *b = stencil->output;
+    const double diagonal = stencil->diagonal;
+    for (int z = (int)first; z < (int)end; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
+        size_t i=index3(n,x,y,z), lo[3], hi[3];
+        neighbors(n,x,y,z,lo,hi,closed);
+        if (solid && solid[i]) { b[i] = 0; continue; }
+        double adjacent = 0, open_diagonal = 0;
+        for (int axis=0; axis<3; ++axis) {
+            if (lo[axis] != i && (!solid || !solid[lo[axis]])) { adjacent += w[axis]*a[lo[axis]]; open_diagonal += w[axis]; }
+            if (hi[axis] != i && (!solid || !solid[hi[axis]])) { adjacent += w[axis]*a[hi[axis]]; open_diagonal += w[axis]; }
+        }
+        double divisor = solid || closed ? open_diagonal : diagonal;
+        b[i] = divisor > 0 ? a[i] + (2.0/3) * ((adjacent-rhs[i])/divisor - a[i]) : 0;
+    }
+}
+
+typedef struct {
+    const FlowDomain *domain;
+    const double *inv, *pressure;
+    double *const *velocity;
+    double *rhs;
+    double pressure_scale;
+} Projection;
+
+static void divergence_range(void *context, size_t first, size_t end)
+{
+    const Projection *job = context;
+    const FlowDomain *d = job->domain;
+    const int n = d->config->resolution;
+    const bool closed = d->config->closed;
+    const unsigned char *solid = d->solid;
+    double *rhs = job->rhs;
+    double *const *v = job->velocity;
+    const double *inv = job->inv;
+    for (int z = (int)first; z < (int)end; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
+        size_t i=index3(n,x,y,z), lo[3], hi[3];
+        neighbors(n,x,y,z,lo,hi,closed);
+        rhs[i] = solid && solid[i] ? 0 : divergence_at(d, v, i, hi, inv, x,y,z);
+    }
+}
+
+static void correct_velocity(void *context, size_t first, size_t end)
+{
+    const Projection *job = context;
+    const FlowDomain *d = job->domain;
+    const int n = d->config->resolution;
+    const bool closed = d->config->closed;
+    const unsigned char *solid = d->solid;
+    const double *inv = job->inv, *a = job->pressure;
+    double *const *v = job->velocity;
+    const double pressure_scale = job->pressure_scale;
+    for (int z = (int)first; z < (int)end; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
+        size_t i=index3(n,x,y,z), lo[3], hi[3];
+        neighbors(n,x,y,z,lo,hi,closed);
+        if (solid && solid[i]) continue;
+        for (int axis=0; axis<3; ++axis) {
+            if (lo[axis] != i && (!solid || (!solid[i] && !solid[lo[axis]])))
+                v[axis][i] -= (a[i]-a[lo[axis]])*inv[axis];
+            else if (lo[axis] == i && is_pressure(d,2*axis,x,y,z))
+                v[axis][i] -= 2*inv[axis]*(a[i] - d->pressure[2*axis]*pressure_scale);
+            if (hi[axis] == i && is_pressure(d,2*axis+1,x,y,z)) {
+                double *normal = &d->pressure_high[axis*n*n + face_cell(n,axis,x,y,z)];
+                *normal -= 2*inv[axis]*(d->pressure[2*axis+1]*pressure_scale - a[i]);
+            }
         }
     }
 }
 
 static bool project(const FlowDomain *d, const double inv[3], double *const v[3],
-                    double *rhs, double *a, double *b, bool hardware)
+                    double *rhs, double *a, double *b, double *scratch, bool hardware, double dt, bool *valid)
 {
     const int n = d->config->resolution;
     const bool closed = d->config->closed;
@@ -492,37 +708,24 @@ static bool project(const FlowDomain *d, const double inv[3], double *const v[3]
     const size_t cells = (size_t)n*n*n;
     const double w[3] = {inv[0]*inv[0], inv[1]*inv[1], inv[2]*inv[2]};
     const double diagonal = 2 * (w[0]+w[1]+w[2]);
+    const double pressure_scale = dt / reference_air_density;
     close_faces(d, v);
-    for (int z=0; z<n; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
-        size_t i=index3(n,x,y,z), lo[3], hi[3];
-        neighbors(n,x,y,z,lo,hi,closed);
-        rhs[i] = solid && solid[i] ? 0 : divergence_at(d, v, i, hi, inv, x,y,z);
-    }
+    Projection job = {.domain=d, .inv=inv, .velocity=v, .rhs=rhs, .pressure_scale=pressure_scale};
+    parallel_run(d->workers, (size_t)n, divergence_range, &job);
     const bool accelerated = hardware && !solid && !closed && flow_pressure_gpu(n,w,rhs,a,PRESSURE_SWEEPS);
-    if (!accelerated) memset(a,0,cells*sizeof *a);
-    const int sweeps = d->config->ventilated ? VENT_SWEEPS : PRESSURE_SWEEPS;
+    int sweeps = d->config->ventilated ? VENT_SWEEPS : PRESSURE_SWEEPS;
+    if (d->config->pressure_open) {
+        *valid = solve_open_pressure(d, inv, dt, rhs, a, b, scratch);
+        if (!*valid) return false;
+        sweeps = 0;
+    } else if (!accelerated) memset(a,0,cells*sizeof *a);
     for (int pass=0; !accelerated && pass<sweeps; ++pass) {
-        for (int z=0; z<n; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
-            size_t i=index3(n,x,y,z), lo[3], hi[3];
-            neighbors(n,x,y,z,lo,hi,closed);
-            if (solid && solid[i]) { b[i] = 0; continue; }
-            double adjacent = 0, open_diagonal = 0;
-            for (int axis=0; axis<3; ++axis) {
-                if (lo[axis] != i && (!solid || !solid[lo[axis]])) { adjacent += w[axis]*a[lo[axis]]; open_diagonal += w[axis]; }
-                if (hi[axis] != i && (!solid || !solid[hi[axis]])) { adjacent += w[axis]*a[hi[axis]]; open_diagonal += w[axis]; }
-            }
-            double divisor = solid || closed ? open_diagonal : diagonal;
-            b[i] = divisor > 0 ? a[i] + (2.0/3) * ((adjacent-rhs[i])/divisor - a[i]) : 0;
-        }
+        JacobiStencil stencil = {d, w, rhs, a, b, diagonal};
+        parallel_run(d->workers, (size_t)n, jacobi_stencil, &stencil);
         double *swap=a; a=b; b=swap;
     }
-    for (int z=0; z<n; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
-        size_t i=index3(n,x,y,z), lo[3], hi[3];
-        neighbors(n,x,y,z,lo,hi,closed);
-        for (int axis=0; axis<3; ++axis)
-            if (lo[axis] != i && (!solid || (!solid[i] && !solid[lo[axis]])))
-                v[axis][i] -= (a[i]-a[lo[axis]])*inv[axis];
-    }
+    job.pressure = a;
+    parallel_run(d->workers, (size_t)n, correct_velocity, &job);
     return accelerated;
 }
 
@@ -536,62 +739,139 @@ static double diffusion_value(const FlowDomain *d, const double *in, size_t i, s
     return in[i];
 }
 
-static void transport(const FlowDomain *d, const double inv[3], double dt, double coefficient, const double *in,
-                      double *out, double *scratch, double *const velocity[3], int component)
+typedef struct {
+    const FlowDomain *domain;
+    const double *inv, *in;
+    double *out;
+    double *const *velocity;
+    double dt, coefficient;
+    int component;
+} Transport;
+
+static void diffuse_range(void *context, size_t first, size_t end)
 {
+    const Transport *job = context;
+    const FlowDomain *d = job->domain;
     const int n = d->config->resolution;
     const bool closed = d->config->closed;
     const unsigned char *solid = d->solid;
-    if (coefficient) {
-        for (int z=0; z<n; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
-            size_t i=index3(n,x,y,z), lo[3], hi[3];
-            neighbors(n,x,y,z,lo,hi,closed);
-            if (solid && solid[i]) { scratch[i] = 0; continue; }
-            double laplacian = 0;
-            for (int axis=0; axis<3; ++axis)
-                laplacian += (diffusion_value(d,in,i,lo[axis],2*axis,component,x,y,z) +
-                              diffusion_value(d,in,i,hi[axis],2*axis+1,component,x,y,z) - 2*in[i])*inv[axis]*inv[axis];
-            scratch[i] = in[i] + dt*coefficient*laplacian;
-        }
-        in = scratch;
+    const double *in = job->in, *inv = job->inv;
+    const int component = job->component;
+    const double dt = job->dt, coefficient = job->coefficient;
+    double *scratch = job->out;
+    for (int z = (int)first; z < (int)end; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
+        size_t i=index3(n,x,y,z), lo[3], hi[3];
+        neighbors(n,x,y,z,lo,hi,closed);
+        if (solid && solid[i]) { scratch[i] = 0; continue; }
+        double laplacian = 0;
+        for (int axis=0; axis<3; ++axis)
+            laplacian += (diffusion_value(d,in,i,lo[axis],2*axis,component,x,y,z) +
+                          diffusion_value(d,in,i,hi[axis],2*axis+1,component,x,y,z) - 2*in[i])*inv[axis]*inv[axis];
+        scratch[i] = in[i] + dt*coefficient*laplacian;
     }
-    for (int z=0; z<n; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
+}
+
+static void advect_range(void *context, size_t first, size_t end)
+{
+    const Transport *job = context;
+    const FlowDomain *d = job->domain;
+    const int n = d->config->resolution;
+    const bool closed = d->config->closed;
+    const unsigned char *solid = d->solid;
+    const double *in = job->in, *inv = job->inv;
+    double *out = job->out;
+    double *const *velocity = job->velocity;
+    const double dt = job->dt;
+    for (int z = (int)first; z < (int)end; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
         size_t i=index3(n,x,y,z);
         out[i] = solid && solid[i] ? 0 : sample_grid(in,solid,n,closed,x-dt*velocity[0][i]*inv[0],
                             y-dt*velocity[1][i]*inv[1],z-dt*velocity[2][i]*inv[2]);
     }
 }
 
-/* Conservative upwind tracer transport for rooms with prescribed ventilation. */
+static void transport(const FlowDomain *d, const double inv[3], double dt, double coefficient, const double *in,
+                      double *out, double *scratch, double *const velocity[3], int component)
+{
+    const size_t planes = (size_t)d->config->resolution;
+    Transport job = {d, inv, in, scratch, velocity, dt, coefficient, component};
+    if (coefficient) {
+        parallel_run(d->workers, planes, diffuse_range, &job);
+        job.in = scratch;
+    }
+    job.out = out;
+    parallel_run(d->workers, planes, advect_range, &job);
+}
+
+typedef struct {
+    double entered, escaped, backflow;
+    bool unstable;
+} TracerMass;
+
+typedef struct {
+    const FlowDomain *domain;
+    const double *inv, *in;
+    double *out;
+    double *const *velocity;
+    double dt, diffusion, volume;
+    TracerMass mass[FLOW_MAX_RESOLUTION];
+} TracerTransport;
+
+static void tracer_range(void *context, size_t first, size_t end)
+{
+    TracerTransport *job = context;
+    const FlowDomain *d = job->domain;
+    const int n = d->config->resolution;
+    const double *inv = job->inv, *in = job->in;
+    const double dt = job->dt, diffusion = job->diffusion, volume = job->volume;
+    double *out = job->out;
+    double *const *v = job->velocity;
+    for (int z = (int)first; z < (int)end; ++z) {
+        TracerMass *mass = &job->mass[z];
+        for (int y=0; y<n && !mass->unstable; ++y) for (int x=0; x<n; ++x) {
+            const size_t i = index3(n,x,y,z);
+            if (d->solid && d->solid[i]) { out[i] = 0; continue; }
+            size_t lo[3], hi[3];
+            neighbors(n,x,y,z,lo,hi,true);
+            double change = 0, loss = 0;
+            for (int axis=0; axis<3; ++axis) {
+                const size_t adjacent[] = {lo[axis],hi[axis]};
+                for (int side=0; side<2; ++side) {
+                    const size_t j = adjacent[side];
+                    if (d->solid && d->solid[j]) continue;
+                    const int face = 2*axis+side;
+                    const double velocity = side ? (j == i ? wall_velocity(d,face,x,y,z) : v[axis][j]) : -v[axis][i];
+                    const double source = j == i ? d->config->faces[face].tracer : in[j];
+                    const double flux = -velocity * inv[axis] * (velocity > 0 ? in[i] : source);
+                    const double exchange = j == i ? 0 : diffusion * inv[axis]*inv[axis];
+                    change += flux + exchange * (source - in[i]);
+                    loss += fmax(0,velocity)*inv[axis] + exchange;
+                    if (j == i && flux > 0) {
+                        const double entered = dt * volume * flux;
+                        mass->entered += entered;
+                        if (is_pressure(d,face,x,y,z)) mass->backflow += entered;
+                    }
+                    if (j == i && flux < 0) mass->escaped -= dt * volume * flux;
+                }
+            }
+            if (!isfinite(change) || dt * loss > 1 + 1e-12) { mass->unstable = true; break; }
+            out[i] = fmax(0, in[i] + dt * change);
+        }
+    }
+}
+
+/* Conservative upwind tracer transport. Each opening uses its upstream concentration. */
 static bool ventilate_tracer(const FlowDomain *d, const double inv[3], double dt, double diffusion,
                              const double *in, double *out, double *const v[3], FlowField *field)
 {
     const int n = d->config->resolution;
-    const double volume = 1 / (inv[0]*inv[1]*inv[2]);
-    for (int z=0; z<n; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
-        const size_t i = index3(n,x,y,z);
-        if (d->solid && d->solid[i]) { out[i] = 0; continue; }
-        size_t lo[3], hi[3];
-        neighbors(n,x,y,z,lo,hi,true);
-        double change = 0, loss = 0;
-        for (int axis=0; axis<3; ++axis) {
-            const size_t adjacent[] = {lo[axis],hi[axis]};
-            for (int side=0; side<2; ++side) {
-                const size_t j = adjacent[side];
-                if (d->solid && d->solid[j]) continue;
-                const int face = 2*axis+side;
-                const double velocity = side ? (j == i ? wall_velocity(d,face,x,y,z) : v[axis][j]) : -v[axis][i];
-                const double source = j == i ? d->config->faces[face].tracer : in[j];
-                const double flux = -velocity * inv[axis] * (velocity > 0 ? in[i] : source);
-                const double exchange = j == i ? 0 : diffusion * inv[axis]*inv[axis];
-                change += flux + exchange * (source - in[i]);
-                loss += fmax(0,velocity)*inv[axis] + exchange;
-                if (j == i && flux > 0) field->tracer_in += dt * volume * flux;
-                if (j == i && flux < 0) field->tracer_out -= dt * volume * flux;
-            }
-        }
-        if (!isfinite(change) || dt * loss > 1 + 1e-12) return false;
-        out[i] = fmax(0, in[i] + dt * change);
+    TracerTransport job = {.domain=d, .inv=inv, .in=in, .out=out, .velocity=v, .dt=dt,
+                           .diffusion=diffusion, .volume=1 / (inv[0]*inv[1]*inv[2])};
+    parallel_run(d->workers, (size_t)n, tracer_range, &job);
+    for (int z = 0; z < n; ++z) {
+        if (job.mass[z].unstable) return false;
+        field->tracer_in += job.mass[z].entered;
+        field->tracer_out += job.mass[z].escaped;
+        field->backflow_tracer_in += job.mass[z].backflow;
     }
     return true;
 }
@@ -622,6 +902,11 @@ static double flow_steps(const FlowConfig *c, double inv[3], const double *const
     return ceil(c->seconds * fmax(transport, diffusion));
 }
 
+static int flow_sweeps(const FlowConfig *c)
+{
+    return c->pressure_open ? OPEN_SWEEPS : c->ventilated ? VENT_SWEEPS : PRESSURE_SWEEPS;
+}
+
 PhysicsCost flow_cost(const FlowConfig *c)
 {
     PhysicsCost cost = {.seconds = c->seconds};
@@ -636,9 +921,10 @@ PhysicsCost flow_cost(const FlowConfig *c)
     cost.steps = steps;
     cost.cells = cells;
     const int layers = c->seconds > 0 ? 11 : 4;
-    cost.ram = cells * (layers * sizeof(double) + 2);
-    cost.mapped = cells * layers * sizeof(double);
-    cost.work = cells * (1 + steps * ((c->ventilated ? VENT_SWEEPS : PRESSURE_SWEEPS) + 8));
+    const double buffer = (layers * cells + pressure_values(c)) * sizeof(double);
+    cost.ram = buffer + cells * 2;
+    cost.mapped = buffer;
+    cost.work = cells * (1 + steps * (flow_sweeps(c) + 8));
     return cost;
 }
 
@@ -648,9 +934,9 @@ PhysicsCost flow_step_cost(const FlowConfig *c, bool resumed)
     if (!cost.cells) return cost;
     if (resumed) {
         cost.steps = FLOW_STEPS;
-        cost.work = cost.cells * (1 + FLOW_STEPS * ((c->ventilated ? VENT_SWEEPS : PRESSURE_SWEEPS) + 8));
+        cost.work = cost.cells * (1 + FLOW_STEPS * (flow_sweeps(c) + 8));
     }
-    cost.field_bytes = flow_frame_bytes(c->resolution);
+    cost.field_bytes = flow_snapshot_bytes(c);
     cost.ram += 2 * cost.field_bytes;
     return cost;
 }
@@ -687,6 +973,32 @@ size_t flow_rasterize(const FlowConfig *c, const PhysicsBox *boxes, size_t count
     return unresolved;
 }
 
+static void predict_upper_pressure(const FlowDomain *d, double *const v[3], double *const previous[3])
+{
+    const int n = d->config->resolution;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (d->config->faces[2*axis+1].type != FLOW_PRESSURE) continue;
+        for (int a = 0; a < n; ++a) for (int b = 0; b < n; ++b) {
+            if (d->mode[2*axis+1][a*n+b] != FLOW_PRESSURE) continue;
+            const size_t i = axis == 0 ? index3(n,n-1,a,b) :
+                             axis == 1 ? index3(n,a,n-1,b) : index3(n,a,b,n-1);
+            double *normal = &d->pressure_high[axis*n*n + a*n+b];
+            if (previous) *normal += v[axis][i] - previous[axis][i];
+            else *normal = v[axis][i];
+        }
+    }
+}
+
+static void record_boundary_rate(const FlowDomain *d, FlowField *field, double outward,
+                                 double area, int face, int x, int y, int z)
+{
+    if (outward > 0) field->outflow_m3_s += outward * area;
+    else if (outward < 0) {
+        field->inflow_m3_s -= outward * area;
+        if (is_pressure(d,face,x,y,z)) field->backflow_m3_s -= outward * area;
+    }
+}
+
 FlowField flow_resume_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t box_count, const char *frame)
 {
     FlowField field = {.config = *c, .method = c->porous ? "porous CFD unavailable" : "reduced Gaussian transport",
@@ -701,12 +1013,13 @@ FlowField flow_resume_domain(const FlowConfig *c, const PhysicsBox *boxes, size_
         return field;
     }
     const int layers = c->seconds > 0 ? 11 : 4;
-    field.grid = physics_memory_alloc(layers*cells*sizeof(double), c->mapped, &field.mapped, &field.memory);
+    field.grid = physics_memory_alloc((layers*cells+pressure_values(c))*sizeof(double), c->mapped, &field.mapped, &field.memory);
     if (!field.grid) {
         field.fallback = "CFD memory allocation unavailable";
         field.memory = "analytic";
         return field;
     }
+    if (c->pressure_open) field.pressure_high = field.grid + layers*cells;
     if (frame && !flow_decode(&field, frame)) {
         flow_release(&field);
         field.fallback = "Invalid saved CFD frame";
@@ -722,7 +1035,7 @@ FlowField flow_resume_domain(const FlowConfig *c, const PhysicsBox *boxes, size_
         }
         field.unresolved_boxes = flow_rasterize(c, boxes, box_count, field.solid);
     }
-    FlowDomain domain = {.config = c, .solid = field.solid};
+    FlowDomain domain = {.config = c, .solid = field.solid, .pressure_high = field.pressure_high};
     if (c->closed && !build_faces(&domain, inv, &field)) {
         flow_release(&field);
         return field;
@@ -778,8 +1091,22 @@ FlowField flow_resume_domain(const FlowConfig *c, const PhysicsBox *boxes, size_
         field.memory = c->porous ? "none" : "analytic";
         return field;
     }
+    if (c->pressure_open && !frame) predict_upper_pressure(&domain, velocity, nullptr);
     if ((frame || c->ventilated) && c->seconds > 0) {
         for (int face = 0; face < 6; ++face) peak[face/2] = fmax(peak[face/2], fabs(domain.inward[face]));
+        if (c->pressure_open) {
+            for (int axis = 0; axis < 3; ++axis)
+                for (int i = 0; i < n*n; ++i)
+                    peak[axis] = fmax(peak[axis], fabs(field.pressure_high[axis*n*n + i]));
+            double low = 0, high = 0;
+            for (int face = 0; face < 6; ++face) {
+                low = fmin(low, domain.pressure[face]);
+                high = fmax(high, domain.pressure[face]);
+            }
+            const double speed = sqrt(2 * (high - low) / reference_air_density);
+            for (int face = 0; face < 6; ++face)
+                if (c->faces[face].type == FLOW_PRESSURE) peak[face/2] = fmax(peak[face/2], speed);
+        }
         steps_needed = fmax(1, flow_steps(c, inv, peak));
         if (steps_needed > FLOW_STEPS) {
             free(porous);
@@ -788,6 +1115,7 @@ FlowField flow_resume_domain(const FlowConfig *c, const PhysicsBox *boxes, size_
             return field;
         }
     }
+    if (c->seconds > 0) domain.workers = parallel_open(cells, 1728);
     close_faces(&domain, velocity);
     const double dt=c->seconds/steps_needed;
     const double drag = flow_drag(c);
@@ -801,10 +1129,20 @@ FlowField flow_resume_domain(const FlowConfig *c, const PhysicsBox *boxes, size_
                 for (size_t i = 0; i < cells; ++i)
                     if (porous[i]) next[axis][i] = next[axis][i]*decay + c->porous_drive[axis]*force_integral;
         }
-        gpu = project(&domain,inv,next,rhs,p,q,gpu);
+        if (c->pressure_open) predict_upper_pressure(&domain, next, velocity);
+        bool projected = true;
+        gpu = project(&domain,inv,next,rhs,p,q,dye_next,gpu,dt,&projected);
+        if (!projected) {
+            parallel_close(domain.workers);
+            free(porous);
+            flow_release(&field);
+            field.fallback = "Pressure openings did not converge within the projection budget";
+            return field;
+        }
         used_gpu |= gpu;
         if (c->ventilated) {
             if (!ventilate_tracer(&domain,inv,dt,c->diffusivity,field.grid,dye_next,next,&field)) {
+                parallel_close(domain.workers);
                 free(porous);
                 flow_release(&field);
                 field.fallback = "Ventilated tracer exceeded the stable timestep; use a shorter step";
@@ -816,10 +1154,21 @@ FlowField flow_resume_domain(const FlowConfig *c, const PhysicsBox *boxes, size_
             double *swap=velocity[axis]; velocity[axis]=next[axis]; next[axis]=swap;
         }
     }
+    parallel_close(domain.workers);
+    if (c->pressure_open) field.inflow_m3_s = field.outflow_m3_s = 0;
+    const double cell_volume = 1 / (inv[0]*inv[1]*inv[2]);
     for (int z=0; z<n; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
         size_t i=index3(n,x,y,z), lo[3], hi[3];
         if (field.solid && field.solid[i]) continue;
         neighbors(n,x,y,z,lo,hi,c->closed);
+        if (c->pressure_open) {
+            for (int axis = 0; axis < 3; ++axis) {
+                const double area = cell_volume * inv[axis];
+                if (lo[axis] == i) record_boundary_rate(&domain, &field, -velocity[axis][i], area, 2*axis,x,y,z);
+                if (hi[axis] == i)
+                    record_boundary_rate(&domain, &field, wall_velocity(&domain,2*axis+1,x,y,z), area, 2*axis+1,x,y,z);
+            }
+        }
         double div=divergence_at(&domain,velocity,i,hi,inv,x,y,z);
         field.divergence += div*div;
         double speed = hypot(hypot(velocity[0][i],velocity[1][i]),velocity[2][i]);
@@ -846,7 +1195,8 @@ FlowField flow_resume_domain(const FlowConfig *c, const PhysicsBox *boxes, size_
         field.method = used_gpu ? "3D incompressible Navier-Stokes, OpenCL pressure projection" :
                                   "3D incompressible Navier-Stokes, CPU";
         if (c->ventilated) {
-            field.method = "3D incompressible Navier-Stokes, CPU ventilated exterior";
+            field.method = c->pressure_open ? "3D incompressible Navier-Stokes, CPU pressure openings" :
+                                              "3D incompressible Navier-Stokes, CPU ventilated exterior";
             if (c->gpu) field.fallback = "OpenCL pressure uses periodic boundaries; used CPU for ventilation";
         } else if (c->closed) {
             field.method = field.solid ? "3D incompressible Navier-Stokes, CPU voxel obstacles, closed exterior" :
@@ -890,4 +1240,7 @@ void flow_boundary_summary(const FlowField *field, Text *out)
     if (field->config.ventilated && field->grid)
         format(out, " Ventilation: inlet %.8g m³/s, exhaust %.8g m³/s; tracer in %.8g, out %.8g concentration-m³ this step.",
                field->inflow_m3_s, field->outflow_m3_s, field->tracer_in, field->tracer_out);
+    if (field->config.pressure_open && field->grid)
+        format(out, " Pressure-opening backflow %.8g m³/s; tracer admitted by backflow %.8g concentration-m³ this step.",
+               field->backflow_m3_s, field->backflow_tracer_in);
 }

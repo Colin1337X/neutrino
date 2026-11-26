@@ -559,9 +559,10 @@ static const char scenario_help[] =
 static const char ventilation_help[] =
     "CFD ventilation: scene_medium boundary:no_slip sets stationary exterior walls. "
     "Use boundaries keyed by x_min/x_max/y_min/y_max/z_min/z_max, with type "
-    "inflow (speed_m_s, optional tracer), outflow (optional speed_m_s), no_slip or free_slip. "
+    "inflow (speed_m_s, optional tracer), outflow (optional speed_m_s), "
+    "pressure (pressure_pa, optional backflow_tracer), no_slip or free_slip. "
     "Vent min_m and max_m are optional two-coordinate bounds in room-local tangent axes. "
-    "An outflow without speed balances the inlet on the resolved grid.\n";
+    "An outflow without speed balances the inlet on the resolved grid. Use pressure instead of that automatic exhaust.\n";
 
 static const char physics_help[] =
     "tune: setting and numeric value. gravity (0.1–30 m/s²), outlet_coefficient (0.1–1), ambient_kelvin (150–400 K), wall_reflectivity (0–1).\n"

@@ -68,7 +68,7 @@ bool simulation_plan_parse(const Json *plan, SimulationPlan *parsed)
 
 typedef enum { ENTITY_EXISTS, ENTITY_OVERLAPS, ENTITY_MOVED, ENTITY_ROTATED, ENTITY_CONTACTS,
                ENTITY_FRACTURED, FLUID_RELEASED, FLUID_DEPOSITED, FLUID_SURFACE, FLUID_POOL, FLUID_DEPTH,
-               FLUID_DRAINED, FLUID_LEVEL, FLOW_TRACER, FLOW_POROUS_SPEED, FLOW_TIME, FLOW_INLET, FLOW_EXHAUST,
+               FLUID_DRAINED, FLUID_LEVEL, FLOW_TRACER, FLOW_POROUS_SPEED, FLOW_TIME, FLOW_INLET, FLOW_EXHAUST, FLOW_BACKFLOW,
                MASS_TRANSFERRED, MASS_FINAL,
                SIGNAL_REACHES, SIGNAL_ARRIVES, SIGNAL_POWER, SIGNAL_DIRECT_BLOCKED, SIGNAL_RECURSIVE } Predicate;
 static const struct { const char *name; Predicate kind; } predicates[] = {
@@ -83,6 +83,7 @@ static const struct { const char *name; Predicate kind; } predicates[] = {
     {"flow.porous_speed_exceeds", FLOW_POROUS_SPEED},
     {"flow.time_exceeds", FLOW_TIME},
     {"flow.inflow_exceeds", FLOW_INLET}, {"flow.outflow_exceeds", FLOW_EXHAUST},
+    {"flow.backflow_exceeds", FLOW_BACKFLOW},
     {"mass_transfer.transferred_exceeds", MASS_TRANSFERRED}, {"mass_transfer.final_exceeds", MASS_FINAL},
     {"signal.reaches_receiver", SIGNAL_REACHES}, {"signal.arrival_before", SIGNAL_ARRIVES},
     {"signal.power_exceeds", SIGNAL_POWER}, {"signal.direct_blocked", SIGNAL_DIRECT_BLOCKED},
@@ -220,11 +221,13 @@ static const char *evaluate(const Json *query, const Json *settings, const Physi
         unit = "m/s";
         put(evidence, "pore_volume_m3", cJSON_CreateNumber(reading->pore_volume));
         set(evidence, "solver", "incompressible CFD with Darcy drag");
-    } else if (kind == FLOW_INLET || kind == FLOW_EXHAUST) {
+    } else if (kind == FLOW_INLET || kind == FLOW_EXHAUST || kind == FLOW_BACKFLOW) {
         if (reading->kind != READING_FLOW || !reading->ventilated_flow) return "INSUFFICIENT_DATA";
-        value = kind == FLOW_INLET ? reading->inflow_m3_s : reading->outflow_m3_s;
+        if (kind == FLOW_BACKFLOW && !reading->pressure_flow) return "INSUFFICIENT_DATA";
+        value = kind == FLOW_INLET ? reading->inflow_m3_s : kind == FLOW_EXHAUST ?
+            reading->outflow_m3_s : reading->backflow_m3_s;
         unit = "m³/s";
-        set(evidence, "solver", "balanced CFD ventilation");
+        set(evidence, "solver", reading->pressure_flow ? "CFD pressure openings" : "balanced CFD ventilation");
     } else if (kind == FLOW_TIME) {
         if (reading->kind != READING_FLOW || !reading->stored_flow) return "INSUFFICIENT_DATA";
         value = reading->flow_time_s;
@@ -235,7 +238,8 @@ static const char *evaluate(const Json *query, const Json *settings, const Physi
         value = reading->tracer_concentration;
         unit = "relative tracer";
         set(evidence, "solver", reading->voxel_flow ? "voxel-obstacle CFD" : "room medium");
-        if (reading->closed_flow) set(evidence, "boundary", reading->ventilated_flow ? "ventilated" : "closed");
+        if (reading->closed_flow) set(evidence, "boundary", reading->pressure_flow ? "pressure" :
+            reading->ventilated_flow ? "ventilated" : "closed");
         if (reading->voxel_flow) integer(evidence, "unresolved_obstacles", reading->unresolved_obstacles);
         if (reading->stored_flow)
             put(evidence, "flow_time_s", cJSON_CreateNumber(reading->flow_time_s));

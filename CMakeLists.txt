@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(neutrino VERSION 0.16.0 LANGUAGES C)
+project(neutrino VERSION 0.17.0 LANGUAGES C)
 
 if(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
     message(FATAL_ERROR "Neutrino requires C23. Use a C23-capable GCC or Clang, including clang-cl on Windows.")
@@ -31,7 +31,7 @@ endforeach()
 file(GENERATE OUTPUT "${browser_header}" CONTENT "${browser_assets}")
 add_executable(neutrino src/main.c src/workspace.c src/terminal.c src/inference.c src/gateway.c src/memory.c src/facts.c src/world.c src/ui.c src/web.c
     src/simulation.c src/scenario.c src/physics.c src/rigid.c src/rigid_spin.c src/spill.c src/runoff.c
-    src/physics_flow.c src/physics_models.c src/mass_transfer.c src/measurements.c src/ray_gpu.c src/prose.c src/prompt.c src/browser.c
+    src/physics_flow.c src/physics_models.c src/mass_transfer.c src/measurements.c src/ray_gpu.c src/parallel.c src/prose.c src/prompt.c src/browser.c
     third_party/cjson/cJSON.c)
 target_include_directories(neutrino PRIVATE third_party/cjson "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(neutrino PRIVATE CURL::libcurl)
@@ -82,16 +82,18 @@ if(BUILD_TESTING)
 
     add_executable(scene_physics_test tests/scene_physics.c src/physics.c src/rigid.c src/rigid_spin.c src/spill.c src/runoff.c
         src/physics_flow.c src/physics_models.c src/mass_transfer.c
-        src/measurements.c src/ray_gpu.c src/simulation.c src/scenario.c
+        src/measurements.c src/ray_gpu.c src/parallel.c src/simulation.c src/scenario.c
         src/workspace.c src/world.c third_party/cjson/cJSON.c)
     target_include_directories(scene_physics_test PRIVATE src third_party/cjson)
     if(MSVC)
         target_compile_definitions(scene_physics_test PRIVATE _CRT_SECURE_NO_WARNINGS)
     elseif(NOT WIN32)
         target_compile_definitions(scene_physics_test PRIVATE _POSIX_C_SOURCE=200809L _XOPEN_SOURCE=700)
-        target_link_libraries(scene_physics_test PRIVATE m ${CMAKE_DL_LIBS})
+        target_link_libraries(scene_physics_test PRIVATE Threads::Threads m ${CMAKE_DL_LIBS})
     endif()
     add_test(NAME scene_physics COMMAND scene_physics_test)
+    add_test(NAME physics_parallel_parity COMMAND "${CMAKE_COMMAND}"
+        "-DPROGRAM=$<TARGET_FILE:scene_physics_test>" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/parallel_parity.cmake")
 
     add_executable(ray_scaling_bench EXCLUDE_FROM_ALL benchmarks/ray_scaling.c src/ray_gpu.c)
     target_include_directories(ray_scaling_bench PRIVATE src)

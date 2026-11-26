@@ -140,7 +140,7 @@ static bool rotation_and_spill(void)
     PhysicsBox room = {{0,0,0},{4,4,4}};
     SpillSurface solid[] = {{{{1.3,0,.25},{2,2,1}}, "tray"}, {{{0,0,0},{4,4,.25}}, "floor"}};
     for (int tick = 0; tick < 100; ++tick)
-        spill_advance(&spills, &room, solid, 2, 10, tick*.0025, (tick+1)*.0025);
+        spill_advance(&spills, &room, solid, 2, 10, tick*.0025, (tick+1)*.0025, nullptr);
     Json *state = cJSON_CreateObject(), *evidence = cJSON_CreateObject();
     spill_store(&spills, state);
     double litres;
@@ -148,7 +148,7 @@ static bool rotation_and_spill(void)
         litres == 0 && fabs(rigid_value(evidence, "airborne_l")-1.25) < 1e-12 &&
         spill_load(&reloaded, state);
     for (int tick = 100; tick < 400; ++tick)
-        spill_advance(&reloaded, &room, solid, 2, 10, tick*.0025, (tick+1)*.0025);
+        spill_advance(&reloaded, &room, solid, 2, 10, tick*.0025, (tick+1)*.0025, nullptr);
     if (reloaded.count == 1) {
         spill_store(&reloaded, state);
         ok &= spill_evidence(state, "jug", "tray", evidence, &litres) &&
@@ -1382,6 +1382,99 @@ static int ventilation_timing(void)
     return !ok;
 }
 
+static bool pressure_cfd(void)
+{
+    const double length[] = {4,3,2}, near[] = {3.75,1.6875,1.125}, far[] = {.25,1.6875,1.125};
+    Json *args = cJSON_Parse("{\"method\":\"cfd\",\"resolution\":8,\"seconds\":2,\"boundary\":\"closed\","
+        "\"viscosity\":0,\"diffusivity\":0,\"concentration\":0,\"boundaries\":{"
+        "\"x_min\":{\"type\":\"pressure\",\"pressure_pa\":0},"
+        "\"x_max\":{\"type\":\"pressure\",\"pressure_pa\":0.12,\"backflow_tracer\":0.7}}}");
+    FlowConfig c;
+    if (!flow_parse(args, length, &c)) { cJSON_Delete(args); return false; }
+    FlowField f = flow_solve(&c);
+    bool ok = f.grid && f.inflow_m3_s > .27 && f.inflow_m3_s < .33 &&
+        fabs(f.inflow_m3_s - f.outflow_m3_s) < .002 && f.inflow_m3_s == f.backflow_m3_s &&
+        f.tracer_in > .18 && f.tracer_in == f.backflow_tracer_in &&
+        fabs(f.tracer_in - f.tracer_out - 24*f.tracer_mean) < 1e-10 &&
+        flow_sample(&f, near) > .05 && flow_sample(&f, far) < 1e-8;
+    if (!ok) fprintf(stderr, "Pressure test: %s, in %.9g, out %.9g, backflow %.9g, tracer in %.9g, near %.9g\n",
+        f.fallback ? f.fallback : "", f.inflow_m3_s, f.outflow_m3_s, f.backflow_m3_s, f.tracer_in, flow_sample(&f,near));
+    char *saved = flow_encode(&f);
+    FlowConfig restored = c;
+    restored.seconds = 0;
+    FlowField resume = flow_resume_domain(&restored, nullptr, 0, saved ? saved : "");
+    ok &= saved && strlen(saved) == flow_snapshot_bytes(&c) && resume.grid &&
+        flow_sample(&resume, near) == flow_sample(&f, near) &&
+        resume.backflow_m3_s == f.backflow_m3_s && resume.outflow_m3_s == f.outflow_m3_s;
+    flow_release(&resume);
+    restored.seconds = 1;
+    resume = flow_resume_domain(&restored, nullptr, 0, saved ? saved : "");
+    ok &= resume.grid && resume.backflow_m3_s > f.backflow_m3_s &&
+        fabs(24*(resume.tracer_mean-f.tracer_mean) - (resume.tracer_in-resume.tracer_out)) < 1e-10;
+    flow_release(&resume);
+    free(saved);
+
+    Json *boundaries = at(args, "boundaries"), *upper = at(boundaries,"x_max");
+    put(at(boundaries,"x_min"), "pressure_pa", cJSON_CreateNumber(10));
+    put(upper, "pressure_pa", cJSON_CreateNumber(10.12));
+    ok &= flow_parse(args, length, &c);
+    FlowField shifted = flow_solve(&c);
+    ok &= shifted.grid && fabs(shifted.inflow_m3_s - f.inflow_m3_s) < 1e-12;
+    flow_release(&shifted);
+    flow_release(&f);
+
+    set(upper, "type", "outflow");
+    cJSON_DeleteItemFromObjectCaseSensitive(upper, "pressure_pa");
+    cJSON_DeleteItemFromObjectCaseSensitive(upper, "backflow_tracer");
+    ok &= !flow_parse(args, length, &c);
+    cJSON_Delete(args);
+    return ok;
+}
+
+static int pressure_timing(void)
+{
+    const double length[] = {4,3,2};
+    const int sizes[] = {8,12,24};
+    puts("resolution,exhaust,repetition,batches,mean_ms,inlet_m3_s,outlet_m3_s,backflow_m3_s,tracer_out,divergence");
+    Json *args = cJSON_Parse(ventilated_room);
+    integer(args, "seconds", 1);
+    Json *exhaust = at(at(args, "boundaries"), "x_max");
+    bool ok = true;
+    for (size_t i = 0; ok && i < sizeof sizes / sizeof *sizes; ++i) {
+        integer(args, "resolution", sizes[i]);
+        for (int pressure = 0; ok && pressure < 2; ++pressure) {
+            set(exhaust, "type", pressure ? "pressure" : "outflow");
+            if (pressure) integer(exhaust, "pressure_pa", 0);
+            else cJSON_DeleteItemFromObjectCaseSensitive(exhaust,"pressure_pa");
+            FlowConfig c;
+            ok = flow_parse(args, length, &c);
+            for (int rep = 0; ok && rep <= 5; ++rep) {
+                const int batches = sizes[i] == 24 ? 2 : 16;
+                double tracer = 0, divergence = 0, in = 0, out = 0, backflow = 0;
+                struct timespec start, end;
+                timespec_get(&start, TIME_UTC);
+                for (int j = 0; ok && j < batches; ++j) {
+                    FlowField f = flow_solve(&c);
+                    ok = f.grid && fabs(f.inflow_m3_s - 3) < .1 && fabs(f.outflow_m3_s - 3) < .4;
+                    if (!ok) fprintf(stderr, "Pressure benchmark n=%d: %s, in %.6g, out %.6g\n",
+                                    sizes[i], f.fallback ? f.fallback : "", f.inflow_m3_s, f.outflow_m3_s);
+                    tracer = f.tracer_out;
+                    divergence = f.divergence;
+                    in = f.inflow_m3_s; out = f.outflow_m3_s; backflow = f.backflow_m3_s;
+                    flow_release(&f);
+                }
+                timespec_get(&end, TIME_UTC);
+                const double elapsed = 1000.0*(end.tv_sec-start.tv_sec) + 1e-6*(end.tv_nsec-start.tv_nsec);
+                if (ok && rep) printf("%d,%s,%d,%d,%.6f,%.9g,%.9g,%.9g,%.9g,%.9g\n",
+                    sizes[i], pressure ? "pressure" : "prescribed", rep,batches,
+                    elapsed/batches,in,out,backflow,tracer,divergence);
+            }
+        }
+    }
+    cJSON_Delete(args);
+    return !ok;
+}
+
 static void cell_scan_reference(const FlowConfig *c, const PhysicsBox *boxes, int count, unsigned char *solid)
 {
     const int n = c->resolution;
@@ -1969,6 +2062,77 @@ static bool supplied_acoustic_protocol(void)
     return ok;
 }
 
+static int parallel_fixture(void)
+{
+    const double length[] = {4,3,2};
+    Json *gas = cJSON_Parse(ventilated_room);
+    integer(gas, "resolution", 16);
+    put(gas, "seconds", cJSON_CreateNumber(.25));
+    Json *exhaust = at(at(gas, "boundaries"), "x_max");
+    set(exhaust, "type", "pressure");
+    integer(exhaust, "pressure_pa", 0);
+    FlowConfig c;
+    bool ok = flow_parse(gas, length, &c);
+    cJSON_Delete(gas);
+    if (!ok) return 1;
+    FlowField f = flow_solve(&c);
+    char *field = flow_encode(&f);
+    ok = field && fabs(f.outflow_m3_s - 3) < .001;
+    if (ok) {
+        printf("CFD %.17g %.17g %s\n", f.divergence, f.tracer_out, field);
+    }
+    free(field);
+    flow_release(&f);
+
+    Json *settings = cJSON_CreateObject();
+    ok &= rigid_actions(settings, "[{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[12,8,4]},"
+        "{\"neutrino_tool\":\"scene_runoff\",\"min_xy\":[0,0],\"max_xy\":[12,8],\"cells\":[64,48]},"
+        "{\"neutrino_tool\":\"scene_material\",\"name\":\"ceramic\",\"mechanical\":{\"fracture_j\":5}},"
+        "{\"neutrino_tool\":\"scene_place\",\"name\":\"jug\",\"kind\":\"object\","
+        "\"min\":[1,1,1],\"max\":[1.5,1.5,1.5],\"material_id\":\"ceramic\"},"
+        "{\"neutrino_tool\":\"scene_body\",\"name\":\"jug\",\"mass_kg\":2,\"liquid_l\":1},"
+        "{\"neutrino_tool\":\"scene_place\",\"name\":\"cup\",\"kind\":\"object\","
+        "\"min\":[3,1,1],\"max\":[3.5,1.5,1.5],\"material_id\":\"ceramic\"},"
+        "{\"neutrino_tool\":\"scene_body\",\"name\":\"cup\",\"mass_kg\":2,\"liquid_l\":1}]");
+    Text edit = {0}, result = {0};
+    for (int i = 0; ok && i < 50; ++i) {
+        const int x = 2 + i%10, y = 2 + i/10;
+        clear(&edit);
+        format(&edit, "[{\"neutrino_tool\":\"scene_place\",\"name\":\"prop%d\",\"kind\":\"object\","
+               "\"min\":[%d,%d,0],\"max\":[%.1f,%.1f,0.5]}]",i,x,y,x+.5,y+.5);
+        ok = rigid_actions(settings, str(&edit));
+    }
+    ok &= rigid_actions(settings, "[{\"neutrino_tool\":\"scene_step\",\"seconds\":0.7}]");
+    const Json *jug = physics_scene_body(settings,"jug");
+    ok &= cJSON_IsTrue(at(jug,"fractured"));
+    char *room = cJSON_PrintUnformatted(settings);
+    if (ok && room) puts(room);
+    free(room);
+
+    Json *rays = cJSON_Parse("{\"backend\":\"cpu\",\"origin\":[1,1,3],\"count\":4096}");
+    ok &= physics_run("scene_rays",rays,settings,&result) && strstr(str(&result), "4096 rays");
+    puts(str(&result));
+    clear(&result);
+    cJSON_Delete(rays);
+    Json *sound = cJSON_Parse("{\"backend\":\"cpu\",\"source\":[1,1,3],\"listener\":[4,3,2],"
+                              "\"max_bounces\":4,\"include\":[\"jug\",\"cup\",\"prop0\",\"prop12\"]}");
+    ok &= physics_run("scene_acoustic",sound,settings,&result) &&
+          strstr(str(&result), "Recursive CPU paths");
+    puts(str(&result));
+    clear(&result);
+    cJSON_Delete(sound);
+    cJSON_Delete(settings);
+
+    Json *soft = cJSON_Parse("{\"size\":[1,1,1],\"nodes\":10000,\"mass_kg\":2,"
+                            "\"stiffness\":500,\"force\":[1,0,-2],\"seconds\":0.02}");
+    ok &= physics_run("softbody3d",soft,nullptr,&result) && strstr(str(&result), "10000 mass nodes");
+    puts(str(&result));
+    cJSON_Delete(soft);
+    release(&edit);
+    release(&result);
+    return !ok;
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && !strcmp(argv[1], "--rigid-timing")) return rigid_timing();
@@ -1977,6 +2141,8 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "--persistent-cfd-timing")) return persistent_cfd_timing();
     if (argc > 1 && !strcmp(argv[1], "--raster-timing")) return raster_timing();
     if (argc > 1 && !strcmp(argv[1], "--ventilation-timing")) return ventilation_timing();
+    if (argc > 1 && !strcmp(argv[1], "--pressure-timing")) return pressure_timing();
+    if (argc > 1 && !strcmp(argv[1], "--parallel-fixture")) return parallel_fixture();
     if (argc > 1 && !strcmp(argv[1], "--propagation-timing")) return propagation_timing();
     if (argc > 1 && !strcmp(argv[1], "--cfd-timing")) return cfd_timing();
     const struct {
@@ -2096,6 +2262,7 @@ int main(int argc, char **argv)
     if (!geometry_aware_flow_frames()) { fputs("CFD raster or geometry-aware frame retention failed.\n", stderr); failures++; }
     if (!closed_cfd()) { fputs("Closed CFD exterior failed.\n", stderr); failures++; }
     if (!ventilated_cfd()) { fputs("CFD ventilation or no-slip boundary failed.\n", stderr); failures++; }
+    if (!pressure_cfd()) { fputs("CFD pressure openings or backflow failed.\n", stderr); failures++; }
     if (!material_transport()) { fputs("Material transport test failed.\n", stderr); failures++; }
     if (!scene_protocol("cpu")) { fputs("3D scene simulation protocol failed.\n", stderr); failures++; }
 #ifndef NEUTRINO_VULKAN_RT
