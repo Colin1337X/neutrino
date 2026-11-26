@@ -40,6 +40,8 @@ Reports distinguish TRUE, FALSE, INSUFFICIENT_DATA, UNSUPPORTED, and SIMULATION_
 | fluid.leaves_container | entity. Cumulative water volume released by fracture |
 | fluid.spill_deposited | source entity. Landed and airborne water, with the deposited volume's centroid and footprint bounds |
 | fluid.deposits_on | source entity and target surface. Same evidence, with volume and footprint restricted to that surface |
+| fluid.pools_on | entity, target, and threshold in litres. Reports the source's current grid volume on the named surface |
+| fluid.depth_exceeds | entity, optional target, and threshold in metres. Reports the deepest cell occupied by that source and its coordinates |
 | fluid.volume_exceeds | step and threshold in litres drained |
 | fluid.level_exceeds | step and threshold in metres of remaining fluid |
 | fluid.concentration_exceeds | step and relative concentration threshold at a scene_flow probe |
@@ -63,11 +65,21 @@ The scene_impulse tool takes name, impulse_ns in newton-seconds, and optional of
 
 An object's registered material may specify mechanical.fracture_j. A normal collision with enough relative kinetic energy splits the current hull in two along its longest horizontal axis. The original name identifies the first piece; the second uses the suffix #2. The pieces divide dry mass equally and inherit the post-impact linear velocity. Fracture is persistent and inelastic. Fragments start without spin.
 
-At fracture, 25 equal-volume water parcels sample the jug's oriented footprint and inherit its post-impact linear and tangential velocities. Gravity carries the parcels to upward static surfaces. Side contacts stop the corresponding velocity component. The parcels and their landing surfaces are stored in the room on the same branch as the fracture. The scene_spill tool accepts entity and optional target to inspect the volume, centroid and footprint. The model conserves the initialized parcel volumes. It does not resolve water interacting with moving fragments, pooling depth, runoff or splashes after landing.
+At fracture, 25 equal-volume water parcels sample the jug's oriented footprint and inherit its post-impact linear and tangential velocities. Gravity carries the parcels to upward static surfaces. Side contacts stop the corresponding velocity component. The parcels and their landing surfaces are stored in the room on the same branch as the fracture. The scene_spill tool accepts entity and optional target to inspect the initial landing volume, centroid and footprint.
 
 The [original falling container](../benchmarks/falling-container.json) fixture remains a regression control. The [rotating container](../benchmarks/rotating-container.json) adds balanced off-center impulses and two named floor sections. Both fixtures measure optical and acoustic paths from the final impact location. These paths test propagation to receiver coordinates. Detection, source identification and private knowledge require additional character models.
 
 End the current player turn with Simulation setup: followed by a complete hypothetical sim_plan to attach a long experiment. The model can select it with the short object {"neutrino_tool":"sim_plan"}. The simulator validates and runs the supplied actions. Stage-mode plans cannot be attached this way. The raw trace records the selection and the executed actions.
+
+## Surface runoff and pooling
+
+Use scene_runoff to enable a bounded surface grid before or after water lands. Supply min_xy and max_xy in world metres and cells as two integer dimensions from 1 to 64. conductivity_m2_s controls the relaxation rate and defaults to 0.025. Optional slope gives elevation change per horizontal metre on each axis. The grade affects runoff rather than the ballistic collision geometry. Each cell uses the highest static surface beneath its center, or the room floor. The grid uses impermeable edges. Grid dimensions and terrain grade remain fixed once water has entered the grid.
+
+During scene_step, landed parcels enter the grid once on their recorded surface. At a grid seam, the model can route a parcel to an adjacent cell on the matching surface. Parcels outside the grid or below its sampled surface remain accounted for as unrouted. The solver moves water between four-connected cells using the difference in bed elevation plus water depth. Each face transfers an equal volume out of one cell and into the next. The solver limits outflow to the water available and subdivides the timestep for stability. Multiple spill sources share the same pressure head and retain their source volumes as they mix. Depth is total water volume divided by cell area.
+
+The scene_puddles tool accepts entity and optional target. It reports released, airborne, unrouted, grid and selected volumes, the deepest cell and its depth, and wet area above the reported cutoff. The fluid.deposits_on predicate continues to describe initial landing. Use fluid.pools_on or fluid.depth_exceeds for the current state.
+
+This is a mass-conserving heightfield approximation. It models gravity-driven movement toward low cells and depth equalization. Its conductivity is an adjustable model parameter. It omits surface momentum, multiple overlapping floor levels, absorption, drains, moving-fragment coupling and post-landing splash.
 
 ## Voxel continuum
 
@@ -80,7 +92,7 @@ Set method to cfd and solid_geometry to true in scene_medium to use the room's b
 | State and orchestration | Shared branch-local AABB geometry and propagation materials, ordered and conditional transactions, analytical and numerical queries |
 | Mechanics | Quaternion rotation, off-center impulse, swept AABB translation, fixed mounts, rails and persistent two-piece brittle fracture. Contact torque, friction, joint networks and compound shapes are unfinished |
 | Propagation | Existing CPU, compute and hardware RT visibility paths. Acoustic and optical queries share geometry, material profiles and named endpoints. The supported paths are direct and first-bounce with material attenuation and cutoffs |
-| Continuum | Ballistic water deposition, periodic CFD and opt-in CPU voxel obstacles. Shallow-water runoff, free-surface simulation, phase transitions, and two-way fluid-solid coupling are unfinished |
+| Continuum | Ballistic water deposition, heightfield runoff and pooling, periodic CFD and opt-in CPU voxel obstacles. Momentum-resolving free-surface simulation, phase transitions, and two-way fluid-solid coupling are unfinished |
 | Character perception | Signal reception predicates describe the solver's receiver. Character knowledge records, access controls and isolated character inference are unfinished |
 | Runtime scaling | Existing GPU and Windows mapped-buffer paths. Obstacle pressure projection runs on CPU. The plan enforces action and query counts. Global time and byte budgeting, persistent solver fields and out-of-core tiled scheduling are unfinished |
 
@@ -96,3 +108,5 @@ The C regression suite checks geometric flight time, analytical drainage, condit
 Use the Windows executable path on Windows. Add --provider http://127.0.0.1:PORT/v1 and --model MODEL for an isolated live narration test. Use --fixtures benchmarks/falling-container.json and --live-plan "falling water container" to reproduce the attached-plan test. The benchmark records raw timings, exact reports and persistence checks. The existing scene_physics_test --rt and scene_physics_test --cfd-gpu modes check supported hardware paths against CPU results.
 
 For the spin and water deposition run, use --fixtures benchmarks/rotating-container.json and --live-plan "falling water container with spin".
+
+For the runoff run, use --fixtures benchmarks/runoff-container.json and --live-plan "falling water container with runoff".

@@ -2,6 +2,7 @@
 #include "ray.h"
 #include "physics_models.h"
 #include "spill.h"
+#include "runoff.h"
 
 #include <float.h>
 #include <math.h>
@@ -162,6 +163,70 @@ static bool rotation_and_spill(void)
     cJSON_Delete(state);
     free(spills.items);
     free(reloaded.items);
+    return ok;
+}
+
+static bool runoff_conservation(void)
+{
+    Json *room = cJSON_Parse("{\"objects\":[]}");
+    Json *args = cJSON_Parse("{\"min_xy\":[0,0],\"max_xy\":[2,1],\"cells\":[2,1],\"conductivity_m2_s\":0.1}");
+    PhysicsBox bounds = {{0,0,0},{2,1,2}};
+    Runoff runoff = {0};
+    SpillSet staged = {0}, reloaded = {0};
+    bool ok = runoff_configure(room, &bounds, args) && runoff_open(&runoff, room, &bounds);
+    Spill *jug = spill_add(&staged), *cup = spill_add(&staged);
+    if (jug && cup) {
+        strcpy(jug->source, "jug");
+        strcpy(cup->source, "cup");
+        jug->litres = 1;
+        cup->litres = .25;
+        for (int j = 0; j < SPILL_PARCELS; ++j) {
+            SpillParcel settled = {.point={.5,.5,0}, .surface="@room"};
+            jug->parcels[j] = cup->parcels[j] = settled;
+        }
+        // Unit-area neighbors at the same elevation transfer 5% of the head difference in half a second.
+        ok &= runoff_advance(&runoff, &staged, .5) && jug->film && cup->film &&
+            fabs(jug->film[0]-.95) < 1e-12 && fabs(jug->film[1]-.05) < 1e-12 &&
+            fabs(cup->film[0]-.2375) < 1e-12 && fabs(cup->film[1]-.0125) < 1e-12;
+        spill_store(&staged, room);
+        ok &= !runoff_configure(room, &bounds, args) && spill_load(&reloaded, room);
+        Json *evidence = cJSON_CreateObject();
+        double litres, depth;
+        ok &= runoff_evidence(room, &bounds, "jug", "@room", evidence, &litres, &depth) &&
+            fabs(litres-1) < 1e-12 && fabs(depth-.0011875) < 1e-12;
+        cJSON_Delete(evidence);
+        if (reloaded.count == 2) {
+            // Raise the west cell 20 mm. Both tracers drain east, with no loss or second seeding.
+            runoff.bed[0].height = .020;
+            ok &= runoff_advance(&runoff, &reloaded, .5) && runoff_advance(&runoff, &reloaded, .5) &&
+                reloaded.items[0].film[0] < 1e-12 && fabs(reloaded.items[0].film[1]-1) < 1e-12 &&
+                reloaded.items[1].film[0] < 1e-12 && fabs(reloaded.items[1].film[1]-.25) < 1e-12;
+        } else ok = false;
+    } else ok = false;
+    spill_release(&staged);
+    spill_release(&reloaded);
+    runoff_release(&runoff);
+    cJSON_Delete(room);
+    cJSON_Delete(args);
+
+    // A seam inside a cell is assigned to the adjacent cell on the actual landing surface.
+    room = cJSON_Parse("{\"objects\":[{\"name\":\"west\",\"min\":[0,0,0],\"max\":[0.8,1,0.2]},"
+                      "{\"name\":\"east\",\"min\":[0.8,0,0],\"max\":[2,1,0.1]}]}");
+    args = cJSON_Parse("{\"min_xy\":[0,0],\"max_xy\":[2,1],\"cells\":[2,1]}");
+    ok &= runoff_configure(room, &bounds, args) && runoff_open(&runoff, room, &bounds);
+    jug = spill_add(&staged);
+    if (jug) {
+        strcpy(jug->source, "jug");
+        jug->litres = 1;
+        for (int j = 0; j < SPILL_PARCELS; ++j)
+            jug->parcels[j] = (SpillParcel){.point={.9,.5,.1}, .surface="east"};
+        ok &= runoff_advance(&runoff, &staged, 0) && jug->film &&
+            jug->film[0] == 0 && fabs(jug->film[1]-1) < 1e-12;
+    } else ok = false;
+    spill_release(&staged);
+    runoff_release(&runoff);
+    cJSON_Delete(room);
+    cJSON_Delete(args);
     return ok;
 }
 
@@ -1116,6 +1181,7 @@ int main(int argc, char **argv)
     if (!scenario_protocol()) { fputs("Typed scenario protocol failed.\n", stderr); failures++; }
     if (!rigid_dynamics()) { fputs("Shared rigid dynamics test failed.\n", stderr); failures++; }
     if (!rotation_and_spill()) { fputs("Rotation and spill physics test failed.\n", stderr); failures++; }
+    if (!runoff_conservation()) { fputs("Runoff mass and depth test failed.\n", stderr); failures++; }
     if (!rigid_branch_replay()) { fputs("Rigid branch replay test failed.\n", stderr); failures++; }
     if (!attached_rigid_plan()) { fputs("Attached rigid plan test failed.\n", stderr); failures++; }
     if (!solid_cfd()) { fputs("Voxel CFD boundary test failed.\n", stderr); failures++; }

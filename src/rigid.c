@@ -1,6 +1,7 @@
 #include "physics_models.h"
 #include "rigid_spin.h"
 #include "spill.h"
+#include "runoff.h"
 
 #include <float.h>
 #include <math.h>
@@ -443,7 +444,8 @@ static bool step_room(Json *room, const Json *materials, const PhysicsBox *bound
     Body *bodies = calloc(MAX_BODIES, sizeof *bodies);
     if (!bodies) return false;
     SpillSet spills = {0};
-    bool valid = spill_load(&spills, room), any = spills.count != 0;
+    Runoff runoff = {0};
+    bool valid = spill_load(&spills, room) && runoff_open(&runoff, room, bounds), any = spills.count != 0;
     SpillSurface surfaces[MAX_BODIES];
     int surface_count = 0;
     int i = 0;
@@ -462,7 +464,10 @@ static bool step_room(Json *room, const Json *materials, const PhysicsBox *bound
         double now = start + tick*dt;
         rotate_bodies(bodies, count, bounds, dt);
         valid = advance(bodies, &count, bounds, gravity, now, dt, &spills);
-        if (valid && spills.count) spill_advance(&spills, bounds, surfaces, surface_count, gravity, now, now+dt);
+        if (valid && spills.count) {
+            spill_advance(&spills, bounds, surfaces, surface_count, gravity, now, now+dt);
+            valid = runoff_advance(&runoff, &spills, dt);
+        }
     }
     if (valid && any) {
         int original = cJSON_GetArraySize(objects);
@@ -473,7 +478,8 @@ static bool step_room(Json *room, const Json *materials, const PhysicsBox *bound
         num(room, "rigid_time_s", start + seconds);
         spill_store(&spills, room);
     }
-    free(spills.items);
+    spill_release(&spills);
+    runoff_release(&runoff);
     free(bodies);
     return valid && any;
 }

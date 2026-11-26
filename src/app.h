@@ -52,6 +52,8 @@ int physics_scene_relation(const Json *settings, const char *entity, const char 
 const Json *physics_scene_body(const Json *settings, const char *entity);
 bool physics_scene_spill(const Json *settings, const char *entity, const char *surface,
                          Json *evidence, double *litres);
+bool physics_scene_puddle(const Json *settings, const char *entity, const char *surface,
+                          Json *evidence, double *litres, double *depth);
 typedef struct {
     Operation op;
     Json *scene, *story;

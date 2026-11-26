@@ -65,7 +65,8 @@ static bool apply_stat(Json *state, const Json *op)
     if (!strcmp(tool, "tune")) return physics_tune(at(state, "physics"), op);
     if (!strcmp(tool, "scene_room") || !strcmp(tool, "scene_place") || !strcmp(tool, "scene_remove") ||
         !strcmp(tool, "scene_medium") || !strcmp(tool,"scene_select") || !strcmp(tool, "scene_material") ||
-        !strcmp(tool, "scene_air") || !strcmp(tool, "scene_translate") || rigid_tool(tool))
+        !strcmp(tool, "scene_air") || !strcmp(tool, "scene_translate") ||
+        !strcmp(tool, "scene_runoff") || rigid_tool(tool))
         return physics_scene_edit(at(state, "physics"), op);
     if (!strcmp(tool, "set_time") || !strcmp(tool, "auto_time") || !strcmp(tool, "advance")) {
         const bool step = !strcmp(tool, "auto_time"), advancing = !strcmp(tool, "advance");
@@ -264,6 +265,9 @@ static const char scenario_help[] =
     "scene_impulse takes name, impulse_ns vector, and optional center-relative offset_m. "
     "Query entity.rotated, entity.moved, entity.contacts (with target), entity.structural_failure and fluid.leaves_container by name. "
     "fluid.spill_deposited and fluid.deposits_on (with target) give volume and footprint. scene_spill reads this by entity.\n"
+    "scene_runoff configures min_xy, max_xy, cells, optional conductivity_m2_s and slope. "
+    "scene_step moves landed water across the grid. Query fluid.pools_on (entity,target,threshold in L), "
+    "fluid.depth_exceeds (entity,optional target,threshold in m), or use scene_puddles by entity.\n"
     "sim_plan: name, mode (hypothetical/stage), actions (ordered tool objects), queries (id and predicate). "
     "Hypothetical plans leave the story unchanged. Predicates: entity.exists(entity), entity.overlaps(entity,target), "
     "fluid.volume_exceeds(step,threshold in L), fluid.level_exceeds(step,threshold in m), "
@@ -435,7 +439,7 @@ static bool read_only_tool(const char *tool)
            !strcmp(tool, "fluid") || !strcmp(tool, "gas") || !strcmp(tool, "prop_load") ||
            !strcmp(tool, "scene_inspect") || !strcmp(tool, "scene_rays") || !strcmp(tool, "scene_acoustic") ||
            !strcmp(tool, "scene_light") || !strcmp(tool,"scene_catalog") || !strcmp(tool, "scene_flow") ||
-           !strcmp(tool, "scene_spill") ||
+           !strcmp(tool, "scene_spill") || !strcmp(tool, "scene_puddles") ||
            !strcmp(tool,"world_inspect") ||
            physics_model_tool(tool);
 }

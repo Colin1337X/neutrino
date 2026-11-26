@@ -30,7 +30,7 @@ foreach(asset IN ITEMS index.html app.css app.js)
 endforeach()
 file(GENERATE OUTPUT "${browser_header}" CONTENT "${browser_assets}")
 add_executable(neutrino src/main.c src/workspace.c src/terminal.c src/inference.c src/gateway.c src/memory.c src/facts.c src/world.c src/ui.c src/web.c
-    src/simulation.c src/scenario.c src/physics.c src/rigid.c src/rigid_spin.c src/spill.c
+    src/simulation.c src/scenario.c src/physics.c src/rigid.c src/rigid_spin.c src/spill.c src/runoff.c
     src/physics_flow.c src/physics_models.c src/measurements.c src/ray_gpu.c src/prose.c src/prompt.c src/browser.c
     third_party/cjson/cJSON.c)
 target_include_directories(neutrino PRIVATE third_party/cjson "${CMAKE_CURRENT_BINARY_DIR}")
@@ -80,7 +80,7 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME prompt_budget COMMAND prompt_budget_test)
 
-    add_executable(scene_physics_test tests/scene_physics.c src/physics.c src/rigid.c src/rigid_spin.c src/spill.c
+    add_executable(scene_physics_test tests/scene_physics.c src/physics.c src/rigid.c src/rigid_spin.c src/spill.c src/runoff.c
         src/physics_flow.c src/physics_models.c
         src/measurements.c src/ray_gpu.c src/simulation.c src/scenario.c
         src/workspace.c src/world.c third_party/cjson/cJSON.c)

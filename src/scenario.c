@@ -67,7 +67,7 @@ bool simulation_plan_parse(const Json *plan, SimulationPlan *parsed)
 }
 
 typedef enum { ENTITY_EXISTS, ENTITY_OVERLAPS, ENTITY_MOVED, ENTITY_ROTATED, ENTITY_CONTACTS,
-               ENTITY_FRACTURED, FLUID_RELEASED, FLUID_DEPOSITED, FLUID_SURFACE,
+               ENTITY_FRACTURED, FLUID_RELEASED, FLUID_DEPOSITED, FLUID_SURFACE, FLUID_POOL, FLUID_DEPTH,
                FLUID_DRAINED, FLUID_LEVEL, FLOW_TRACER,
                SIGNAL_REACHES, SIGNAL_ARRIVES, SIGNAL_POWER } Predicate;
 static const struct { const char *name; Predicate kind; } predicates[] = {
@@ -76,6 +76,7 @@ static const struct { const char *name; Predicate kind; } predicates[] = {
     {"entity.rotated", ENTITY_ROTATED},
     {"entity.structural_failure", ENTITY_FRACTURED}, {"fluid.leaves_container", FLUID_RELEASED},
     {"fluid.spill_deposited", FLUID_DEPOSITED}, {"fluid.deposits_on", FLUID_SURFACE},
+    {"fluid.pools_on", FLUID_POOL}, {"fluid.depth_exceeds", FLUID_DEPTH},
     {"fluid.volume_exceeds", FLUID_DRAINED}, {"fluid.level_exceeds", FLUID_LEVEL},
     {"fluid.concentration_exceeds", FLOW_TRACER},
     {"signal.reaches_receiver", SIGNAL_REACHES}, {"signal.arrival_before", SIGNAL_ARRIVES},
@@ -92,6 +93,21 @@ static const char *rigid_result(Predicate kind, const Json *query, const Json *s
 {
     const char *entity = js(query, "entity"), *target = js(query, "target");
     if (!label(entity)) return "INSUFFICIENT_DATA";
+    if (kind == FLUID_POOL || kind == FLUID_DEPTH) {
+        double litres, depth, threshold;
+        if ((kind == FLUID_POOL && !label(target)) || (*target && !label(target)) ||
+            !physics_scalar(query, "threshold", 0, DBL_MAX, &threshold) ||
+            !physics_scene_puddle(settings, entity, target, evidence, &litres, &depth))
+            return "INSUFFICIENT_DATA";
+        if (*target) set(evidence, "target", target);
+        set(evidence, "solver", "conservative surface-head relaxation");
+        set(evidence, "approximation", "cell-averaged depth on a static heightfield");
+        double value = kind == FLUID_POOL ? litres : depth;
+        put(evidence, "value", cJSON_CreateNumber(value));
+        put(evidence, "threshold", cJSON_CreateNumber(threshold));
+        set(evidence, "units", kind == FLUID_POOL ? "L" : "m");
+        return value > threshold ? "TRUE" : "FALSE";
+    }
     const Json *body = physics_scene_body(settings, entity);
     if (kind == FLUID_DEPOSITED || kind == FLUID_SURFACE) {
         double litres;
@@ -143,7 +159,8 @@ static const char *evaluate(const Json *query, const Json *settings, const Physi
     if (i == sizeof predicates / sizeof *predicates) return "UNSUPPORTED";
     Predicate kind = predicates[i].kind;
     if (kind == ENTITY_MOVED || kind == ENTITY_ROTATED || kind == ENTITY_CONTACTS || kind == ENTITY_FRACTURED ||
-        kind == FLUID_RELEASED || kind == FLUID_DEPOSITED || kind == FLUID_SURFACE)
+        kind == FLUID_RELEASED || kind == FLUID_DEPOSITED || kind == FLUID_SURFACE ||
+        kind == FLUID_POOL || kind == FLUID_DEPTH)
         return rigid_result(kind, query, settings, evidence);
     if (kind == ENTITY_EXISTS || kind == ENTITY_OVERLAPS) {
         const char *entity = js(query, "entity"), *target = js(query, "target");

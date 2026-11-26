@@ -2,6 +2,7 @@
 #include "ray.h"
 #include "physics_models.h"
 #include "spill.h"
+#include "runoff.h"
 
 #include <float.h>
 #include <limits.h>
@@ -203,6 +204,14 @@ bool physics_scene_spill(const Json *settings, const char *entity, const char *s
     return spill_evidence(active_room(settings), entity, surface, evidence, litres);
 }
 
+bool physics_scene_puddle(const Json *settings, const char *entity, const char *surface,
+                          Json *evidence, double *litres, double *depth)
+{
+    const Json *room = active_room(settings);
+    Box bounds;
+    return read_box(room, &bounds) && runoff_evidence(room, &bounds, entity, surface, evidence, litres, depth);
+}
+
 static bool acoustic_properties(const Json *material, double *loss, double *reflectivity)
 {
     return cJSON_IsObject(material) && physics_scalar(material, "loss_db_per_m", 0, 1e6, loss) &&
@@ -280,6 +289,7 @@ bool physics_scene_edit(Json *settings, const Json *op)
         return true;
     }
     if (!room || !read_box(room, &bounds)) return false;
+    if (!strcmp(tool, "scene_runoff")) return runoff_configure(room, &bounds, op);
     if (!strcmp(tool, "scene_step"))
         return rigid_edit(room, nullptr, at(settings, "materials3d"), &bounds, op, setting(settings, GRAVITY));
     if (!strcmp(tool, "scene_air")) {
@@ -1052,18 +1062,21 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
         return true;
     }
     if (!strcmp(tool, "scene_rays")) return scene_rays(args, room, &bounds, out, reading);
-    if (!strcmp(tool, "scene_spill")) {
+    if (!strcmp(tool, "scene_spill") || !strcmp(tool, "scene_puddles")) {
+        bool puddles = !strcmp(tool, "scene_puddles");
         const char *entity = js(args, "entity"), *surface = js(args, "target");
         if (!scene_name(entity) || (at(args, "target") && !scene_name(surface))) return false;
         Json *evidence = cJSON_CreateObject();
-        double litres;
-        bool found = spill_evidence(room, entity, surface, evidence, &litres);
+        double litres, depth;
+        bool found = puddles ? runoff_evidence(room, &bounds, entity, surface, evidence, &litres, &depth) :
+            spill_evidence(room, entity, surface, evidence, &litres);
         if (found) {
-            put(evidence, "selected_l", cJSON_CreateNumber(litres));
+            if (!puddles) put(evidence, "selected_l", cJSON_CreateNumber(litres));
             char *json = cJSON_PrintUnformatted(evidence);
             if (json) append(out, json);
             cJSON_free(json);
-        } else append(out, "No tracked water release for this entity.");
+        } else append(out, puddles ? "No runoff grid with a tracked release for this entity." :
+                      "No tracked water release for this entity.");
         cJSON_Delete(evidence);
         return true;
     }
@@ -1231,7 +1244,7 @@ bool physics_run_reading(const char *name, const Json *args, const Json *setting
     if (reading) *reading = (PhysicsReading){0};
     if (!strcmp(name, "scene_inspect") || !strcmp(name, "scene_rays") || !strcmp(name, "scene_acoustic") ||
         !strcmp(name, "scene_light") || !strcmp(name,"scene_catalog") || !strcmp(name, "scene_flow") ||
-        !strcmp(name, "scene_spill"))
+        !strcmp(name, "scene_spill") || !strcmp(name, "scene_puddles"))
         return scene_query(name, args, settings, out, reading);
     if (!strcmp(name, "ray")) return ray(args, out);
     if (!strcmp(name, "rays")) return rays(args, out, reading);

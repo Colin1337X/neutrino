@@ -23,7 +23,21 @@ bool spill_load(SpillSet *set, const Json *room)
             !physics_scalar(item, "released_s", 0, DBL_MAX, &spill->released_s) ||
             cJSON_GetArraySize(points) != SPILL_PARCELS) return false;
         strcpy(spill->source, source);
-        int i = 0;
+        const Json *film = at(item, "film");
+        if (film) {
+            spill->film_cells = cJSON_GetArraySize(film);
+            if (!cJSON_IsArray(film) || spill->film_cells < 1 || spill->film_cells > 4096) return false;
+            spill->film = calloc((size_t)spill->film_cells, sizeof *spill->film);
+            if (!spill->film) return false;
+            int cell = 0;
+            const Json *volume;
+            cJSON_ArrayForEach(volume, film) {
+                if (!cJSON_IsNumber(volume) || !isfinite(volume->valuedouble) || volume->valuedouble < 0 ||
+                    volume->valuedouble > spill->litres + 1e-9) return false;
+                spill->film[cell++] = volume->valuedouble;
+            }
+        }
+        int i = 0, deposits = 0;
         const Json *point;
         cJSON_ArrayForEach(point, points) {
             SpillParcel *parcel = &spill->parcels[i++];
@@ -31,7 +45,13 @@ bool spill_load(SpillSet *set, const Json *room)
             if (strlen(surface) > 64 || !physics_vector(point, "point", parcel->point) ||
                 !physics_vector(point, "velocity", parcel->velocity)) return false;
             strcpy(parcel->surface, surface);
+            parcel->routed = cJSON_IsTrue(at(point, "routed"));
+            if (parcel->routed && !*surface) return false;
+            deposits += parcel->routed;
         }
+        double tracked = 0, expected = spill->litres * deposits / SPILL_PARCELS;
+        for (int cell = 0; cell < spill->film_cells; ++cell) tracked += spill->film[cell];
+        if (fabs(tracked-expected) > fmax(1e-9, expected*1e-9)) return false;
     }
     return true;
 }
@@ -52,12 +72,21 @@ void spill_store(const SpillSet *spills, Json *room)
             put(point, "point", cJSON_CreateDoubleArray(parcel->point, 3));
             put(point, "velocity", cJSON_CreateDoubleArray(parcel->velocity, 3));
             if (*parcel->surface) set(point, "surface", parcel->surface);
+            if (parcel->routed) put(point, "routed", cJSON_CreateTrue());
             cJSON_AddItemToArray(points, point);
         }
         put(item, "parcels", points);
+        if (spill->film) put(item, "film", cJSON_CreateDoubleArray(spill->film, spill->film_cells));
         cJSON_AddItemToArray(array, item);
     }
     put(room, "spills", array);
+}
+
+void spill_release(SpillSet *spills)
+{
+    for (int i = 0; i < spills->count; ++i) free(spills->items[i].film);
+    free(spills->items);
+    *spills = (SpillSet){0};
 }
 
 typedef struct { double fraction; int axis, normal; const char *surface; } Landing;

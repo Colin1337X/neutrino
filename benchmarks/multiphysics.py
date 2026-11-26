@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import os
 import re
 import tempfile
@@ -14,6 +15,16 @@ import psutil
 
 from fixtures import build
 from gateway_history import free_port, process, request, wait
+
+
+def matches_report(report, example):
+    if not report or report["status"] != "completed" or report["pending_commit"]:
+        return False
+    entries = {item["id"]: item for item in report["consequences"]}
+    return ({key: item["result"] for key, item in entries.items()} == example["results"] and
+            all(math.isclose(entries.get(key, {}).get(field, math.nan), expected, abs_tol=1e-9)
+                for key, fields in example.get("measurements", {}).items()
+                for field, expected in fields.items()))
 
 
 def run(binary, examples, repetitions, output, provider, model, live_example=None):
@@ -64,7 +75,6 @@ def run(binary, examples, repetitions, output, provider, model, live_example=Non
 
         for example in examples:
             plan = example["plan"]
-            expected = example["results"]
             timings = []
             original = workspace.read_bytes()
             for iteration in range(repetitions + 1):
@@ -74,9 +84,8 @@ def run(binary, examples, repetitions, output, provider, model, live_example=Non
                 panel = response["panel"]["text"]
                 report = next(json.loads(line) for line in reversed(panel.splitlines())
                               if line.startswith('{"simulation":'))
-                assert report["status"] == "completed", panel
-                assert {item["id"]: item["result"] for item in report["consequences"]} == expected, panel
-                assert not report["pending_commit"] and workspace.read_bytes() == original
+                assert matches_report(report, example), panel
+                assert workspace.read_bytes() == original
                 if iteration:
                     timings.append(elapsed)
             result["plans"].append({"name": plan["name"], "times_ms": timings, "report": report,
@@ -91,10 +100,15 @@ def run(binary, examples, repetitions, output, provider, model, live_example=Non
                    "Then describe the attendant's reaction to the predicted water discharge in one complete in-world sentence.")
             if live_example:
                 spinning = any(query["predicate"] == "entity.rotated" for query in live_example["plan"]["queries"])
+                runoff = any(query["predicate"] == "fluid.pools_on" for query in live_example["plan"]["queries"])
                 detail = ("Describe the vertical-axis spin and where the water lands according to the results. "
                           "Use the west and east sections of the floor if the measurements support them. "
                           "Avoid end-over-end tumbling, runoff, or puddle depth.") if spinning else (
                           "Describe the fall without rotation or a spray pattern, since neither is measured.")
+                if runoff:
+                    detail = ("Use two distinct moments from the measured report. First say which floor gets water at impact. "
+                              "Then explicitly say where the puddle settles after runoff. Use 'puddles' or 'pools' for "
+                              "the final state. Keep both events conditional and avoid a depth number.")
                 cue = ("Select the attached hypothetical experiment. Once the simulator has responded, describe the predicted fall in-world, "
                        "including what happens to the jug and water. Keep it conditional. " + detail + "\n" +
                        "Simulation setup: " +
@@ -121,10 +135,7 @@ def run(binary, examples, repetitions, output, provider, model, live_example=Non
                         candidate = json.loads(line)
                         if candidate["simulation"] == live_example["plan"]["name"]:
                             typed_report = candidate
-                used_plan = (typed_report is not None and typed_report["status"] == "completed" and
-                             not typed_report["pending_commit"] and
-                             {entry["id"]: entry["result"] for entry in typed_report["consequences"]} ==
-                             live_example["results"])
+                used_plan = matches_report(typed_report, live_example)
                 pattern = r"\b(water|spill\w*)\b"
             else:
                 used_plan = '"predicate":"fluid.volume_exceeds"' in trace and '"result":"TRUE"' in trace
@@ -133,6 +144,9 @@ def run(binary, examples, repetitions, output, provider, model, live_example=Non
                               "trace": trace, "used_typed_plan": used_plan, "typed_report": typed_report,
                               "relevant_prose": bool(re.search(pattern, content, re.I))
                               and not re.search(r"\b(neutrino_tool|sim_plan|json)\b", content, re.I)}
+            if live_example and runoff:
+                result["live"]["reported_pool"] = bool(re.search(r"\b(pools?|puddles?|gathers?|settles?)\b", content, re.I) and
+                                                       re.search(r"\b(east|eastern)\b", content, re.I))
         output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"{binary.name} median idle RSS {median(rss)/2**20:.2f} MiB")
         for plan in result["plans"]:
