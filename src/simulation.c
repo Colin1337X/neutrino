@@ -18,7 +18,7 @@ static const char observation_event[] = "_sensor_result";
 
 enum {
     BUDGET_WORK, BUDGET_STEPS, BUDGET_SECONDS, BUDGET_RAYS, BUDGET_CELLS, BUDGET_NODES,
-    BUDGET_RAM, BUDGET_MAPPED, BUDGET_REPORT, BUDGET_COUNT
+    BUDGET_RAM, BUDGET_MAPPED, BUDGET_FIELDS, BUDGET_REPORT, BUDGET_COUNT
 };
 static const struct { const char *key; double initial; } budgets[] = {
     [BUDGET_WORK] = {"work", 250000000},
@@ -29,6 +29,7 @@ static const struct { const char *key; double initial; } budgets[] = {
     [BUDGET_NODES] = {"nodes", 1000000},
     [BUDGET_RAM] = {"ram_bytes", 256 * 1024 * 1024},
     [BUDGET_MAPPED] = {"mapped_bytes", 256 * 1024 * 1024},
+    [BUDGET_FIELDS] = {"field_bytes", 8 * 1024 * 1024},
     [BUDGET_REPORT] = {"report_bytes", 128 * 1024}
 };
 typedef struct { double limit[BUDGET_COUNT], used[BUDGET_COUNT]; } PlanBudget;
@@ -48,7 +49,8 @@ static bool reserve_budget(PlanBudget *budget, const PhysicsCost *cost, size_t r
     const double requested[BUDGET_COUNT] = {
         [BUDGET_WORK] = cost->work, [BUDGET_STEPS] = cost->steps, [BUDGET_SECONDS] = cost->seconds,
         [BUDGET_RAYS] = cost->rays, [BUDGET_CELLS] = cost->cells, [BUDGET_NODES] = cost->nodes,
-        [BUDGET_RAM] = cost->ram, [BUDGET_MAPPED] = cost->mapped, [BUDGET_REPORT] = report
+        [BUDGET_RAM] = cost->ram, [BUDGET_MAPPED] = cost->mapped, [BUDGET_FIELDS] = cost->field_bytes,
+        [BUDGET_REPORT] = report
     };
     double next[BUDGET_COUNT];
     for (int i = 0; i < BUDGET_COUNT; ++i) {
@@ -134,7 +136,8 @@ static bool apply_stat(Json *state, const Json *op)
     if (!strcmp(tool, "scene_room") || !strcmp(tool, "scene_place") || !strcmp(tool, "scene_remove") ||
         !strcmp(tool, "scene_medium") || !strcmp(tool,"scene_select") || !strcmp(tool, "scene_material") ||
         !strcmp(tool, "scene_air") || !strcmp(tool, "scene_translate") ||
-        !strcmp(tool, "scene_runoff") || !strcmp(tool, "scene_sensor") || rigid_tool(tool))
+        !strcmp(tool, "scene_runoff") || !strcmp(tool, "scene_sensor") ||
+        !strcmp(tool, "scene_flow_reset") || !strcmp(tool, flow_frame_event) || rigid_tool(tool))
         return physics_scene_edit(at(state, "physics"), op);
     if (!strcmp(tool, "set_time") || !strcmp(tool, "auto_time") || !strcmp(tool, "advance")) {
         const bool step = !strcmp(tool, "auto_time"), advancing = !strcmp(tool, "advance");
@@ -520,7 +523,9 @@ static const char scenario_help[] =
     "optional max_bounces and wall_reflectivity for light. The simulator checks all present receivers and records "
     "only positive detections on acceptance. Narrate only the senses each character detected and leave the source unidentified. "
     "Use scene_acoustic or scene_light for measurements that should leave knowledge unchanged.\n"
-    "For voxel CFD, add solid_geometry:true with method:cfd to scene_medium. scene_flow reads concentration at a probe point.\n"
+    "For voxel CFD, add solid_geometry:true with method:cfd to scene_medium. scene_flow reads concentration at a probe point. "
+    "scene_flow_step takes seconds to advance a saved CFD field (starts at zero on its first use). "
+    "scene_flow_reset discards the active layout's saved field.\n"
     "Rigid bodies: scene_body attaches mass_kg (dry mass), optional liquid_l, restitution and velocity to a named object. "
     "scene_constraint takes name and mode fixed/free/rail; rail uses axis x/y/z. scene_step advances the room by seconds. "
     "Use scene_material mechanical:{fracture_j} to set an impact threshold for a brittle object. "
@@ -1041,7 +1046,11 @@ static const Json *prepare_edit(const Json *op, const Json *story, int head, con
                                 PlanBudget *budget, Text *summary, Text *trace, Json **owned)
 {
     const char *tool = js(op, "neutrino_tool");
-    if (!strcmp(tool, observation_event)) return nullptr;
+    if (!strcmp(tool, observation_event) || !strcmp(tool, flow_frame_event)) return nullptr;
+    if (!strcmp(tool, "scene_flow_step")) {
+        if (cJSON_GetArraySize(op) != 2 || !cJSON_IsNumber(at(op, "seconds"))) return nullptr;
+        return *owned = physics_prepare_flow_step(at(state, "physics"), op, summary);
+    }
     if (!strcmp(tool, "scene_emit")) return *owned = resolve_emission(op, story, head, state, budget, summary, trace);
     if (!strcmp(tool, "scene_sensor") && !cJSON_IsTrue(at(op, "off"))) {
         Json *cast = world_local_cast(story, head);
@@ -1090,7 +1099,7 @@ static void execute_tool(Preview *p, const Json *op, const char *json, PlanBudge
         if (edit && stage_scenario_edit(&scratch, p->story, p->parent, state, edit)) {
             if (!p->tool_pending) p->tool_pending = cJSON_CreateArray();
             cJSON_AddItemToArray(p->tool_pending, cJSON_Duplicate(edit, true));
-            append(&result, owned ? "\nSensory records staged for this reply." : "Change staged for this reply.");
+            append(&result, owned ? "\nChange staged for this reply." : "Change staged for this reply.");
             if (owned) p->tool_prose_only = true;
         } else if (!result.len) append(&result, "Unknown tool, invalid arguments, or unavailable item.");
         cJSON_Delete(owned);
@@ -1157,7 +1166,7 @@ static bool execute_action_order(Preview *p, const Json *plan)
     }
     const Json *continuation = at(plan, "continue");
     int count = cJSON_GetArraySize(actions), index = 0;
-    Text results = {0}, feedback = {0}, failure = {0}, report = {0}, senses = {0};
+    Text results = {0}, feedback = {0}, failure = {0}, report = {0}, staged_feedback = {0};
     Json *pending = cJSON_CreateArray(), *accepted = cJSON_CreateArray();
     Json *scratch = nullptr, *state = simulation_state(p->story, p->parent), *op;
     PhysicsReading readings[SIM_TOOL_LIMIT];
@@ -1224,7 +1233,7 @@ static bool execute_action_order(Preview *p, const Json *plan)
             valid = edit && stage_scenario_edit(&scratch, p->story, p->parent, state, edit);
             if (valid) {
                 cJSON_AddItemToArray(pending, cJSON_Duplicate(edit, true));
-                if (owned) format(&senses, "\n%s\n", str(&result));
+                if (owned) format(&staged_feedback, "\n%s\n", str(&result));
                 else append(&result, "Change staged for this reply.");
             } else {
                 append(&failure, str(&result));
@@ -1265,7 +1274,7 @@ static bool execute_action_order(Preview *p, const Json *plan)
         if (!typed) append(&p->tool_feedback, str(&feedback));
         else {
             append(&p->tool_feedback, str(&report));
-            append(&p->tool_feedback, str(&senses));
+            append(&p->tool_feedback, str(&staged_feedback));
             append(&p->tool_results, str(&report));
         }
         p->tool_rounds += count;
@@ -1299,7 +1308,7 @@ static bool execute_action_order(Preview *p, const Json *plan)
     release(&feedback);
     release(&failure);
     release(&report);
-    release(&senses);
+    release(&staged_feedback);
     return true;
 }
 
@@ -1385,14 +1394,22 @@ SimulationReply simulation_tool_reply(Preview *p, const char *body)
     if (!op && *str(&json) == '{') {
         const char *end;
         Json *prefix = cJSON_ParseWithOpts(str(&json), &end, false);
-        if (!strcmp(js(prefix, "neutrino_tool"), "sim_plan")) {
+        const char *name = js(prefix, "neutrino_tool");
+        if (!strcmp(name, "sim_plan") || !strcmp(name, "scene_flow_step")) {
+            const size_t parsed_length = (size_t)(end - str(&json));
             while (isspace((unsigned char)*end)) ++end;
             if (!strncmp(end, "\x60\x60\x60", 3)) end += 3;
             while (isspace((unsigned char)*end)) ++end;
             if (*end && !structured_reply(end)) {
                 op = prefix;
                 prefix = nullptr;
-                append(&p->tool_results, "Discarded speculative prose attached to the simulation plan.\n");
+                append(&p->tool_results, !strcmp(name, "sim_plan") ?
+                    "Discarded speculative prose attached to the simulation plan.\n" :
+                    "Discarded speculative prose attached to the CFD step.\n");
+                if (!strcmp(name, "scene_flow_step")) {
+                    json.len = parsed_length;
+                    json.data[json.len] = 0;
+                }
             }
         }
         cJSON_Delete(prefix);

@@ -9,11 +9,13 @@ bool physics_optional(const Json *args, const char *key, double low, double high
 bool physics_model_tool(const char *name);
 bool physics_model_run(const char *name, const Json *args, double gravity, Text *out, bool *unavailable);
 typedef struct {
-    double work, steps, seconds, rays, cells, nodes, ram, mapped;
+    double work, steps, seconds, rays, cells, nodes, ram, mapped, field_bytes;
 } PhysicsCost;
 PhysicsCost physics_cost(const Json *op, const Json *settings);
 const Json *physics_sensors(const Json *settings);
 bool physics_emitter(const Json *settings, const Json *args, double source[3]);
+extern const char flow_frame_event[];
+Json *physics_prepare_flow_step(const Json *settings, const Json *op, Text *out);
 PhysicsCost softbody_cost(const Json *args);
 PhysicsCost rigid_cost(const Json *op, const Json *room);
 typedef struct {
@@ -61,8 +63,12 @@ void physics_cache_release(PhysicsCache *cache);
 
 bool flow_parse(const Json *args, const double length[3], FlowConfig *config);
 PhysicsCost flow_cost(const FlowConfig *config);
+PhysicsCost flow_step_cost(const FlowConfig *config, bool resumed);
+size_t flow_frame_bytes(int resolution);
+char *flow_encode(const FlowField *field);
 FlowField flow_solve(const FlowConfig *config);
 FlowField flow_solve_domain(const FlowConfig *config, const PhysicsBox *solids, size_t count);
+FlowField flow_resume_domain(const FlowConfig *config, const PhysicsBox *solids, size_t count, const char *frame);
 double flow_sample(const FlowField *field, const double local[3]);
 double flow_column(const FlowField *field, const double a[3], const double b[3], const double origin[3],
                    double start, double end);

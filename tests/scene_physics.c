@@ -466,6 +466,114 @@ static bool plan_cfd_reuse(void)
     return ok;
 }
 
+static bool persisted_cfd(void)
+{
+    App a = {.roleplay = true, .story = cJSON_Parse("{\"nodes\":[],\"simEnabled\":true,\"simCheckpointInterval\":1}")};
+    simulation_command(&a, "sim", "{\"neutrino_tool\":\"scene_room\",\"name\":\"Hall\",\"min\":[0,0,0],\"max\":[6,6,6]}");
+    simulation_command(&a, "sim", "{\"neutrino_tool\":\"scene_medium\",\"method\":\"cfd\",\"resolution\":12,"
+                       "\"seconds\":0.5,\"wind\":[1,0,0],\"center\":[2.75,2.75,2.75],\"diffusivity\":0,\"viscosity\":0,"
+                       "\"light_loss\":8,\"sound_loss\":5}");
+    int fork = story_push(&a.ws, a.story, 0, "assistant", "The tracer is ready.");
+    simulation_command(&a, "sim", "{\"neutrino_tool\":\"scene_flow_step\",\"seconds\":0.25}");
+    const char *experiment = "{\"neutrino_tool\":\"sim_plan\",\"mode\":\"hypothetical\",\"name\":\"second step\","
+        "\"actions\":[{\"neutrino_tool\":\"scene_flow_step\",\"seconds\":0.25},"
+        "{\"neutrino_tool\":\"scene_flow\",\"probe\":[3.75,2.75,2.75]}],"
+        "\"queries\":[{\"id\":\"clock\",\"predicate\":\"flow.time_exceeds\",\"step\":2,\"threshold\":0.25}]}";
+    Preview p = {.story = a.story, .parent = fork};
+    bool ok = simulation_tool_reply(&p, experiment) == SIM_REGENERATE && !p.tool_pending &&
+        strstr(str(&p.tool_feedback), "\"value\":0.5") && strstr(str(&p.tool_feedback), "\"result\":\"TRUE\"");
+    p.story = nullptr;
+    free_protocol(&p);
+    p = (Preview){.story = a.story, .parent = fork};
+    ok &= simulation_tool_reply(&p, "{\"neutrino_tool\":\"scene_flow_step\",\"seconds\":0.25}\n\nSpeculative prose.") ==
+        SIM_REGENERATE && p.tool_prose_only && cJSON_GetArraySize(p.tool_pending) == 1 &&
+        strstr(str(&p.tool_results), "Discarded speculative prose") &&
+        !strstr(str(&p.tool_results), "Speculative prose.") && !strstr(str(&p.tool_feedback), "Speculative prose.");
+    p.story = nullptr;
+    free_protocol(&p);
+    int left = story_push(&a.ws, a.story, fork, "assistant", "The tracer moves farther.");
+    simulation_command(&a, "sim", "{\"neutrino_tool\":\"scene_flow_step\",\"seconds\":0.25}");
+    int right = story_push(&a.ws, a.story, fork, "assistant", "Time pauses here.");
+    char *serialized = cJSON_PrintUnformatted(a.story);
+    Json *loaded = cJSON_Parse(serialized);
+    cJSON_free(serialized);
+    Json *probe = cJSON_Parse("{\"probe\":[3.75,2.75,2.75]}");
+    Json *full = simulation_state(loaded, left), *half = simulation_state(loaded, right);
+    PhysicsReading a_reading = {0}, b_reading = {0}, reference = {0};
+    Text result = {0};
+    ok &= physics_run_reading("scene_flow", probe, at(full, "physics"), &result, &a_reading) &&
+        strstr(str(&result), "Restored CFD field at 0.5 s");
+    clear(&result);
+    ok &= physics_run_reading("scene_flow", probe, at(half, "physics"), &result, &b_reading) &&
+        strstr(str(&result), "Restored CFD field at 0.25 s");
+    Json *fresh = simulation_state(loaded, 0);
+    clear(&result);
+    ok &= physics_run_reading("scene_flow", probe, at(fresh, "physics"), &result, &reference) &&
+        !reference.stored_flow && a_reading.stored_flow && b_reading.stored_flow &&
+        a_reading.flow_time_s == .5 && b_reading.flow_time_s == .25 &&
+        a_reading.tracer_concentration == reference.tracer_concentration &&
+        a_reading.tracer_concentration != b_reading.tracer_concentration;
+    Json *signal = cJSON_Parse("{\"source\":[3.75,2.75,2.75],\"listener\":[4.75,2.75,2.75],\"max_bounces\":0}");
+    ok &= physics_run_reading("scene_light", signal, at(full, "physics"), &result, &a_reading) &&
+        physics_run_reading("scene_light", signal, at(half, "physics"), &result, &b_reading) &&
+        a_reading.optical_power > 0 && a_reading.optical_power < b_reading.optical_power;
+    ok &= physics_run_reading("scene_acoustic", signal, at(full, "physics"), &result, &a_reading) &&
+        physics_run_reading("scene_acoustic", signal, at(half, "physics"), &result, &b_reading) &&
+        a_reading.arrivals == 1 && b_reading.arrivals == 1 &&
+        !a_reading.arrival[0].blocked && a_reading.arrival[0].level_db < b_reading.arrival[0].level_db;
+    cJSON_Delete(signal);
+
+    integer(loaded, "simCheckpointInterval", 0);
+    Json *replayed = simulation_state(loaded, left);
+    ok &= cJSON_Compare(full, replayed, true);
+    simulation_command(&a, "sim", "budget field_bytes 0");
+    const int before = cJSON_GetArraySize(at(a.story, "simLog"));
+    release(&a.info);
+    simulation_command(&a, "sim", "{\"neutrino_tool\":\"scene_flow_step\",\"seconds\":0.25}");
+    ok &= cJSON_GetArraySize(at(a.story, "simLog")) == before &&
+        strstr(str(&a.info), "budget exceeded (field_bytes)");
+    simulation_command(&a, "sim", "{\"neutrino_tool\":\"_flow_frame\",\"layout\":\"Hall\",\"frame\":{}}");
+    ok &= cJSON_GetArraySize(at(a.story, "simLog")) == before;
+    simulation_command(&a, "sim", "{\"neutrino_tool\":\"scene_flow_reset\"}");
+    Json *reset = simulation_state(a.story, right);
+    ok &= physics_run_reading("scene_flow", probe, at(reset, "physics"), &result, &b_reading) && !b_reading.stored_flow;
+    integer(a.story, "head", left);
+    simulation_command(&a, "sim", "{\"neutrino_tool\":\"scene_room\",\"name\":\"Hall\",\"min\":[0,0,0],\"max\":[7,6,6]}");
+    Json *resized = simulation_state(a.story, left);
+    ok &= physics_run_reading("scene_flow", probe, at(resized, "physics"), &result, &b_reading) && !b_reading.stored_flow;
+    cJSON_Delete(resized);
+
+    const double dimensions[] = {6,6,6};
+    Json *config = cJSON_Parse("{\"method\":\"cfd\",\"resolution\":7,\"seconds\":0.21,\"wind\":[1,0,0]}");
+    FlowConfig native;
+    ok &= flow_parse(config, dimensions, &native);
+    FlowField original = flow_solve(&native);
+    char *text = flow_encode(&original);
+    ok &= text && strlen(text) == flow_frame_bytes(7);
+    native.seconds = 0;
+    FlowField restored = flow_resume_domain(&native, nullptr, 0, text ? text : "");
+    ok &= restored.grid && original.grid && !memcmp(original.grid, restored.grid, 4 * 7 * 7 * 7 * sizeof(double));
+    if (text) text[0] = '*';
+    FlowField invalid = flow_resume_domain(&native, nullptr, 0, text ? text : "");
+    ok &= !invalid.grid && invalid.fallback && strstr(invalid.fallback, "Invalid saved");
+    free(text);
+    flow_release(&invalid);
+    flow_release(&restored);
+    flow_release(&original);
+    cJSON_Delete(config);
+    cJSON_Delete(reset);
+    cJSON_Delete(replayed);
+    cJSON_Delete(fresh);
+    cJSON_Delete(half);
+    cJSON_Delete(full);
+    cJSON_Delete(probe);
+    cJSON_Delete(loaded);
+    cJSON_Delete(a.story);
+    release(&a.info);
+    release(&result);
+    return ok;
+}
+
 static const char relay_geometry[] =
     "[{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[10,6,4]},"
     "{\"neutrino_tool\":\"scene_place\",\"kind\":\"wall\",\"name\":\"Lower baffle\","
@@ -753,6 +861,45 @@ static int cfd_reuse_timing(void)
     cJSON_Delete(probe);
     cJSON_Delete(settings);
     return !valid;
+}
+
+static int persistent_cfd_timing(void)
+{
+    const int sizes[] = {6, 12, 24};
+    const double dimensions[] = {6,6,6}, point[] = {2,2,2};
+    puts("resolution,method,repetition,batches,mean_ms,encoded_bytes");
+    for (size_t i = 0; i < sizeof sizes / sizeof *sizes; ++i) {
+        Json *setup = cJSON_Parse("{\"method\":\"cfd\",\"seconds\":0.5,\"wind\":[1,1,1]}");
+        integer(setup, "resolution", sizes[i]);
+        FlowConfig config;
+        bool valid = flow_parse(setup, dimensions, &config);
+        cJSON_Delete(setup);
+        if (!valid) return 1;
+        FlowField reference = flow_solve(&config);
+        char *encoded = flow_encode(&reference);
+        const double expected = flow_sample(&reference, point);
+        flow_release(&reference);
+        if (!encoded) return 1;
+        FlowConfig restore = config;
+        restore.seconds = 0;
+        for (int saved = 0; valid && saved <= 1; ++saved) {
+            const int batches = saved ? 500 : sizes[i] == 24 ? 12 : 100;
+            for (int rep = 0; valid && rep <= 5; ++rep) {
+                const clock_t start = clock();
+                for (int j = 0; valid && j < batches; ++j) {
+                    FlowField field = saved ? flow_resume_domain(&restore, nullptr, 0, encoded) : flow_solve(&config);
+                    valid = field.grid && flow_sample(&field, point) == expected;
+                    flow_release(&field);
+                }
+                const clock_t end = clock();
+                if (valid && rep) printf("%d,%s,%d,%d,%.6f,%zu\n", sizes[i], saved ? "restore" : "resimulate", rep,
+                    batches, 1000.0 * (end - start) / (CLOCKS_PER_SEC * (double)batches), strlen(encoded));
+            }
+        }
+        free(encoded);
+        if (!valid) return 1;
+    }
+    return 0;
 }
 
 static bool attached_rigid_plan(void)
@@ -1598,6 +1745,7 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "--rigid-timing")) return rigid_timing();
     if (argc > 1 && !strcmp(argv[1], "--checkpoint-timing")) return checkpoint_timing();
     if (argc > 1 && !strcmp(argv[1], "--cfd-reuse-timing")) return cfd_reuse_timing();
+    if (argc > 1 && !strcmp(argv[1], "--persistent-cfd-timing")) return persistent_cfd_timing();
     if (argc > 1 && !strcmp(argv[1], "--propagation-timing")) return propagation_timing();
     if (argc > 1 && !strcmp(argv[1], "--cfd-timing")) return cfd_timing();
     const struct {
@@ -1706,6 +1854,7 @@ int main(int argc, char **argv)
     if (!cumulative_plan_budget()) { fputs("Cumulative simulation plan budget failed.\n", stderr); failures++; }
     if (!character_knowledge_isolation()) { fputs("Character knowledge leaked across recipients or branches.\n", stderr); failures++; }
     if (!plan_cfd_reuse()) { fputs("Plan CFD field reuse or invalidation failed.\n", stderr); failures++; }
+    if (!persisted_cfd()) { fputs("Saved CFD continuation or branch isolation failed.\n", stderr); failures++; }
     if (!recursive_relay(argc > 1 && !strcmp(argv[1], "--rt") ? "rt" : "cpu")) {
         fputs("Recursive relay propagation failed.\n", stderr);
         failures++;

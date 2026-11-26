@@ -140,9 +140,10 @@ static bool room_flow(const Json *args, const Box *room, FlowConfig *config)
         (!cJSON_IsTrue(at(args, "solid_geometry")) || config->cfd)));
 }
 
-static FlowField room_flow_solve(const Json *room, const Box *bounds, const FlowConfig *config)
+static FlowField room_flow_solve(const Json *room, const Box *bounds, const FlowConfig *config, const char *frame)
 {
-    if (!cJSON_IsTrue(at(at(room, "medium"), "solid_geometry"))) return flow_solve(config);
+    if (!cJSON_IsTrue(at(at(room, "medium"), "solid_geometry")))
+        return flow_resume_domain(config, nullptr, 0, frame);
     Box solids[128];
     size_t count = 0;
     const Json *item;
@@ -156,7 +157,7 @@ static FlowField room_flow_solve(const Json *room, const Box *bounds, const Flow
         }
         ++count;
     }
-    return flow_solve_domain(config, solids, count);
+    return flow_resume_domain(config, solids, count, frame);
 }
 
 static Json *scene_object(const Json *objects, const char *name)
@@ -231,7 +232,9 @@ static bool optical_properties(const Json *optical, double *transmission, double
         physics_optional(optical, "loss_db_per_m", 0, 1e6, 0, loss) && *transmission + *reflectivity <= 1;
 }
 
-bool physics_scene_edit(Json *settings, const Json *op)
+const char flow_frame_event[] = "_flow_frame";
+
+static bool edit_scene(Json *settings, const Json *op)
 {
     const char *tool = js(op, "neutrino_tool");
     if (!strcmp(tool, "scene_material")) {
@@ -299,6 +302,23 @@ bool physics_scene_edit(Json *settings, const Json *op)
         return true;
     }
     if (!room || !read_box(room, &bounds)) return false;
+    if (!strcmp(tool, "scene_flow_reset")) {
+        cJSON_DeleteItemFromObjectCaseSensitive(room, "flowFrame");
+        return true;
+    }
+    if (!strcmp(tool, flow_frame_event)) {
+        const Json *frame = at(op, "frame"), *data = at(frame, "data");
+        FlowConfig config;
+        double elapsed;
+        if (strcmp(js(settings, "active3d"), js(op, "layout")) || number(frame, "version") != 1 ||
+            !room_flow(at(room, "medium"), &bounds, &config) || !config.cfd ||
+            !cJSON_IsString(data) || strlen(data->valuestring) != flow_frame_bytes(config.resolution) ||
+            !physics_scalar(frame, "seconds", 0, 1e12, &elapsed)) return false;
+        Json *copy = cJSON_Duplicate(frame, true);
+        if (!copy) return false;
+        put(room, "flowFrame", copy);
+        return true;
+    }
     if (!strcmp(tool, "scene_sensor")) {
         const char *name = js(op, "name");
         if (!scene_name(name) || (at(op, "off") && !cJSON_IsBool(at(op, "off")))) return false;
@@ -427,6 +447,68 @@ bool physics_scene_edit(Json *settings, const Json *op)
         }
     } else cJSON_AddItemToArray(objects, copy);
     return true;
+}
+
+bool physics_scene_edit(Json *settings, const Json *op)
+{
+    if (!edit_scene(settings, op)) return false;
+    const char *tool = js(op, "neutrino_tool");
+    Json *room = active_room(settings);
+    if (!strcmp(tool, "scene_room")) {
+        const char *name = js(op, "name");
+        room = *name ? scene_object(at(settings, "rooms3d"), name) : at(settings, "room3d");
+    }
+    const bool boundary_edit = !strcmp(tool, "scene_place") || !strcmp(tool, "scene_remove") ||
+        !strcmp(tool, "scene_translate") || !strcmp(tool, "scene_step");
+    if (at(room, "flowFrame") && (!strcmp(tool, "scene_room") || !strcmp(tool, "scene_medium") ||
+        (boundary_edit && cJSON_IsTrue(at(at(room, "medium"), "solid_geometry")))))
+        cJSON_DeleteItemFromObjectCaseSensitive(room, "flowFrame");
+    return true;
+}
+
+static bool flow_step_config(const Json *room, const Json *op, Box *bounds, FlowConfig *config)
+{
+    return read_box(room, bounds) && cJSON_IsObject(at(room, "medium")) &&
+        room_flow(at(room, "medium"), bounds, config) && config->cfd &&
+        physics_scalar(op, "seconds", .000001, 600, &config->seconds);
+}
+
+Json *physics_prepare_flow_step(const Json *settings, const Json *op, Text *out)
+{
+    const Json *room = active_room(settings), *frame = at(room, "flowFrame");
+    Box bounds;
+    FlowConfig config;
+    double elapsed = 0;
+    if (!flow_step_config(room, op, &bounds, &config)) {
+        append(out, "Configure a CFD scene_medium and specify positive seconds before advancing the field.");
+        return nullptr;
+    }
+    if (frame && (number(frame, "version") != 1 || !physics_scalar(frame, "seconds", 0, 1e12, &elapsed) ||
+        elapsed + config.seconds > 1e12 || elapsed + config.seconds <= elapsed)) {
+        append(out, "CFD field time is invalid or cannot represent this increment.");
+        return nullptr;
+    }
+    FlowField field = room_flow_solve(room, &bounds, &config, frame ? js(frame, "data") : nullptr);
+    char *encoded = flow_encode(&field);
+    if (!encoded) {
+        format(out, "CFD step rejected. %s.", field.fallback ? field.fallback : "Cannot serialize the field");
+        flow_release(&field);
+        return nullptr;
+    }
+    Json *result = cJSON_CreateObject(), *saved = cJSON_CreateObject();
+    set(result, "neutrino_tool", flow_frame_event);
+    set(result, "layout", js(settings, "active3d"));
+    integer(saved, "version", 1);
+    put(saved, "seconds", cJSON_CreateNumber(elapsed + config.seconds));
+    set(saved, "data", encoded);
+    free(encoded);
+    put(result, "frame", saved);
+    format(out, "%s CFD field from %.9g to %.9g s · %s · %zu encoded bytes.",
+           frame ? "Advanced saved" : "Initialized and advanced", elapsed, elapsed + config.seconds,
+           field.method, flow_frame_bytes(config.resolution));
+    if (field.fallback) format(out, " %s.", field.fallback);
+    flow_release(&field);
+    return result;
 }
 static double length3(const double v[3])
 {
@@ -1241,7 +1323,16 @@ static const FlowField *scene_field(PhysicsCache *cache, const Json *room, const
     if (cache->room == room && cache->flow.grid) append(out, "Reused CFD field. ");
     else {
         physics_cache_release(cache);
-        cache->flow = room_flow_solve(room, bounds, config);
+        FlowConfig query = *config;
+        const Json *frame = at(room, "flowFrame");
+        if (frame) query.seconds = 0;
+        double elapsed;
+        if (frame && (number(frame, "version") != 1 || !physics_scalar(frame, "seconds", 0, 1e12, &elapsed)))
+            cache->flow = (FlowField){.fallback = "Invalid saved CFD frame metadata"};
+        else {
+            cache->flow = room_flow_solve(room, bounds, &query, frame ? js(frame, "data") : nullptr);
+            if (frame && cache->flow.grid) format(out, "Restored CFD field at %.9g s. ", elapsed);
+        }
         cache->room = room;
     }
     return &cache->flow;
@@ -1283,6 +1374,8 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
         put(page,"min",cJSON_Duplicate(at(room,"min"),true));
         put(page,"max",cJSON_Duplicate(at(room,"max"),true));
         if (at(room,"medium")) put(page,"medium",cJSON_Duplicate(at(room,"medium"),true));
+        if (cJSON_IsNumber(at(at(room, "flowFrame"), "seconds")))
+            put(page, "flow_time_s", cJSON_Duplicate(at(at(room, "flowFrame"), "seconds"), false));
         if (*js(room, "air")) set(page, "air", js(room, "air"));
         if (at(room, "sensors")) put(page, "sensors", cJSON_Duplicate(at(room, "sensors"), true));
         put(page,"objects",entries);
@@ -1327,9 +1420,10 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
         if (!at(room, "medium") || !room_flow(at(room, "medium"), &bounds, &config) ||
             !physics_vector(args, "probe", point) || !strictly_inside(&bounds, point)) return false;
         const FlowField *field = scene_field(cache, room, &bounds, &config, out);
-        if (!field->grid && (config.porous || cJSON_IsTrue(at(at(room, "medium"), "solid_geometry")))) {
+        if (!field->grid && (at(room, "flowFrame") || config.porous ||
+                            cJSON_IsTrue(at(at(room, "medium"), "solid_geometry")))) {
             if (reading) reading->unavailable = true;
-            format(out, "%s unavailable. %s.", config.porous ? "Porous CFD" : "Geometry-aware CFD",
+            format(out, "%s unavailable. %s.", at(room, "flowFrame") ? "Saved CFD" : config.porous ? "Porous CFD" : "Geometry-aware CFD",
                    field->fallback ? field->fallback : "No grid");
         } else {
             for (int axis = 0; axis < 3; ++axis) point[axis] -= bounds.lo[axis];
@@ -1337,6 +1431,7 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
             if (reading) {
                 reading->kind = READING_FLOW;
                 reading->tracer_concentration = concentration;
+                reading->stored_flow = physics_scalar(at(room, "flowFrame"), "seconds", 0, 1e12, &reading->flow_time_s);
                 reading->voxel_flow = field->solid != nullptr;
                 reading->porous_flow = config.porous;
                 reading->porous_speed = field->porous_speed;
@@ -1404,9 +1499,10 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
     if (at(room,"medium") && room_flow(at(room,"medium"),&bounds,&config) &&
         (optical ? config.light_loss : config.sound_loss) > 0) {
         gas = scene_field(cache, room, &bounds, &config, out);
-        if (!gas->grid && (config.porous || cJSON_IsTrue(at(at(room, "medium"), "solid_geometry")))) {
+        if (!gas->grid && (at(room, "flowFrame") || config.porous ||
+                           cJSON_IsTrue(at(at(room, "medium"), "solid_geometry")))) {
             if (reading) reading->unavailable = true;
-            format(out, "%s unavailable. %s.", config.porous ? "Porous CFD" : "Geometry-aware CFD",
+            format(out, "%s unavailable. %s.", at(room, "flowFrame") ? "Saved CFD" : config.porous ? "Porous CFD" : "Geometry-aware CFD",
                    gas->fallback ? gas->fallback : "No grid");
             cJSON_Delete(filtered);
             return true;
@@ -1485,6 +1581,12 @@ PhysicsCost physics_cost(const Json *op, const Json *settings)
     const char *tool = js(op, "neutrino_tool");
     if (!strcmp(tool, "softbody3d")) return softbody_cost(op);
     const Json *room = active_room(settings);
+    if (!strcmp(tool, "scene_flow_step")) {
+        Box bounds;
+        FlowConfig config;
+        return flow_step_config(room, op, &bounds, &config) ? flow_step_cost(&config, at(room, "flowFrame") != nullptr) :
+            (PhysicsCost){0};
+    }
     if (!strcmp(tool, "scene_step")) return rigid_cost(op, room);
     PhysicsCost cost = {0};
     FlowConfig flow;
@@ -1498,8 +1600,10 @@ PhysicsCost physics_cost(const Json *op, const Json *settings)
         Box bounds;
         const Json *medium = at(room, "medium");
         if (medium && read_box(room, &bounds) && room_flow(medium, &bounds, &flow) &&
-            (acoustic_query ? flow.sound_loss > 0 : optical_query ? flow.light_loss > 0 : true))
+            (acoustic_query ? flow.sound_loss > 0 : optical_query ? flow.light_loss > 0 : true)) {
+            if (at(room, "flowFrame")) flow.seconds = 0;
             cost = flow_cost(&flow);
+        }
     }
     const double shapes = cJSON_GetArraySize(at(room, "objects"));
     if (!strcmp(tool, "scene_rays")) {

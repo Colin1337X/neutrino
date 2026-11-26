@@ -1,6 +1,7 @@
 #include "physics_models.h"
 #include "ray.h"
 
+#include <float.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +11,60 @@
 #endif
 
 enum { FLOW_STEPS = 96, PRESSURE_SWEEPS = 32 };
+static const char frame_alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static_assert(sizeof(double) == sizeof(uint64_t) && DBL_MANT_DIG == 53 && DBL_MAX_EXP == 1024);
+
+size_t flow_frame_bytes(int resolution)
+{
+    const size_t n = (size_t)resolution;
+    return (4 * n * n * n * 64 + 5) / 6;
+}
+
+char *flow_encode(const FlowField *field)
+{
+    if (!field->grid) return nullptr;
+    const size_t n = (size_t)field->config.resolution, values = 4 * n * n * n;
+    char *encoded = malloc(flow_frame_bytes(field->config.resolution) + 1);
+    if (!encoded) return nullptr;
+    size_t end = 0;
+    uint32_t buffer = 0;
+    unsigned bits = 0;
+    for (size_t i = 0; i < values; ++i) {
+        uint64_t word;
+        memcpy(&word, &field->grid[i], sizeof word);
+        for (unsigned byte = 0; byte < 64; byte += 8) {
+            buffer = buffer << 8 | (uint8_t)(word >> byte);
+            bits += 8;
+            while (bits >= 6) encoded[end++] = frame_alphabet[(buffer >> (bits -= 6)) & 63];
+        }
+    }
+    if (bits) encoded[end++] = frame_alphabet[(buffer << (6 - bits)) & 63];
+    encoded[end] = 0;
+    return encoded;
+}
+
+static bool flow_decode(FlowField *field, const char *encoded)
+{
+    const size_t n = (size_t)field->config.resolution, values = 4 * n * n * n;
+    if (strlen(encoded) != flow_frame_bytes(field->config.resolution)) return false;
+    uint32_t buffer = 0;
+    unsigned bits = 0;
+    for (size_t i = 0; i < values; ++i) {
+        uint64_t word = 0;
+        for (unsigned byte = 0; byte < 64; byte += 8) {
+            while (bits < 8) {
+                const char *digit = strchr(frame_alphabet, *encoded++);
+                if (!digit || !*digit) return false;
+                buffer = buffer << 6 | (uint32_t)(digit - frame_alphabet);
+                bits += 6;
+            }
+            word |= (uint64_t)((buffer >> (bits -= 8)) & 255) << byte;
+        }
+        memcpy(&field->grid[i], &word, sizeof word);
+        if (!isfinite(field->grid[i])) return false;
+    }
+    return !(buffer & ((1u << bits) - 1));
+}
 
 bool physics_optional(const Json *args, const char *key, double low, double high, double initial, double *value)
 {
@@ -295,14 +350,15 @@ static double flow_drag(const FlowConfig *c)
     return c->porous ? c->viscosity / c->permeability : 0;
 }
 
-static double flow_steps(const FlowConfig *c, double inv[3])
+static double flow_steps(const FlowConfig *c, double inv[3], const double *const peak)
 {
     double inverse2 = 0, max_courant = 0;
     const double drag = flow_drag(c);
     for (int axis=0; axis<3; ++axis) {
         inv[axis] = c->resolution/c->length[axis];
         inverse2 += inv[axis]*inv[axis];
-        max_courant += (fabs(c->wind[axis])+c->vortex)*inv[axis];
+        const double initial = fabs(c->wind[axis]) + c->vortex;
+        max_courant += (peak ? fmax(initial, peak[axis]) : initial)*inv[axis];
         if (c->porous) max_courant += fabs(c->porous_drive[axis])*
             (drag > 0 ? fmin(c->seconds, 1/drag) : c->seconds)*inv[axis];
     }
@@ -314,20 +370,34 @@ PhysicsCost flow_cost(const FlowConfig *c)
     PhysicsCost cost = {.seconds = c->seconds};
     if (!c->cfd) return cost;
     double inv[3];
-    double steps = flow_steps(c, inv);
+    double steps = flow_steps(c, inv, nullptr);
     if (steps > FLOW_STEPS) return cost; /* The solver takes its analytical fallback. */
     if (c->seconds > 0) steps = fmax(1, steps);
     const int n = c->resolution;
     const double cells = n * n * n;
     cost.steps = steps;
     cost.cells = cells;
-    cost.ram = cells * (11 * sizeof(double) + 2);
-    cost.mapped = cells * 11 * sizeof(double);
+    const int layers = c->seconds > 0 ? 11 : 4;
+    cost.ram = cells * (layers * sizeof(double) + 2);
+    cost.mapped = cells * layers * sizeof(double);
     cost.work = cells * (1 + steps * (PRESSURE_SWEEPS + 8));
     return cost;
 }
 
-FlowField flow_solve_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t box_count)
+PhysicsCost flow_step_cost(const FlowConfig *c, bool resumed)
+{
+    PhysicsCost cost = flow_cost(c);
+    if (!cost.cells) return cost;
+    if (resumed) {
+        cost.steps = FLOW_STEPS;
+        cost.work = cost.cells * (1 + FLOW_STEPS * (PRESSURE_SWEEPS + 8));
+    }
+    cost.field_bytes = flow_frame_bytes(c->resolution);
+    cost.ram += 2 * cost.field_bytes;
+    return cost;
+}
+
+FlowField flow_resume_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t box_count, const char *frame)
 {
     FlowField field = {.config = *c, .method = c->porous ? "porous CFD unavailable" : "reduced Gaussian transport",
                        .memory = c->porous ? "none" : "analytic"};
@@ -335,15 +405,21 @@ FlowField flow_solve_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t
     const int n = c->resolution;
     const size_t cells = (size_t)n*n*n;
     double inv[3];
-    const double steps_needed = fmax(1, flow_steps(c, inv));
+    double steps_needed = fmax(1, flow_steps(c, inv, nullptr));
     if (steps_needed > FLOW_STEPS) {
         field.fallback = "CFD timestep budget exceeded";
         return field;
     }
-    field.grid = physics_memory_alloc(11*cells*sizeof(double), c->mapped, &field.mapped, &field.memory);
+    const int layers = c->seconds > 0 ? 11 : 4;
+    field.grid = physics_memory_alloc(layers*cells*sizeof(double), c->mapped, &field.mapped, &field.memory);
     if (!field.grid) {
         field.fallback = "CFD memory allocation unavailable";
         field.memory = "analytic";
+        return field;
+    }
+    if (frame && !flow_decode(&field, frame)) {
+        flow_release(&field);
+        field.fallback = "Invalid saved CFD frame";
         return field;
     }
     if (box_count) {
@@ -363,8 +439,12 @@ FlowField flow_solve_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t
         return field;
     }
     double *velocity[3] = {field.grid+cells, field.grid+2*cells,field.grid+3*cells};
-    double *next[3] = {field.grid+4*cells,field.grid+5*cells,field.grid+6*cells};
-    double *dye_next=field.grid+7*cells, *rhs=field.grid+8*cells, *p=field.grid+9*cells, *q=field.grid+10*cells;
+    double *next[3], *dye_next = nullptr, *rhs = nullptr, *p = nullptr, *q = nullptr;
+    if (c->seconds > 0) {
+        for (int axis = 0; axis < 3; ++axis) next[axis] = field.grid + (4 + axis) * cells;
+        dye_next=field.grid+7*cells; rhs=field.grid+8*cells; p=field.grid+9*cells; q=field.grid+10*cells;
+    }
+    double peak[3] = {0};
     size_t fluid_cells = 0;
     for (int z=0; z<n; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
         size_t i=index3(n,x,y,z);
@@ -384,6 +464,10 @@ FlowField flow_solve_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t
             field.porous_cells += inside;
         }
         ++fluid_cells;
+        if (frame) {
+            for (int axis = 0; axis < 3; ++axis) peak[axis] = fmax(peak[axis], fabs(velocity[axis][i]));
+            continue;
+        }
         const double tau = 6.283185307179586;
         velocity[0][i] = c->wind[0] + c->vortex*sin(tau*(y+.5)/n);
         velocity[1][i] = c->wind[1] + c->vortex*sin(tau*(z+.5)/n);
@@ -398,6 +482,15 @@ FlowField flow_solve_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t
             "CFD porous region has no fluid cells at this resolution";
         field.memory = c->porous ? "none" : "analytic";
         return field;
+    }
+    if (frame && c->seconds > 0) {
+        steps_needed = fmax(1, flow_steps(c, inv, peak));
+        if (steps_needed > FLOW_STEPS) {
+            free(porous);
+            flow_release(&field);
+            field.fallback = "Saved CFD velocity exceeds the timestep budget";
+            return field;
+        }
     }
     close_faces(n, field.solid, velocity);
     const double dt=c->seconds/steps_needed;
@@ -444,6 +537,9 @@ FlowField flow_solve_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t
         field.fallback = "CFD produced a non-finite state";
         field.memory = "analytic";
     } else {
+        for (int axis = 0; axis < 3; ++axis)
+            if (velocity[axis] != field.grid + (axis + 1) * cells)
+                memcpy(field.grid + (axis + 1) * cells, velocity[axis], cells * sizeof(double));
         field.method = used_gpu ? "3D incompressible Navier-Stokes, OpenCL pressure projection" :
                                   "3D incompressible Navier-Stokes, CPU";
         if (field.solid) {
@@ -453,6 +549,11 @@ FlowField flow_solve_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t
             field.fallback = "OpenCL pressure unavailable; continued on pageable CPU memory";
     }
     return field;
+}
+
+FlowField flow_solve_domain(const FlowConfig *config, const PhysicsBox *solids, size_t count)
+{
+    return flow_resume_domain(config, solids, count, nullptr);
 }
 
 FlowField flow_solve(const FlowConfig *config)

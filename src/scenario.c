@@ -68,7 +68,7 @@ bool simulation_plan_parse(const Json *plan, SimulationPlan *parsed)
 
 typedef enum { ENTITY_EXISTS, ENTITY_OVERLAPS, ENTITY_MOVED, ENTITY_ROTATED, ENTITY_CONTACTS,
                ENTITY_FRACTURED, FLUID_RELEASED, FLUID_DEPOSITED, FLUID_SURFACE, FLUID_POOL, FLUID_DEPTH,
-               FLUID_DRAINED, FLUID_LEVEL, FLOW_TRACER, FLOW_POROUS_SPEED, MASS_TRANSFERRED, MASS_FINAL,
+               FLUID_DRAINED, FLUID_LEVEL, FLOW_TRACER, FLOW_POROUS_SPEED, FLOW_TIME, MASS_TRANSFERRED, MASS_FINAL,
                SIGNAL_REACHES, SIGNAL_ARRIVES, SIGNAL_POWER, SIGNAL_DIRECT_BLOCKED, SIGNAL_RECURSIVE } Predicate;
 static const struct { const char *name; Predicate kind; } predicates[] = {
     {"entity.exists", ENTITY_EXISTS}, {"entity.overlaps", ENTITY_OVERLAPS},
@@ -80,6 +80,7 @@ static const struct { const char *name; Predicate kind; } predicates[] = {
     {"fluid.volume_exceeds", FLUID_DRAINED}, {"fluid.level_exceeds", FLUID_LEVEL},
     {"fluid.concentration_exceeds", FLOW_TRACER},
     {"flow.porous_speed_exceeds", FLOW_POROUS_SPEED},
+    {"flow.time_exceeds", FLOW_TIME},
     {"mass_transfer.transferred_exceeds", MASS_TRANSFERRED}, {"mass_transfer.final_exceeds", MASS_FINAL},
     {"signal.reaches_receiver", SIGNAL_REACHES}, {"signal.arrival_before", SIGNAL_ARRIVES},
     {"signal.power_exceeds", SIGNAL_POWER}, {"signal.direct_blocked", SIGNAL_DIRECT_BLOCKED},
@@ -217,11 +218,18 @@ static const char *evaluate(const Json *query, const Json *settings, const Physi
         unit = "m/s";
         put(evidence, "pore_volume_m3", cJSON_CreateNumber(reading->pore_volume));
         set(evidence, "solver", "incompressible CFD with Darcy drag");
+    } else if (kind == FLOW_TIME) {
+        if (reading->kind != READING_FLOW || !reading->stored_flow) return "INSUFFICIENT_DATA";
+        value = reading->flow_time_s;
+        unit = "s";
+        set(evidence, "solver", "saved CFD field");
     } else if (kind == FLOW_TRACER) {
         if (reading->kind != READING_FLOW) return "INSUFFICIENT_DATA";
         value = reading->tracer_concentration;
         unit = "relative tracer";
         set(evidence, "solver", reading->voxel_flow ? "voxel-obstacle CFD" : "room medium");
+        if (reading->stored_flow)
+            put(evidence, "flow_time_s", cJSON_CreateNumber(reading->flow_time_s));
     } else if (kind == FLUID_DRAINED || kind == FLUID_LEVEL) {
         if (reading->kind != READING_FLUID) return "INSUFFICIENT_DATA";
         value = kind == FLUID_DRAINED ? reading->drained_l : reading->level_m;

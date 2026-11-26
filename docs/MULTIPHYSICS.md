@@ -35,7 +35,15 @@ Use `/sim checkpoint 32` to set the snapshot interval in accepted simulation eve
 
 `/sim budget` shows the current limits. Set an individual limit with a command such as `/sim budget rays 8192`, or restore defaults with `/sim budget reset`. The limits apply to plans built by the narrator and plans submitted by the player. Measurements include cumulative estimated work, solver steps, simulated duration, rays, CFD cells, soft-body nodes and report bytes, plus estimated peak working and mapped memory for supported solvers. The executor checks modeled work before dispatch and discards an ordered plan that exceeds its limits. Estimates exclude process-wide allocations and GPU driver memory.
 
-Consecutive flow, light and acoustic queries in the same ordered plan can reuse a solved CFD field. The trace identifies reuse. A scene edit drops the cached grid, and the plan releases it when it finishes. The persisted room stores the flow configuration. A new plan derives its own grid from that configuration.
+Consecutive flow, light and acoustic queries in the same ordered plan can reuse a decoded or freshly solved CFD field. The trace identifies reuse. A scene edit drops the working cache, and the plan releases it when it finishes.
+
+### Persistent CFD fields
+
+Configure a CFD medium with `scene_medium` and advance it with `scene_flow_step`, for example `{"neutrino_tool":"scene_flow_step","seconds":0.25}`. The first advance starts at the medium's initial conditions at zero seconds. Each later advance starts with the saved tracer and velocity grid for that layout on the active branch. `scene_flow`, acoustic attenuation, and optical extinction read the latest grid without advancing it. The story clock and field clock advance independently.
+
+Before a field has been saved, queries still use the configured `scene_medium.seconds` lookahead. Use `scene_flow_reset` to return to that behavior. Replacing the medium or editing the room bounds resets the saved field. When voxel obstacles are enabled, changes to object geometry also reset the field. Switching layouts preserves each layout's field.
+
+Hypothetical or rejected plans leave the saved field unchanged. Accepted frames persist through a restart and follow rewinds and sibling branches. `scene_inspect` reports `flow_time_s`, and `/trace` lists the advance interval and solver backend. Use `/sim budget field_bytes VALUE` to bound encoded frame data per plan. The default is 8 MiB. Each accepted advance stores a lossless binary64 frame in the workspace event log. A 24³ frame adds about 576 KiB before JSON metadata. Long runs grow the log, and a frame larger than the general checkpoint limit restores through event replay.
 
 ### Character conversations
 
@@ -83,6 +91,7 @@ Emission checks the configured receivers belonging to characters still in the cu
 | signal.direct_blocked | step of a sound or light query. Tests geometric blockage of the direct path |
 | signal.recursive_reaches_receiver | step of a sound or light query. Tests whether any received path uses at least two reflections |
 | flow.porous_speed_exceeds | step with scene_flow, threshold in m/s. Reports mean speed across resolved porous cells and the modeled pore volume |
+| flow.time_exceeds | step with scene_flow, threshold in seconds. Reports elapsed time in a saved field |
 | mass_transfer.transferred_exceeds | step with a mass-transfer tool, threshold in kg. Positive is uptake, negative is release |
 | mass_transfer.final_exceeds | step with a mass-transfer tool, threshold in kg. Reports final target mass |
 

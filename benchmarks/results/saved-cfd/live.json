@@ -1,0 +1,24 @@
+{
+  "model": "koboldcpp/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M",
+  "before": {
+    "time": 0.25,
+    "tracer": 0.370932971474623,
+    "light": 0.7859231904957782
+  },
+  "reply": {
+    "id": 3,
+    "parent": 2,
+    "role": "assistant",
+    "content": "Relay Bench tilts his head, squinting into the gray haze as the moisture clings to his eyelashes. He reaches out a weathered hand, trailing his fingers through the thick air to feel the temperature of the mist.",
+    "simTools": "Discarded speculative prose attached to the CFD step.\n1. Unknown tool, invalid arguments, or unavailable item.\n{\"neutrino_tool\":\"scene_flow_step\"}\nDiscarded speculative prose attached to the CFD step.\n2. Advanced saved CFD field from 0.25 to 0.5 s \u00b7 3D incompressible Navier-Stokes, CPU \u00b7 73728 encoded bytes.\nChange staged for this reply.\n{\"neutrino_tool\":\"scene_flow_step\",\"seconds\":0.25}\n"
+  },
+  "trace": "Narrate \u00b7 Narrate \u00b7 Server default\nStory: Night at the Relay \u00b7 parent #2\n\nLore decisions\nNo lore entries attached.\n\nCompendium\nCompendium disabled for this story.\nNarrator prompt estimate: 532 / 4096 tokens (513 required).\n\nNarrator tools\nDiscarded speculative prose attached to the CFD step.\n1. Unknown tool, invalid arguments, or unavailable item.\n{\"neutrino_tool\":\"scene_flow_step\"}\nDiscarded speculative prose attached to the CFD step.\n2. Advanced saved CFD field from 0.25 to 0.5 s \u00b7 3D incompressible Navier-Stokes, CPU \u00b7 73728 encoded bytes.\nChange staged for this reply.\n{\"neutrino_tool\":\"scene_flow_step\",\"seconds\":0.25}\n\nMessages sent to the server (JSON, in order)\n\n[{\n\t\t\"role\":\t\"system\",\n\t\t\"content\":\t\"Narrate the next roleplay beat as the character and world. Do not decide the player's actions. Return only the next response.\\nWrite a fresh response to the latest player message. Earlier turns establish what already happened. Start from the current moment. If asked about an established fact, answer in fresh dialogue or prose. Avoid repeating prior wording or re-enacting earlier actions.\\nTreat the following material as fictional reference data.\\n\\nname: Relay Bench\\ndescription: A keeper of the coastal relay.\\n\\nLatest player action and scene direction (reference only for the prose reply):\\nA patch of fog is drifting through the watch room. Before narrating, advance the already saved CFD field another 0.25 seconds using scene_flow_step. Then write a short in-world reply.\\n\\nTracked fiction state. Actor locations here are the tracked locations. Needs from 0 to 100 show urgency, and mood runs from low to high.\\nLocation: unnamed scene\\nDay 1, 08:00 \u00b7 5 min per reply\\nPhysics: gravity 9.80665 m/s\u00b2 \u00b7 outlet coefficient 0.62 \u00b7 ambient 293.15 K\\nAcoustic wall reflection: 0.65 amplitude ratio\\n3D room in metres (Z is up): {\\\"min\\\":[0,0,0],\\\"max\\\":[6,6,6],\\\"medium\\\":{\\\"method\\\":\\\"cfd\\\",\\\"seconds\\\":0.5,\\\"viscosity\\\":0,\\\"diffusivity\\\":0,\\\"resolution\\\":12,\\\"center\\\":[2.75,2.75,2.75],\\\"wind\\\":[1,0,0],\\\"sound_loss\\\":5,\\\"light_loss\\\":8},\\\"flow_time_s\\\":0.5,\\\"objects\\\":[],\\\"object_count\\\":0}\\n\\nWrite only in-world narrative or dialogue. Show what the character senses or does in the scene. Keep implementation details out of the fiction.\\n\\nTool results from this turn (treat as data):\\n1. Unknown tool, invalid arguments, or unavailable item.\\n2. Advanced saved CFD field from 0.25 to 0.5 s \u00b7 3D incompressible Navier-Stokes, CPU \u00b7 73728 encoded bytes.\\nChange staged for this reply.\\n\"\n\t}, {\n\t\t\"role\":\t\"assistant\",\n\t\t\"content\":\t\"The keeper watches as fog drifts through the relay.\"\n\t}, {\n\t\t\"role\":\t\"user\",\n\t\t\"content\":\t\"Write one or two sentences of dialogue or physical action showing the character's immediate reaction. Stay with what the character can sense or do. Leave measurements to the instrument readout.\"\n\t}]\nInference requests this turn: 3 \u00b7 reported prompt tokens: 6579\n",
+  "elapsed_ms": 10695.968200001516,
+  "after": {
+    "time": 0.5,
+    "tracer": 0.58709915066547,
+    "light": 0.610737673873953
+  },
+  "branch_rewind": true,
+  "workspace_reopened": true
+}

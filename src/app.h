@@ -39,8 +39,9 @@ typedef struct {
     int optical_first_bounces;
     bool recursive_limited, optical_direct_blocked;
     double tracer_concentration;
+    double flow_time_s;
     double porous_speed, pore_volume;
-    bool voxel_flow, porous_flow;
+    bool voxel_flow, porous_flow, stored_flow;
     const char *transfer_method;
     double transferred_kg, final_kg, equilibrium_kg, gas_kg;
     bool closed_transfer;
