@@ -244,7 +244,7 @@ static bool softbody(const Json *args, double gravity, Text *out, bool *unavaila
         SoftIntegration job = {.nodes=nodes, .shape=shape, .spacing=spacing, .initial=initial, .load=load,
             .acceleration=acceleration, .fixed=fixed, .top=top, .top_count=top_count,
             .dt=dt, .decay=decay, .node_mass=node_mass};
-        Parallel *workers = parallel_open(count, 4096);
+        Parallel *workers = parallel_open(PARALLEL_SOFTBODY,count,count-fixed);
         parallel_run(workers,count,soft_initialize,&job);
         for (int step = 0; step < steps; ++step) {
             parallel_run(workers,count-fixed,soft_predict,&job);

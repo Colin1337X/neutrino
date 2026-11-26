@@ -1192,7 +1192,10 @@ FlowField flow_resume_domain(const FlowConfig *c, const PhysicsBox *boxes, size_
             return field;
         }
     }
-    if (c->seconds > 0) domain.workers = parallel_open(cells, 1728);
+    if (c->seconds > 0) {
+        domain.workers = parallel_open(PARALLEL_CFD,cells,(size_t)n);
+        field.cpu_workers = parallel_count(domain.workers);
+    }
     close_faces(&domain, velocity);
     const double dt=c->seconds/steps_needed;
     const double drag = flow_drag(c);

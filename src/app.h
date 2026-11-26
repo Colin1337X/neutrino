@@ -34,6 +34,7 @@ typedef struct {
     struct { bool blocked, faded; int bounces; double delay_ms, level_db; }
         arrival[PHYSICS_ACOUSTIC_PATHS + PHYSICS_RECURSIVE_ARRIVALS];
     int arrivals, recursive_arrivals;
+    unsigned recursive_workers;
     bool material_acoustics, unavailable;
     double optical_power, optical_first_ns, optical_first_power;
     int optical_first_bounces;

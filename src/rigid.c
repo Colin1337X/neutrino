@@ -506,7 +506,8 @@ static bool step_room(Json *room, const Json *materials, const PhysicsBox *bound
     double start = stored(room, "rigid_time_s");
     int steps = (int)ceil(seconds * HZ);
     double dt = seconds / steps;
-    Parallel *workers = valid && any ? parallel_open((size_t)count, 24) : nullptr;
+    const size_t pairs = count > 1 ? (size_t)count*(count-1)/2 : 0;
+    Parallel *workers = valid && any ? parallel_open(PARALLEL_COLLISIONS,pairs,(size_t)count) : nullptr;
     Impact *candidates = workers ? malloc(sizeof *candidates * MAX_BODIES * MAX_BODIES) : nullptr;
     for (int tick = 0; valid && any && tick < steps; ++tick) {
         double now = start + tick*dt;

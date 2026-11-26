@@ -229,7 +229,7 @@ bool runoff_advance(Runoff *grid, SpillSet *spills, double dt)
     if (!grid->scratch) {
         grid->scratch = calloc((size_t)grid->count*5, sizeof *grid->scratch);
         if (!grid->scratch) return false;
-        grid->workers = parallel_open((size_t)grid->count, 1024);
+        grid->workers = parallel_open(PARALLEL_RUNOFF,(uint64_t)grid->count*spills->count,(size_t)grid->count);
     }
     int steps = (int)ceil(dt/grid->stable_dt);
     for (int i = 0; i < steps; ++i) relax(grid, spills, dt/steps);

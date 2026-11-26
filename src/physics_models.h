@@ -56,6 +56,7 @@ typedef struct {
     unsigned char *solid;
     double divergence, speed, tracer_mean, porous_speed, pore_volume;
     double inflow_m3_s, outflow_m3_s, backflow_m3_s, tracer_in, tracer_out, backflow_tracer_in;
+    unsigned cpu_workers;
     size_t porous_cells, unresolved_boxes;
     const char *method;
     const char *memory;

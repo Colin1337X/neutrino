@@ -1,3 +1,6 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #include "parallel.h"
 
 #include <stdatomic.h>
@@ -21,6 +24,9 @@ static void wait_event(Event *event, Lock *mutex)
 }
 #else
 #include <pthread.h>
+#ifdef __linux__
+#include <sched.h>
+#endif
 #include <unistd.h>
 typedef pthread_t Thread;
 typedef pthread_mutex_t Lock;
@@ -33,7 +39,19 @@ typedef pthread_cond_t Event;
 #define signal_event pthread_cond_broadcast
 #endif
 
-enum { MAX_WORKERS = 16, DEFAULT_LIMIT = 4 };
+enum { MAX_WORKERS = 16 };
+
+static const struct {
+    unsigned work_per_lane, automatic_limit;
+    bool short_batch;
+} policies[] = {
+    [PARALLEL_CFD] = {3456, 4, false},
+    [PARALLEL_RAYCAST] = {32768, 16, true},
+    [PARALLEL_REFLECTIONS] = {4096, 4, true},
+    [PARALLEL_COLLISIONS] = {576, 8, false},
+    [PARALLEL_RUNOFF] = {2048, 4, false},
+    [PARALLEL_SOFTBODY] = {8192, 8, false},
+};
 
 typedef struct {
     Parallel *group;
@@ -96,35 +114,57 @@ static void CALLBACK shared_worker(PTP_CALLBACK_INSTANCE instance, void *argumen
 }
 #endif
 
-static unsigned worker_limit(void)
+static unsigned available_cpus(void)
 {
 #ifdef _WIN32
-    unsigned available = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    DWORD_PTR allowed, system;
+    if (GetProcessAffinityMask(GetCurrentProcess(),&allowed,&system) && allowed) {
+        unsigned count = 0;
+        for (; allowed; allowed &= allowed-1) ++count;
+        return count;
+    }
+    const unsigned count = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    return count ? count : 1;
 #else
-    const long online = sysconf(_SC_NPROCESSORS_ONLN);
-    unsigned available = online > 0 ? (unsigned)online : 1;
+#ifdef __linux__
+    cpu_set_t allowed;
+    if (!sched_getaffinity(0,sizeof allowed,&allowed)) {
+        const int count = CPU_COUNT(&allowed);
+        if (count > 0) return (unsigned)count;
+    }
 #endif
+    const long online = sysconf(_SC_NPROCESSORS_ONLN);
+    return online > 0 ? (unsigned)online : 1;
+#endif
+}
+
+static unsigned worker_limit(ParallelWorkload workload, uint64_t work, size_t units)
+{
     const char *setting = getenv("NEUTRINO_PHYSICS_WORKERS");
     if (setting && *setting) {
         char *end;
-        unsigned long requested = strtoul(setting, &end, 10);
-        if (!*end && requested > 0 && requested <= MAX_WORKERS) return (unsigned)requested;
+        const unsigned long requested = strtoul(setting,&end,10);
+        if (!*end && requested > 0 && requested <= MAX_WORKERS)
+            return requested < units ? (unsigned)requested : (unsigned)units;
     }
-    return available < DEFAULT_LIMIT ? available : DEFAULT_LIMIT;
+    uint64_t lanes = work/policies[workload].work_per_lane;
+    if (lanes > policies[workload].automatic_limit) lanes = policies[workload].automatic_limit;
+    if (lanes > units) lanes = units;
+    if (lanes < 2) return 1;
+    const unsigned cpus = available_cpus();
+    return lanes < cpus ? (unsigned)lanes : cpus;
 }
 
-static Parallel *open_group(size_t work, size_t minimum_per_worker, bool shared)
+Parallel *parallel_open(ParallelWorkload workload, uint64_t work, size_t units)
 {
-    size_t lanes = work / minimum_per_worker;
-    if (lanes < 2) return nullptr;
-    const unsigned limit = worker_limit();
-    if (lanes > limit) lanes = limit;
+    const unsigned lanes = worker_limit(workload,work,units);
     if (lanes < 2) return nullptr;
     Parallel *group = calloc(1, sizeof *group);
     if (!group) return nullptr;
 #ifdef _WIN32
-    if (shared) {
-        group->lanes = (unsigned)lanes;
+    if (policies[workload].short_batch) {
+        group->lanes = lanes;
+        atomic_init(&group->next_lane,1);
         group->work = CreateThreadpoolWork(shared_worker,group,nullptr);
         if (group->work) return group;
         free(group);
@@ -134,7 +174,6 @@ static Parallel *open_group(size_t work, size_t minimum_per_worker, bool shared)
     InitializeConditionVariable(&group->changed);
     InitializeConditionVariable(&group->finished);
 #else
-    (void)shared;
     if (pthread_mutex_init(&group->mutex, nullptr)) { free(group); return nullptr; }
     if (pthread_cond_init(&group->changed, nullptr)) {
         pthread_mutex_destroy(&group->mutex);
@@ -164,14 +203,9 @@ static Parallel *open_group(size_t work, size_t minimum_per_worker, bool shared)
     return nullptr;
 }
 
-Parallel *parallel_open(size_t work, size_t minimum_per_worker)
+unsigned parallel_count(const Parallel *group)
 {
-    return open_group(work,minimum_per_worker,false);
-}
-
-Parallel *parallel_open_batch(size_t work, size_t minimum_per_worker)
-{
-    return open_group(work,minimum_per_worker,true);
+    return group ? group->lanes : 1;
 }
 
 void parallel_run(Parallel *group, size_t count, ParallelRange range, void *context)

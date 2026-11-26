@@ -755,8 +755,7 @@ static bool scene_rays(const Json *args, const Json *scene, const Box *bounds,
     const int box_count = cJSON_GetArraySize(objects);
     const Json *first_object = objects ? objects->child : nullptr;
     if (selected == BACKEND_CPU && box_count > 0) {
-        const size_t minimum = (32768 + (size_t)box_count - 1) / (size_t)box_count;
-        Parallel *workers = parallel_open_batch((size_t)count, minimum > 256 ? minimum : 256);
+        Parallel *workers = parallel_open(PARALLEL_RAYCAST,(uint64_t)count*box_count,(size_t)count);
         if (workers) {
             float (*boxes)[6] = calloc((size_t)box_count, sizeof *boxes);
             if (boxes) {
@@ -1018,7 +1017,7 @@ static void record_echo(ReflectionSearch *search, double delay, double level, in
     r->arrival[slot].level_db = level;
 }
 
-enum { REFLECTION_PARALLEL_MIN = 4096, REFLECTION_TILE = 256, INLINE_REFLECTIONS = 4 };
+enum { REFLECTION_TILE = 256, INLINE_REFLECTIONS = 4 };
 
 typedef struct {
     double distance, level;
@@ -1276,12 +1275,15 @@ static void recursive_reflections(ReflectionSearch *search, const double source[
         work += combinations;
     }
     if (work > REFLECTION_CANDIDATE_LIMIT) work = REFLECTION_CANDIDATE_LIMIT;
-    Parallel *workers = work >= REFLECTION_PARALLEL_MIN ? parallel_open_batch(work,1024) : nullptr;
+    const uint64_t cost = work*(search->field_loss > 0 ? 2u : 1u);
+    Parallel *workers = parallel_open(PARALLEL_REFLECTIONS,cost,(work+REFLECTION_TILE-1)/REFLECTION_TILE);
     const bool completed = workers && find_parallel_reflections(search,workers);
+    const unsigned used_workers = completed ? parallel_count(workers) : 1;
     parallel_close(workers);
     if (!completed) for (int target = 2; target <= search->max_depth && !search->limited; ++target)
         find_reflections(search,0,target,0);
     if (search->reading) {
+        search->reading->recursive_workers = used_workers;
         search->reading->recursive_arrivals = search->received;
         search->reading->recursive_limited = search->limited;
     }

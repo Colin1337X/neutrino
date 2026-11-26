@@ -764,7 +764,7 @@ static int propagation_timing(bool dense, bool proof)
             valid = rigid_actions(settings, str(&out));
         }
     }
-    if (!proof) puts("signal,depth,repetition,batches,mean_us,received_recursive_paths");
+    if (!proof) puts("signal,depth,repetition,batches,mean_us,received_recursive_paths,workers");
     for (int optical = 0; valid && optical < 2; ++optical) {
         const char *tool = optical ? "scene_light" : "scene_acoustic";
         for (int depth = dense ? 4 : 0; valid && depth <= 4; ++depth) {
@@ -779,8 +779,8 @@ static int propagation_timing(bool dense, bool proof)
                 }
                 const double end = benchmark_seconds();
                 if (valid && proof) print_propagation(tool,&reading,&out);
-                if (valid && rep) printf("%s,%d,%d,%d,%.6f,%d\n", tool, depth, rep, batches,
-                    1e6 * (end-start)/batches, reading.recursive_arrivals);
+                if (valid && rep) printf("%s,%d,%d,%d,%.6f,%d,%u\n", tool, depth, rep, batches,
+                    1e6 * (end-start)/batches, reading.recursive_arrivals, reading.recursive_workers);
             }
         }
     }
@@ -1476,7 +1476,7 @@ static int pressure_timing(bool prescribed)
 {
     const double length[] = {4,3,2};
     const int sizes[] = {8,12,24};
-    puts("resolution,exhaust,repetition,batches,mean_ms,inlet_m3_s,outlet_m3_s,backflow_m3_s,tracer_out,divergence");
+    puts("resolution,exhaust,repetition,batches,mean_ms,inlet_m3_s,outlet_m3_s,backflow_m3_s,tracer_out,divergence,workers");
     Json *args = cJSON_Parse(ventilated_room);
     integer(args, "seconds", 1);
     Json *exhaust = at(at(args, "boundaries"), "x_max");
@@ -1493,6 +1493,7 @@ static int pressure_timing(bool prescribed)
             for (int rep = 0; ok && rep <= 5; ++rep) {
                 const int batches = sizes[i] == 24 ? 2 : 16;
                 double tracer = 0, divergence = 0, in = 0, out = 0, backflow = 0;
+                unsigned workers = 0;
                 const double start = benchmark_seconds();
                 for (int j = 0; ok && j < batches; ++j) {
                     FlowField f = flow_solve(&c);
@@ -1502,12 +1503,13 @@ static int pressure_timing(bool prescribed)
                     tracer = f.tracer_out;
                     divergence = f.divergence;
                     in = f.inflow_m3_s; out = f.outflow_m3_s; backflow = f.backflow_m3_s;
+                    workers = f.cpu_workers;
                     flow_release(&f);
                 }
                 const double elapsed = 1000.0*(benchmark_seconds()-start);
-                if (ok && rep) printf("%d,%s,%d,%d,%.6f,%.9g,%.9g,%.9g,%.9g,%.9g\n",
+                if (ok && rep) printf("%d,%s,%d,%d,%.6f,%.9g,%.9g,%.9g,%.9g,%.9g,%u\n",
                     sizes[i], pressure ? "pressure" : "prescribed", rep,batches,
-                    elapsed/batches,in,out,backflow,tracer,divergence);
+                    elapsed/batches,in,out,backflow,tracer,divergence,workers);
             }
         }
     }
