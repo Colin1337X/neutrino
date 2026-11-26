@@ -276,8 +276,13 @@ static bool rigid_branch_replay(void)
     const char *stage =
         "{\"neutrino_tool\":\"sim_plan\",\"name\":\"drop\",\"mode\":\"stage\",\"actions\":["
         "{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[8,6,4]},"
-        "{\"neutrino_tool\":\"scene_place\",\"name\":\"box\",\"kind\":\"object\",\"min\":[1,1,1],\"max\":[2,2,2]},"
-        "{\"neutrino_tool\":\"scene_body\",\"name\":\"box\",\"mass_kg\":1},"
+        "{\"neutrino_tool\":\"scene_material\",\"name\":\"ceramic\",\"mechanical\":{\"fracture_j\":1}},"
+        "{\"neutrino_tool\":\"scene_place\",\"name\":\"box\",\"kind\":\"object\",\"min\":[1,1,1],\"max\":[2,2,2],\"material_id\":\"ceramic\"},"
+        "{\"neutrino_tool\":\"scene_body\",\"name\":\"box\",\"mass_kg\":1,\"liquid_l\":0.5},"
+        "{\"neutrino_tool\":\"scene_runoff\",\"min_xy\":[0,0],\"max_xy\":[8,6],\"cells\":[8,6]},"
+        "{\"neutrino_tool\":\"scene_place\",\"name\":\"rotor\",\"kind\":\"object\",\"min\":[4,3,2],\"max\":[5,4,3]},"
+        "{\"neutrino_tool\":\"scene_body\",\"name\":\"rotor\",\"mass_kg\":2},"
+        "{\"neutrino_tool\":\"scene_impulse\",\"name\":\"rotor\",\"offset_m\":[0.5,0,0],\"impulse_ns\":[0,0.25,0]},"
         "{\"neutrino_tool\":\"scene_step\",\"seconds\":0.5}],"
         "\"queries\":[{\"id\":\"landed\",\"predicate\":\"entity.contacts\",\"entity\":\"box\",\"target\":\"@room\"}]}";
     const char *inspect =
@@ -285,15 +290,28 @@ static bool rigid_branch_replay(void)
         "\"actions\":[{\"neutrino_tool\":\"scene_catalog\"}],"
         "\"queries\":[{\"id\":\"landed\",\"predicate\":\"entity.contacts\",\"entity\":\"box\",\"target\":\"@room\"}]}";
     Workspace ws = {.root = cJSON_CreateObject()};
-    Preview placed = {.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    Preview placed = {.story = cJSON_Parse("{\"simEnabled\":true,\"simCheckpointInterval\":1,\"nodes\":[]}")};
     bool ok = simulation_tool_reply(&placed, stage) == SIM_REGENERATE &&
-        cJSON_GetArraySize(placed.tool_pending) == 4 && strstr(str(&placed.tool_feedback), "\"result\":\"TRUE\"");
+        cJSON_GetArraySize(placed.tool_pending) == 9 && strstr(str(&placed.tool_feedback), "\"result\":\"TRUE\"") &&
+        !at(placed.story, "simCheckpoints") && !at(placed.story, "simLog");
     int accepted = story_push(&ws, placed.story, 0, "assistant", "The box lands.");
-    int sibling = story_push(&ws, placed.story, 0, "assistant", "The room stays empty.");
     App app = {0};
     simulation_commit(&app, &placed, accepted);
+    ok &= cJSON_GetArraySize(at(at(placed.story, "simCheckpoints"), "entries")) == 1;
+    int sibling = story_push(&ws, placed.story, 0, "assistant", "The room stays empty.");
     char *serialized = cJSON_PrintUnformatted(placed.story);
     Preview replay = {.story = cJSON_Parse(serialized), .parent = accepted};
+    Json *restored = simulation_state(replay.story, accepted);
+    Json *replay_only = cJSON_Duplicate(replay.story, true);
+    cJSON_DeleteItemFromObjectCaseSensitive(replay_only, "simCheckpoints");
+    Json *reconstructed = simulation_state(replay_only, accepted);
+    const Json *physics = at(restored, "physics");
+    ok &= cJSON_Compare(restored, reconstructed, true) &&
+        cJSON_IsTrue(at(physics_scene_body(physics, "box"), "fractured")) &&
+        rigid_value(physics_scene_body(physics, "rotor"), "rotation_rad") > 0;
+    cJSON_Delete(restored);
+    cJSON_Delete(reconstructed);
+    cJSON_Delete(replay_only);
     ok &= simulation_tool_reply(&replay, inspect) == SIM_REGENERATE &&
         strstr(str(&replay.tool_feedback), "\"result\":\"TRUE\"");
     free_protocol(&replay);
@@ -305,6 +323,261 @@ static bool rigid_branch_replay(void)
     cJSON_Delete(ws.root);
     free_protocol(&placed);
     return ok;
+}
+
+static bool checkpoint_order_and_siblings(void)
+{
+    App app = {.roleplay = true, .story = cJSON_Parse("{\"simCheckpointInterval\":1,\"nodes\":[]}")};
+    int shared = story_push(&app.ws, app.story, 0, "assistant", "An empty room.");
+    simulation_command(&app, "time", "set 1 00:00");
+    int left = story_push(&app.ws, app.story, shared, "assistant", "The first branch.");
+    simulation_command(&app, "time", "advance 10");
+    int right = story_push(&app.ws, app.story, shared, "assistant", "The other branch.");
+    simulation_command(&app, "time", "advance 20");
+    integer(app.story, "head", shared);
+    simulation_command(&app, "time", "set 1 01:00");
+    integer(app.story, "head", left);
+    simulation_command(&app, "time", "advance 1");
+    int nested = story_push(&app.ws, app.story, left, "assistant", "A nested branch.");
+    simulation_command(&app, "time", "advance 2");
+
+    const int heads[] = {shared, left, right, nested};
+    const int clocks[] = {60, 61, 60, 63};
+    bool ok = cJSON_GetArraySize(at(at(app.story, "simCheckpoints"), "entries")) == 4;
+    for (size_t i = 0; i < sizeof heads / sizeof *heads; ++i) {
+        Json *cached = simulation_state(app.story, heads[i]);
+        integer(app.story, "simCheckpointInterval", 0);
+        Json *full = simulation_state(app.story, heads[i]);
+        integer(app.story, "simCheckpointInterval", 1);
+        ok &= cJSON_Compare(cached, full, true) && number(cached, "clock") == clocks[i];
+        cJSON_Delete(full);
+        cJSON_Delete(cached);
+    }
+    simulation_command(&app, "sim", "checkpoint off");
+    ok &= !at(app.story, "simCheckpoints") && number(app.story, "simCheckpointInterval") == 0;
+    release(&app.info);
+    cJSON_Delete(app.story);
+    return ok;
+}
+
+static bool cumulative_plan_budget(void)
+{
+    App app = {.roleplay = true, .story = cJSON_Parse("{\"simEnabled\":true,\"simCheckpointInterval\":1,\"nodes\":[]}")};
+    simulation_command(&app, "sim", "budget rays 3");
+    const char *plan =
+        "{\"neutrino_tool\":\"sim_plan\",\"mode\":\"stage\",\"name\":\"two ray batches\",\"actions\":["
+        "{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[4,4,4]},"
+        "{\"neutrino_tool\":\"scene_rays\",\"origin\":[1,1,1],\"count\":2},"
+        "{\"neutrino_tool\":\"scene_rays\",\"origin\":[2,2,2],\"count\":2}],\"queries\":[]}";
+    Preview p = {.story = app.story};
+    bool ok = simulation_tool_reply(&p, plan) == SIM_REGENERATE &&
+        strstr(str(&p.tool_feedback), "budget exceeded (rays): 4 requested, 3 allowed") &&
+        !p.tool_pending && !at(app.story, "simLog") && !at(app.story, "simCheckpoints");
+    p.story = nullptr;
+    free_protocol(&p);
+    simulation_command(&app, "sim", "budget ram_bytes 1024");
+    const char *soft =
+        "{\"neutrino_tool\":\"softbody3d\",\"size\":[1,1,1],\"mass_kg\":1,\"stiffness\":1,"
+        "\"nodes\":100000,\"seconds\":0.01}";
+    p = (Preview){.story = app.story};
+    ok &= simulation_tool_reply(&p, soft) == SIM_REGENERATE &&
+        strstr(str(&p.tool_feedback), "budget exceeded (ram_bytes): 7200000 requested, 1024 allowed");
+    p.story = nullptr;
+    free_protocol(&p);
+    simulation_command(&app, "sim", "budget reset");
+    p = (Preview){.story = app.story};
+    ok &= !at(app.story, "simBudget") && simulation_tool_reply(&p, plan) == SIM_REGENERATE &&
+        cJSON_GetArraySize(p.tool_pending) == 1 &&
+        strstr(str(&p.tool_feedback), "\"pending_commit\":true") && !at(app.story, "simCheckpoints");
+    free_protocol(&p);
+    release(&app.info);
+    return ok;
+}
+
+static bool character_knowledge_isolation(void)
+{
+    App a = {.roleplay = true, .story = cJSON_Parse("{\"nodes\":[],\"simEnabled\":true,"
+        "\"card\":{\"description\":\"PRIVATE_CARD\"},\"authorNote\":\"PRIVATE_NOTE\"}")};
+    char room[] = "Relay | PRIVATE_ROOM_PROP";
+    char mara[] = "Mara | PRIVATE_NPC_PROFILE";
+    char tessa[] = "Tessa | A second character.";
+    world_command(&a, "room", room);
+    world_command(&a, "npc", mara);
+    world_command(&a, "npc", tessa);
+    int common = story_push(&a.ws, a.story, 0, "assistant", "PRIVATE_OBJECTIVE_RECAP");
+    char private_tessa[] = "Tessa | PRIVATE_TESSA_BELIEF";
+    world_command(&a, "knowledge", private_tessa);
+    int tessa_turn = story_push(&a.ws, a.story, common, "user", "PRIVATE_TESSA_SPEECH");
+    set(story_pick(a.story, tessa_turn), "addressed", "Tessa");
+    int sibling = story_push(&a.ws, a.story, tessa_turn, "assistant", "A different outcome.");
+    char other_branch[] = "Mara | PRIVATE_SIBLING_BELIEF";
+    world_command(&a, "knowledge", other_branch);
+    int mara_cue = story_push(&a.ws, a.story, tessa_turn, "user", "AUTHORIZED_MARA_CUE");
+    set(story_pick(a.story, mara_cue), "addressed", "Mara");
+    char shared_mara[] = "Mara | AUTHORIZED_MARA_HEARSAY";
+    world_command(&a, "knowledge", shared_mara);
+    Preview p = {.story = a.story, .parent = mara_cue};
+    append(&p.speaker, "Mara");
+    append(&p.world_context, "PRIVATE_GEOMETRY");
+    append(&p.tool_feedback, "PRIVATE_ACTUAL_RESULT");
+    append(&p.messages_context, "PRIVATE_LORE");
+    Json *messages = cJSON_CreateArray();
+    world_character_messages(&p, messages);
+    char *payload = cJSON_PrintUnformatted(messages);
+    bool ok = sibling > 0 && payload && strstr(payload, "AUTHORIZED_MARA_CUE") &&
+        strstr(payload, "AUTHORIZED_MARA_HEARSAY") && !strstr(payload, "PRIVATE_") &&
+        simulation_tool_reply(&p, "{\"neutrino_tool\":\"scene_catalog\"}") == SIM_NO_PROSE &&
+        !p.tool_requests && !p.tool_pending;
+    cJSON_free(payload);
+    cJSON_Delete(messages);
+    release(&p.speaker);
+    release(&p.world_context);
+    release(&p.messages_context);
+    release(&a.info);
+    free_protocol(&p);
+    return ok;
+}
+
+static bool plan_cfd_reuse(void)
+{
+    const char *plan =
+        "{\"neutrino_tool\":\"sim_plan\",\"mode\":\"hypothetical\",\"name\":\"fog field\",\"actions\":["
+        "{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[3,3,3]},"
+        "{\"neutrino_tool\":\"scene_medium\",\"method\":\"cfd\",\"resolution\":6,\"seconds\":0,"
+        "\"center\":[1.75,1.75,1.75],\"light_loss\":2},"
+        "{\"neutrino_tool\":\"scene_flow\",\"probe\":[1.75,1.75,1.75]},"
+        "{\"neutrino_tool\":\"scene_light\",\"source\":[0.5,1.75,1.75],\"listener\":[2.5,1.75,1.75]},"
+        "{\"neutrino_tool\":\"scene_medium\",\"method\":\"cfd\",\"resolution\":6,\"seconds\":0,"
+        "\"center\":[1.75,1.75,1.75],\"concentration\":0.3},"
+        "{\"neutrino_tool\":\"scene_flow\",\"probe\":[1.75,1.75,1.75]}],"
+        "\"queries\":[{\"id\":\"before\",\"predicate\":\"fluid.concentration_exceeds\",\"step\":3,\"threshold\":0.5},"
+        "{\"id\":\"after\",\"predicate\":\"fluid.concentration_exceeds\",\"step\":6,\"threshold\":0.5}]}";
+    Preview p = {.story = cJSON_Parse("{\"nodes\":[],\"simEnabled\":true}")};
+    const bool regenerated = simulation_tool_reply(&p, plan) == SIM_REGENERATE;
+    const char *reuse = strstr(str(&p.tool_results), "Reused CFD field.");
+    const char *once = reuse ? strstr(reuse + 1, "Reused CFD field.") : nullptr;
+    Json *report = cJSON_Parse(str(&p.tool_feedback));
+    const Json *results = at(report, "consequences");
+    bool ok = regenerated && reuse && !once && !p.tool_pending && !at(p.story, "simLog") &&
+        !strcmp(js(cJSON_GetArrayItem(results, 0), "result"), "TRUE") &&
+        !strcmp(js(cJSON_GetArrayItem(results, 1), "result"), "FALSE");
+    cJSON_Delete(report);
+    free_protocol(&p);
+    return ok;
+}
+
+static int timing_node(Json *story, int parent)
+{
+    Json *nodes = at(story, "nodes"), *node = cJSON_CreateObject();
+    int id = nodes->child ? number(nodes->child->prev, "id") + 1 : 1;
+    integer(node, "id", id);
+    integer(node, "parent", parent);
+    set(node, "role", "assistant");
+    set(node, "content", "");
+    cJSON_AddItemToArray(nodes, node);
+    return id;
+}
+
+static void timing_event(Json *story, int index, int head)
+{
+    Json *op = cJSON_CreateObject();
+    set(op, "neutrino_tool", "advance");
+    integer(op, "minutes", 1);
+    integer(op, "anchor", head);
+    integer(op, "simSequence", index);
+    cJSON_AddItemToArray(at(story, "simLog"), op);
+}
+
+static int checkpoint_timing(void)
+{
+    const int sizes[] = {10, 100, 1000, 10000, 100000};
+    puts("events,method,repetition,mean_ms,checkpoint_json_bytes");
+    for (size_t i = 0; i < sizeof sizes / sizeof *sizes; ++i) {
+        const int count = sizes[i];
+        App app = {.roleplay = true, .story = cJSON_Parse("{\"nodes\":[],\"simLog\":[],\"simCheckpointInterval\":1}")};
+        int head = 0, expected_clock = 480;
+        for (int j = 1; j < count; ++j) {
+            if (head && j % 11 == 0) timing_event(app.story, j, timing_node(app.story, head / 2));
+            else {
+                head = timing_node(app.story, head);
+                timing_event(app.story, j, head);
+                ++expected_clock;
+            }
+        }
+        head = timing_node(app.story, head);
+        integer(app.story, "head", head);
+        simulation_command(&app, "time", "advance 1");
+        ++expected_clock;
+        const int child = timing_node(app.story, head);
+        const int other = timing_node(app.story, head);
+        const Json *cache = at(app.story, "simCheckpoints");
+        char *serialized = cJSON_PrintUnformatted(cache);
+        size_t size = serialized ? strlen(serialized) : 0;
+        cJSON_free(serialized);
+        bool valid = size > 0;
+        const int order[] = {1, 0, 2};
+        for (int index = 0; valid && index < 3; ++index) {
+            const int method = order[index];
+            if (index == 1) {
+                timing_event(app.story, count + 1, child);
+                timing_event(app.story, count + 2, other);
+            }
+            integer(app.story, "simCheckpointInterval", method != 0);
+            const char *names[] = {"full", "checkpoint", "checkpoint_plus_1"};
+            const int batches = method ? 4000 : count >= 10000 ? 32 : 512;
+            for (int sample = 0; valid && sample <= 5; ++sample) {
+                clock_t start = clock();
+                for (int j = 0; valid && j < batches; ++j) {
+                    Json *state = simulation_state(app.story, method == 1 ? head : child);
+                    valid = number(state, "clock") == expected_clock + (method != 1);
+                    cJSON_Delete(state);
+                }
+                clock_t finish = clock();
+                if (valid && sample) printf("%d,%s,%d,%.6f,%zu\n", count, names[method], sample,
+                    1000.0 * (finish - start) / (CLOCKS_PER_SEC * (double)batches), size);
+            }
+        }
+        cJSON_Delete(app.story);
+        if (!valid) return 1;
+    }
+    return 0;
+}
+
+static int cfd_reuse_timing(void)
+{
+    Json *settings = cJSON_CreateObject(), *probe = cJSON_Parse("{\"probe\":[2,2,2]}");
+    bool valid = rigid_actions(settings,
+        "[{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[6,6,6]},"
+        "{\"neutrino_tool\":\"scene_medium\",\"method\":\"cfd\",\"seconds\":0.5,"
+        "\"resolution\":24,\"wind\":[1,1,1]}]");
+    PhysicsReading reference;
+    Text result = {0};
+    valid = valid && physics_run_reading("scene_flow", probe, settings, &result, &reference) &&
+        reference.kind == READING_FLOW && !reference.unavailable;
+    puts("method,repetition,mean_ms");
+    for (int warm = 0; valid && warm <= 1; ++warm) {
+        PhysicsCache cache = {0};
+        for (int sample = 0; valid && sample <= 5; ++sample) {
+            const int batches = warm ? 4000 : 8;
+            const clock_t start = clock();
+            for (int j = 0; valid && j < batches; ++j) {
+                clear(&result);
+                PhysicsReading reading;
+                valid = (warm ? physics_run_cached("scene_flow", probe, settings, &result, &reading, &cache) :
+                    physics_run_reading("scene_flow", probe, settings, &result, &reading)) &&
+                    reading.kind == READING_FLOW && !reading.unavailable &&
+                    reading.tracer_concentration == reference.tracer_concentration;
+            }
+            const clock_t end = clock();
+            if (valid && sample) printf("%s,%d,%.6f\n", warm ? "reused" : "cold", sample,
+                1000.0 * (end - start) / (CLOCKS_PER_SEC * (double)batches));
+        }
+        physics_cache_release(&cache);
+    }
+    release(&result);
+    cJSON_Delete(probe);
+    cJSON_Delete(settings);
+    return !valid;
 }
 
 static bool attached_rigid_plan(void)
@@ -1148,6 +1421,8 @@ static bool supplied_acoustic_protocol(void)
 int main(int argc, char **argv)
 {
     if (argc > 1 && !strcmp(argv[1], "--rigid-timing")) return rigid_timing();
+    if (argc > 1 && !strcmp(argv[1], "--checkpoint-timing")) return checkpoint_timing();
+    if (argc > 1 && !strcmp(argv[1], "--cfd-reuse-timing")) return cfd_reuse_timing();
     if (argc > 1 && !strcmp(argv[1], "--cfd-timing")) return cfd_timing();
     const struct {
         const char *name, *json, *expected;
@@ -1251,6 +1526,10 @@ int main(int argc, char **argv)
     if (!rotation_and_spill()) { fputs("Rotation and spill physics test failed.\n", stderr); failures++; }
     if (!runoff_conservation()) { fputs("Runoff mass and depth test failed.\n", stderr); failures++; }
     if (!rigid_branch_replay()) { fputs("Rigid branch replay test failed.\n", stderr); failures++; }
+    if (!checkpoint_order_and_siblings()) { fputs("Checkpoint order or sibling replay failed.\n", stderr); failures++; }
+    if (!cumulative_plan_budget()) { fputs("Cumulative simulation plan budget failed.\n", stderr); failures++; }
+    if (!character_knowledge_isolation()) { fputs("Character knowledge leaked across recipients or branches.\n", stderr); failures++; }
+    if (!plan_cfd_reuse()) { fputs("Plan CFD field reuse or invalidation failed.\n", stderr); failures++; }
     if (!attached_rigid_plan()) { fputs("Attached rigid plan test failed.\n", stderr); failures++; }
     if (!solid_cfd()) { fputs("Voxel CFD boundary test failed.\n", stderr); failures++; }
     if (!material_transport()) { fputs("Material transport test failed.\n", stderr); failures++; }

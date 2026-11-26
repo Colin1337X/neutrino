@@ -434,6 +434,16 @@ static void store_body(Json *item, const Body *bodies, int count, const Body *bo
     }
 }
 
+PhysicsCost rigid_cost(const Json *op, const Json *room)
+{
+    double seconds;
+    if (!room || !physics_scalar(op, "seconds", 0.001, 10, &seconds)) return (PhysicsCost){0};
+    const double steps = ceil(seconds * HZ);
+    const double boxes = fmin(MAX_BODIES, cJSON_GetArraySize(at(room, "objects")));
+    return (PhysicsCost){.seconds = seconds, .steps = steps, .ram = MAX_BODIES * sizeof(Body),
+                         .work = steps * fmax(1, boxes * boxes)};
+}
+
 static bool step_room(Json *room, const Json *materials, const PhysicsBox *bounds, const Json *op, double gravity)
 {
     double seconds;

@@ -290,6 +290,43 @@ static void transport(int n, const unsigned char *solid, const double inv[3], do
     }
 }
 
+static double flow_drag(const FlowConfig *c)
+{
+    return c->porous ? c->viscosity / c->permeability : 0;
+}
+
+static double flow_steps(const FlowConfig *c, double inv[3])
+{
+    double inverse2 = 0, max_courant = 0;
+    const double drag = flow_drag(c);
+    for (int axis=0; axis<3; ++axis) {
+        inv[axis] = c->resolution/c->length[axis];
+        inverse2 += inv[axis]*inv[axis];
+        max_courant += (fabs(c->wind[axis])+c->vortex)*inv[axis];
+        if (c->porous) max_courant += fabs(c->porous_drive[axis])*
+            (drag > 0 ? fmin(c->seconds, 1/drag) : c->seconds)*inv[axis];
+    }
+    return ceil(c->seconds * fmax(2*max_courant, 4*fmax(c->viscosity,c->diffusivity)*inverse2));
+}
+
+PhysicsCost flow_cost(const FlowConfig *c)
+{
+    PhysicsCost cost = {.seconds = c->seconds};
+    if (!c->cfd) return cost;
+    double inv[3];
+    double steps = flow_steps(c, inv);
+    if (steps > FLOW_STEPS) return cost; /* The solver takes its analytical fallback. */
+    if (c->seconds > 0) steps = fmax(1, steps);
+    const int n = c->resolution;
+    const double cells = n * n * n;
+    cost.steps = steps;
+    cost.cells = cells;
+    cost.ram = cells * (11 * sizeof(double) + 2);
+    cost.mapped = cells * 11 * sizeof(double);
+    cost.work = cells * (1 + steps * (PRESSURE_SWEEPS + 8));
+    return cost;
+}
+
 FlowField flow_solve_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t box_count)
 {
     FlowField field = {.config = *c, .method = c->porous ? "porous CFD unavailable" : "reduced Gaussian transport",
@@ -297,17 +334,8 @@ FlowField flow_solve_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t
     if (!c->cfd) return field;
     const int n = c->resolution;
     const size_t cells = (size_t)n*n*n;
-    double inv[3], inverse2 = 0, max_courant = 0;
-    double drag = c->porous ? c->viscosity / c->permeability : 0;
-    for (int axis=0; axis<3; ++axis) {
-        inv[axis] = n/c->length[axis];
-        inverse2 += inv[axis]*inv[axis];
-        max_courant += (fabs(c->wind[axis])+c->vortex)*inv[axis];
-        if (c->porous) max_courant += fabs(c->porous_drive[axis])*
-            (drag > 0 ? fmin(c->seconds, 1/drag) : c->seconds)*inv[axis];
-    }
-    const double steps_needed = fmax(1, ceil(c->seconds * fmax(2*max_courant,
-                                                  4*fmax(c->viscosity,c->diffusivity)*inverse2)));
+    double inv[3];
+    const double steps_needed = fmax(1, flow_steps(c, inv));
     if (steps_needed > FLOW_STEPS) {
         field.fallback = "CFD timestep budget exceeded";
         return field;
@@ -373,6 +401,7 @@ FlowField flow_solve_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t
     }
     close_faces(n, field.solid, velocity);
     const double dt=c->seconds/steps_needed;
+    const double drag = flow_drag(c);
     double decay = exp(-drag*dt), force_integral = drag > 0 ? -expm1(-drag*dt)/drag : dt;
     bool gpu = c->gpu, used_gpu = false;
     for (int step=0; dt>0 && step<(int)steps_needed; ++step) {

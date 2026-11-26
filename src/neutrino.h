@@ -100,6 +100,7 @@ static inline void bound_terminal_viewport(int *cols, int *rows)
     if (*rows > MAX_VIEWPORT_ROWS) *rows = MAX_VIEWPORT_ROWS;
 }
 size_t narrator_complete_prefix(const char *text);
+bool narrator_short_answer(const char *reply, size_t length, const char *cue);
 int terminal_key(int timeout);
 void terminal_write(const char *data, size_t length);
 size_t utf_next(const char *s, size_t length, size_t pos);
@@ -116,9 +117,9 @@ typedef struct {
 } RequestOptions;
 typedef struct {
     double tokens_per_second;
-    int completion_tokens;
+    int completion_tokens, prompt_tokens;
     uint64_t ttft_ms;
-    bool has_ttft;
+    bool has_ttft, clean_stop;
 } InferenceMetrics;
 Inference *inference_start(const char *endpoint, const char *key, const char *model,
                            const Json *messages);

@@ -33,3 +33,5 @@ jobs:
           python3 benchmarks/gateway_history.py build/neutrino
           python3 benchmarks/gateway_history.py build/neutrino --fault 429
           python3 benchmarks/gateway_history.py build/neutrino --branches branch-evidence.json
+      - name: Capture and verify character prompt isolation
+        run: python3 benchmarks/character_isolation.py build/neutrino --out character-isolation.json

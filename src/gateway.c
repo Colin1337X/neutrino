@@ -340,6 +340,8 @@ static void event_metrics(Text *out, InferenceMetrics metrics)
     if (metrics.tokens_per_second > 0)
         put(data, "tokens_per_second", cJSON_CreateNumber(metrics.tokens_per_second));
     if (metrics.completion_tokens > 0) integer(data, "completion_tokens", metrics.completion_tokens);
+    if (metrics.prompt_tokens > 0) integer(data, "prompt_tokens", metrics.prompt_tokens);
+    if (metrics.clean_stop) put(data, "clean_stop", cJSON_CreateTrue());
     if (metrics.has_ttft) put(data, "ttft_ms", cJSON_CreateNumber((double)metrics.ttft_ms));
     put(body, "neutrino_metrics", data);
     char *json = cJSON_PrintUnformatted(body);

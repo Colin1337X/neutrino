@@ -1,0 +1,10 @@
+RT matches CPU distances and box IDs for 4096 rays, including cached and edited geometry.
+Vulkan hardware RT ray batch (2) hit distances in m: 2 miss
+Acoustic paths (Vulkan hardware RT visibility, 343.2 m/s). Levels relative to the direct source at 1 m.
+Direct blocked.
+X-min echo blocked.
+X-max echo blocked.
+Y-min echo 14.57 ms · -17.7 dB
+Y-max echo 36.04 ms · -25.6 dB
+Z-min echo 14.57 ms · -17.7 dB
+Z-max echo 14.57 ms · -17.7 dB

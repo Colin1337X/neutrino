@@ -27,7 +27,7 @@ def matches_report(report, example):
                 for field, expected in fields.items()))
 
 
-def run(binary, examples, repetitions, output, provider, model, live_example=None):
+def run(binary, examples, repetitions, output, provider, model, live_example=None, natural=False):
     with tempfile.TemporaryDirectory(prefix="neutrino-multiphysics-") as scratch, ExitStack() as stack:
         folder = Path(scratch)
         build(folder, 1)
@@ -56,7 +56,7 @@ def run(binary, examples, repetitions, output, provider, model, live_example=Non
         if provider:
             port = free_port()
             server = f"http://127.0.0.1:{port}/v1"
-            environment.update(NEUTRINO_ENDPOINT=provider, NEUTRINO_MODEL=model)
+            environment.update(NEUTRINO_ENDPOINT=provider, NEUTRINO_MODEL=model, NEUTRINO_STREAM_USAGE="1")
             stack.enter_context(process(binary, ["--serve", "--port", str(port)],
                                         environment, folder / "gateway.log"))
             wait(lambda: request(server + "/status"))
@@ -98,6 +98,10 @@ def run(binary, examples, repetitions, output, provider, model, live_example=Non
                    "action with height 1, tank_area 2, outlet_area 0.003, and seconds 10. Evaluate "
                    "fluid.volume_exceeds for step 1 with threshold 80 litres and id spills. "
                    "Then describe the attendant's reaction to the predicted water discharge in one complete in-world sentence.")
+            if natural:
+                cue = ("The water is a metre deep in a tank with a 2 square metre cross section and a small drain of "
+                       "0.003 square metres. I crack it open for ten seconds. How much water comes out? "
+                       "Calculate it before you narrate the keeper's reaction to the falling water.")
             if live_example:
                 spinning = any(query["predicate"] == "entity.rotated" for query in live_example["plan"]["queries"])
                 runoff = any(query["predicate"] == "fluid.pools_on" for query in live_example["plan"]["queries"])
@@ -138,12 +142,17 @@ def run(binary, examples, repetitions, output, provider, model, live_example=Non
                 used_plan = matches_report(typed_report, live_example)
                 pattern = r"\b(water|spill\w*)\b"
             else:
-                used_plan = '"predicate":"fluid.volume_exceeds"' in trace and '"result":"TRUE"' in trace
+                used_plan = None if natural else (
+                    '"predicate":"fluid.volume_exceeds"' in trace and '"result":"TRUE"' in trace)
                 pattern = r"\b(water|drain|tank|valve|outlet)\b"
             result["live"] = {"elapsed_ms": (time.perf_counter() - start) * 1000, "reply": reply,
                               "trace": trace, "used_typed_plan": used_plan, "typed_report": typed_report,
                               "relevant_prose": bool(re.search(pattern, content, re.I))
                               and not re.search(r"\b(neutrino_tool|sim_plan|json)\b", content, re.I)}
+            if natural:
+                tools = reply.get("simTools", "") if reply else ""
+                result["live"]["used_expected_tool"] = (
+                    '"neutrino_tool":"fluid"' in tools and bool(re.search(r"drained 81\.525 L\b", tools)))
             if live_example and runoff:
                 result["live"]["reported_pool"] = bool(re.search(r"\b(pools?|puddles?|gathers?|settles?)\b", content, re.I) and
                                                        re.search(r"\b(east|eastern)\b", content, re.I))
@@ -152,7 +161,10 @@ def run(binary, examples, repetitions, output, provider, model, live_example=Non
         for plan in result["plans"]:
             print(f"{plan['name']} median {plan['median_ms']:.2f} ms")
         if provider:
-            print(f"Live typed-plan selection and result: {result['live']['used_typed_plan']}")
+            if natural:
+                print(f"Natural prompt selected the expected tool: {result['live']['used_expected_tool']}")
+            else:
+                print(f"Live typed-plan selection and result: {result['live']['used_typed_plan']}")
 
 
 if __name__ == "__main__":
@@ -164,6 +176,7 @@ if __name__ == "__main__":
     parser.add_argument("--provider")
     parser.add_argument("--model")
     parser.add_argument("--live-plan", help="Name of the fixture plan to submit to the model")
+    parser.add_argument("--natural", action="store_true", help="Supply a scenario without naming a tool or schema")
     args = parser.parse_args()
     if args.reps < 1 or bool(args.provider) != bool(args.model):
         parser.error("Use a positive repeat count and supply provider and model together.")
@@ -171,4 +184,6 @@ if __name__ == "__main__":
     selected = next((example for example in scenarios if example["plan"]["name"] == args.live_plan), None)
     if args.live_plan and (not selected or not args.provider):
         parser.error("--live-plan needs a matching fixture and provider")
-    run(args.binary.resolve(), scenarios, args.reps, args.out, args.provider, args.model, selected)
+    if args.natural and (args.live_plan or not args.provider):
+        parser.error("--natural needs a provider and cannot attach a plan")
+    run(args.binary.resolve(), scenarios, args.reps, args.out, args.provider, args.model, selected, args.natural)

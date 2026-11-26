@@ -18,7 +18,7 @@ The [scenario fixtures](../benchmarks/multiphysics-scenarios.json) contain runna
 
 ## Transactions and consequences
 
-The executor reconstructs branch-local physics and stats from visible events. It applies the current reply's previously staged edits and executes the plan in order. Physics-only plans work on scratch state without copying the entire story. Inventory and world edits acquire a temporary copy when first needed.
+The executor restores branch-local physics and stats from a recent checkpoint and replays subsequent visible events. Workspaces without a usable checkpoint replay their event log. It applies the current reply's previously staged edits and executes the plan in order. Physics-only plans work on scratch state without copying the entire story. Inventory and world edits acquire a temporary copy when first needed.
 
 - Hypothetical mode discards all edits. Each benchmark fixture verifies that the workspace bytes stay unchanged.
 - Stage mode retains validated mutations for the accepted narrator reply. A manual /sim stage explicitly commits the plan to the active branch. Its precommit report identifies pending edits and the UI then confirms the commit.
@@ -28,6 +28,18 @@ The executor reconstructs branch-local physics and stats from visible events. It
 - Optional continue set to true lets the narrator use the resulting report to select another tool when its tool budget allows it. Otherwise the narrator proceeds to prose.
 
 Reports distinguish TRUE, FALSE, INSUFFICIENT_DATA, UNSUPPORTED, and SIMULATION_FAILED, with evidence where available. A query referencing a skipped step returns insufficient data. Coordinates are metres with Z up. Step references are one-based.
+
+### Checkpoints and resource limits
+
+Use `/sim checkpoint 32` to set the snapshot interval in accepted simulation events. Use `/sim checkpoint off` to clear snapshots and return to full replay, or `/sim checkpoint on` for the default. Each story retains up to eight snapshots, and states requiring more than 256 KiB of estimated snapshot memory fall back to replay. Snapshots carry the mechanical clock, rigid state, spilled water, runoff, geometry, material settings and character stats. The event log persists independently of the snapshots.
+
+`/sim budget` shows the current limits. Set an individual limit with a command such as `/sim budget rays 8192`, or restore defaults with `/sim budget reset`. The limits apply to plans built by the narrator and plans submitted by the player. Measurements include cumulative estimated work, solver steps, simulated duration, rays, CFD cells, soft-body nodes and report bytes, plus estimated peak working and mapped memory for supported solvers. The executor checks modeled work before dispatch and discards an ordered plan that exceeds its limits. Estimates exclude process-wide allocations and GPU driver memory.
+
+Consecutive flow, light and acoustic queries in the same ordered plan can reuse a solved CFD field. The trace identifies reuse. A scene edit drops the cached grid, and the plan releases it when it finishes. The persisted room stores the flow configuration. A new plan derives its own grid from that configuration.
+
+### Character conversations
+
+`/talk CHARACTER | MESSAGE` and `@CHARACTER: MESSAGE` send the addressed character a separate inference request. Share branch-local knowledge using `/knowledge CHARACTER | FACT`. The request receives the addressed conversation and that character's grants. The narrator keeps its broader view. Character requests have no tools. Grants represent hearsay and retain their source and story time. Automatic sensory observations require additional work.
 
 | Predicate | Operands |
 | --- | --- |
@@ -62,7 +74,7 @@ The scene_air tool selects a registered material_id for uniform attenuation in t
 
 Attach a rigid body to an existing object with scene_body, name, and mass_kg. Optional fields are liquid_l, restitution and velocity in metres per second. Supply dry mass. The model adds 1 kg per litre of carried water and rejects water above the box's exterior volume. Apply scene_constraint with mode fixed, free or rail. A rail requires axis x, y or z and removes velocity on the other axes. Use scene_step with seconds to advance all bodies in the active layout under its configured gravity.
 
-The solver uses 240 Hz substeps with swept AABB pairs, static room boundaries, and normal impulses. It rejects initial overlaps involving moving bodies. Limits are 128 registered boxes, 10 seconds per step and 24 collision events per substep. Solver failures leave the step unchanged. A room's mechanics clock is measured in seconds independently of the story clock. The current implementation replays committed steps when reconstructing branch state.
+The solver uses 240 Hz substeps with swept AABB pairs, static room boundaries, and normal impulses. It rejects initial overlaps involving moving bodies. Limits are 128 registered boxes, 10 seconds per step and 24 collision events per substep. Solver failures leave the step unchanged. A room's mechanics clock is measured in seconds independently of the story clock. Branch reconstruction replays mechanical events when a suitable checkpoint is unavailable or precedes those events.
 
 The scene_impulse tool takes name, impulse_ns in newton-seconds, and optional offset_m from the body's center in world coordinates. An offset on or inside the body applies angular impulse as well as linear impulse. Free bodies carry world-space angular momentum and a quaternion orientation. The solver uses the rectangular-prism inertia tensor and advances the orientation at each substep. Fixed mounts and rails lock rotation. The shared geometry uses the axis-aligned hull of the oriented prism, and a hull overlap blocks rotation inelastically. Swept contact impulses still act along the translational normal through the center. Corner torque and rolling friction are outside the model.
 

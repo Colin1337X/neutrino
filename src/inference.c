@@ -110,21 +110,29 @@ static bool read_choice(Response *r, const char *packet)
     }
     lock(j);
     const Json *metrics = at(json, "neutrino_metrics");
+    const char *reason = js(choice, "finish_reason");
     if (j->from_gateway && cJSON_IsObject(metrics)) {
         double rate = positive_number(metrics, "tokens_per_second");
         double tokens = positive_number(metrics, "completion_tokens");
+        const double prompt_tokens = positive_number(metrics, "prompt_tokens");
         const Json *ttft = at(metrics, "ttft_ms");
         j->metrics.tokens_per_second = rate;
         if (tokens <= INT_MAX) j->metrics.completion_tokens = (int)tokens;
+        if (prompt_tokens <= INT_MAX) j->metrics.prompt_tokens = (int)prompt_tokens;
+        j->metrics.clean_stop = cJSON_IsTrue(at(metrics, "clean_stop"));
         if (cJSON_IsNumber(ttft) && ttft->valuedouble >= 0 && ttft->valuedouble <= 3600000) {
             j->metrics.ttft_ms = (uint64_t)ttft->valuedouble;
             j->metrics.has_ttft = true;
         }
     } else if (!j->from_gateway) {
         const Json *timings = at(json, "timings");
-        double tokens = positive_number(at(json, "usage"), "completion_tokens");
+        const Json *usage = at(json, "usage");
+        double tokens = positive_number(usage, "completion_tokens");
         if (!tokens) tokens = positive_number(timings, "predicted_n");
         if (tokens > 0 && tokens <= INT_MAX) j->metrics.completion_tokens = (int)tokens;
+        const double prompt_tokens = positive_number(usage, "prompt_tokens");
+        if (prompt_tokens > 0 && prompt_tokens <= INT_MAX) j->metrics.prompt_tokens = (int)prompt_tokens;
+        if (*reason) j->metrics.clean_stop = !strcmp(reason, "stop");
         double rate = positive_number(timings, "predicted_per_second");
         if (rate) j->metrics.tokens_per_second = rate;
     }
@@ -134,7 +142,7 @@ static bool read_choice(Response *r, const char *packet)
         append(&j->reasoning, thinking);
     } else if (!j->error.len) append(&j->error, "Response exceeded the preview limit.");
     unlock(j);
-    if (*js(choice, "finish_reason")) r->final = true;
+    if (*reason) r->final = true;
     cJSON_Delete(json);
     return true;
 }

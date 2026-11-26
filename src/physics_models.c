@@ -91,6 +91,18 @@ static bool soft_dimensions(const Json *args, size_t shape[3], size_t *count)
     return true;
 }
 
+PhysicsCost softbody_cost(const Json *args)
+{
+    size_t shape[3], count;
+    double seconds;
+    if (!soft_dimensions(args, shape, &count) ||
+        !physics_optional(args, "seconds", 0, 20, 1, &seconds)) return (PhysicsCost){0};
+    const double steps = ceil(seconds * 120);
+    const double bytes = steps ? count * sizeof(SoftNode) : 0;
+    return (PhysicsCost){.nodes = count, .steps = steps, .seconds = seconds,
+        .work = steps * count * 14, .ram = bytes, .mapped = bytes};
+}
+
 static void soft_rest(size_t node, const size_t shape[3], const double spacing[3], double position[3])
 {
     position[0] = (node % shape[0]) * spacing[0];

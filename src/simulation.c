@@ -15,6 +15,61 @@ static const double largest_exact_minute = 9007199254740991.0;
 static const char *const meters[] = {"hunger", "thirst", "bladder", "bowels", "mood"};
 static const double hourly[] = {4, 7, 9, 3};
 
+enum {
+    BUDGET_WORK, BUDGET_STEPS, BUDGET_SECONDS, BUDGET_RAYS, BUDGET_CELLS, BUDGET_NODES,
+    BUDGET_RAM, BUDGET_MAPPED, BUDGET_REPORT, BUDGET_COUNT
+};
+static const struct { const char *key; double initial; } budgets[] = {
+    [BUDGET_WORK] = {"work", 250000000},
+    [BUDGET_STEPS] = {"steps", 10000},
+    [BUDGET_SECONDS] = {"seconds", 3600},
+    [BUDGET_RAYS] = {"rays", 65536},
+    [BUDGET_CELLS] = {"cells", 32 * 24 * 24 * 24},
+    [BUDGET_NODES] = {"nodes", 1000000},
+    [BUDGET_RAM] = {"ram_bytes", 256 * 1024 * 1024},
+    [BUDGET_MAPPED] = {"mapped_bytes", 256 * 1024 * 1024},
+    [BUDGET_REPORT] = {"report_bytes", 128 * 1024}
+};
+typedef struct { double limit[BUDGET_COUNT], used[BUDGET_COUNT]; } PlanBudget;
+
+static PlanBudget plan_budget(const Json *story)
+{
+    PlanBudget budget = {0};
+    for (int i = 0; i < BUDGET_COUNT; ++i) {
+        if (!physics_scalar(at(story, "simBudget"), budgets[i].key, 0, largest_exact_minute, &budget.limit[i]))
+            budget.limit[i] = budgets[i].initial;
+    }
+    return budget;
+}
+
+static bool reserve_budget(PlanBudget *budget, const PhysicsCost *cost, size_t report, Text *error)
+{
+    const double requested[BUDGET_COUNT] = {
+        [BUDGET_WORK] = cost->work, [BUDGET_STEPS] = cost->steps, [BUDGET_SECONDS] = cost->seconds,
+        [BUDGET_RAYS] = cost->rays, [BUDGET_CELLS] = cost->cells, [BUDGET_NODES] = cost->nodes,
+        [BUDGET_RAM] = cost->ram, [BUDGET_MAPPED] = cost->mapped, [BUDGET_REPORT] = report
+    };
+    double next[BUDGET_COUNT];
+    for (int i = 0; i < BUDGET_COUNT; ++i) {
+        /* Solver workspaces are sequential and released before the next action. */
+        next[i] = i == BUDGET_RAM || i == BUDGET_MAPPED ? fmax(budget->used[i], requested[i]) :
+            budget->used[i] + requested[i];
+        if (next[i] > budget->limit[i]) {
+            format(error, "Simulation budget exceeded (%s): %.9g requested, %.9g allowed.",
+                   budgets[i].key, next[i], budget->limit[i]);
+            return false;
+        }
+    }
+    memcpy(budget->used, next, sizeof next);
+    return true;
+}
+
+static bool budget_action(PlanBudget *budget, const Json *op, const Json *state, Text *error)
+{
+    const PhysicsCost cost = physics_cost(op, at(state, "physics"));
+    return reserve_budget(budget, &cost, 0, error);
+}
+
 static bool text_field(const char *s, size_t limit)
 {
     if (!*s || strlen(s) > limit) return false;
@@ -128,15 +183,174 @@ static bool apply_stat(Json *state, const Json *op)
     return false;
 }
 
-static Json *state_at(const Json *story, int head)
+enum {
+    CHECKPOINT_VERSION = 1,
+    CHECKPOINT_INTERVAL = 32,
+    CHECKPOINT_COUNT = 8,
+    CHECKPOINT_BYTES = 256 * 1024
+};
+
+static const Json *tail(const Json *array)
 {
-    Json *state = cJSON_CreateObject(), *path = story_path(story, head), *item;
+    return array && array->child ? array->child->prev : nullptr;
+}
+
+static int event_count(const Json *log)
+{
+    const int sequence = number(tail(log), "simSequence");
+    return sequence > 0 ? sequence : cJSON_GetArraySize(log);
+}
+
+static int checkpoint_interval(const Json *story)
+{
+    const Json *value = at(story, "simCheckpointInterval");
+    return cJSON_IsNumber(value) && value->valueint >= 0 && value->valueint <= 10000 &&
+        value->valuedouble == value->valueint ? value->valueint : CHECKPOINT_INTERVAL;
+}
+
+static Json *checkpoints(const Json *story)
+{
+    const Json *cache = at(story, "simCheckpoints");
+    Json *entries = at(cache, "entries");
+    return number(cache, "version") == CHECKPOINT_VERSION && cJSON_IsArray(entries) ? entries : nullptr;
+}
+
+static bool checkpoint_fits(const Json *value, size_t *remaining)
+{
+    size_t bytes = sizeof *value;
+    if (value->string) bytes += strlen(value->string) + 1;
+    if (value->valuestring) bytes += strlen(value->valuestring) + 1;
+    if (bytes > *remaining) return false;
+    *remaining -= bytes;
+    const Json *child;
+    cJSON_ArrayForEach(child, value)
+        if (!checkpoint_fits(child, remaining)) return false;
+    return true;
+}
+
+static void checkpoint_commit(Json *story, int head, const Json *state)
+{
+    const int interval = checkpoint_interval(story);
+    const int events = event_count(at(story, "simLog"));
+    const Json *latest = tail(at(story, "nodes"));
+    /* Older heads can have existing descendants with events in this same prefix. */
+    if (!interval || head != number(latest, "id") || cJSON_IsTrue(at(latest, "hidden")) || events < interval)
+        return;
+    Json *entries = checkpoints(story);
+    if (events - number(tail(entries), "event") < interval) return;
+    size_t remaining = CHECKPOINT_BYTES;
+    if (!checkpoint_fits(state, &remaining)) return;
+    Json *snapshot = cJSON_Duplicate(state, true);
+    Json *record = cJSON_CreateObject();
+    if (!snapshot || !record) {
+        cJSON_Delete(snapshot);
+        cJSON_Delete(record);
+        return;
+    }
+    if (!entries) {
+        Json *cache = cJSON_CreateObject();
+        entries = cJSON_CreateArray();
+        integer(cache, "version", CHECKPOINT_VERSION);
+        put(cache, "entries", entries);
+        put(story, "simCheckpoints", cache);
+    }
+    integer(record, "head", head);
+    integer(record, "event", events);
+    put(record, "state", snapshot);
+    cJSON_AddItemToArray(entries, record);
+    while (cJSON_GetArraySize(entries) > CHECKPOINT_COUNT)
+        cJSON_DeleteItemFromArray(entries, 0);
+}
+
+static Json *initial_state(void)
+{
+    Json *state = cJSON_CreateObject();
     integer(state, "clock", 480);
     integer(state, "step", 5);
     put(state, "cast", cJSON_CreateArray());
     put(state, "bonds", cJSON_CreateArray());
     put(state, "injuries", cJSON_CreateArray());
     put(state, "physics", cJSON_CreateObject());
+    return state;
+}
+
+/* The node array is stored in increasing ID order. Parents always have smaller IDs. */
+static const Json *walk_to(const Json *node, int id)
+{
+    while (number(node, "id") > id && number(node, "id") > 1) node = node->prev;
+    return id > 0 && number(node, "id") == id ? node : nullptr;
+}
+
+static const Json *ancestor_checkpoint(const Json *entries, const Json *head, int events)
+{
+    int earliest = INT_MAX;
+    const Json *snapshot;
+    cJSON_ArrayForEach(snapshot, entries)
+        if (number(snapshot, "head") < earliest) earliest = number(snapshot, "head");
+    for (const Json *node = head;; node = walk_to(node, number(node, "parent"))) {
+        const int id = number(node, "id");
+        if (id < earliest) break;
+        const Json *best = nullptr;
+        if (!cJSON_IsTrue(at(node, "hidden"))) {
+            cJSON_ArrayForEach(snapshot, entries) {
+                const int event = number(snapshot, "event");
+                if (number(snapshot, "head") == id && event > number(best, "event") && event <= events &&
+                    cJSON_IsObject(at(snapshot, "state"))) best = snapshot;
+            }
+        }
+        if (best || !node) return best;
+    }
+    return nullptr;
+}
+
+static Json *restore_checkpoint(const Json *entries, const Json *nodes, const Json *log, int head)
+{
+    const Json *node = walk_to(tail(nodes), head);
+    if (head < 0 || (head && !node)) return nullptr;
+    const int events = event_count(log);
+    const Json *snapshot = ancestor_checkpoint(entries, node, events);
+    if (!snapshot) return nullptr;
+    const int cursor = number(snapshot, "event");
+    const Json *prefix = tail(log);
+    for (int event = events; event > cursor; --event) {
+        if (prefix == log->child) return nullptr;
+        prefix = prefix->prev;
+    }
+    if (number(prefix, "simSequence") != cursor) return nullptr;
+    Json *state = cJSON_Duplicate(at(snapshot, "state"), true);
+    if (!state || !prefix->next) return state;
+
+    int oldest = head;
+    for (const Json *op = prefix->next; op; op = op->next) {
+        const int id = number(op, "anchor");
+        if (id > 0 && id < oldest) oldest = id;
+    }
+    bool *visible = calloc((size_t)(head - oldest) + 1, sizeof *visible);
+    if (!visible) {
+        cJSON_Delete(state);
+        return nullptr;
+    }
+    for (; node && number(node, "id") >= oldest; node = walk_to(node, number(node, "parent")))
+        if (!cJSON_IsTrue(at(node, "hidden"))) visible[number(node, "id") - oldest] = true;
+    for (const Json *op = prefix->next; op; op = op->next) {
+        const int id = number(op, "anchor");
+        if (!id || (id >= oldest && id <= head && visible[id - oldest])) apply_stat(state, op);
+    }
+    free(visible);
+    return state;
+}
+
+Json *simulation_state(const Json *story, int head)
+{
+    const Json *log = at(story, "simLog");
+    if (!cJSON_IsArray(log) || !log->child) return initial_state();
+    const Json *entries = checkpoints(story);
+    if (entries && checkpoint_interval(story)) {
+        Json *restored = restore_checkpoint(entries, at(story, "nodes"), log, head);
+        if (restored) return restored;
+    }
+
+    Json *path = story_path(story, head), *item;
     int count = cJSON_GetArraySize(at(story, "nodes"));
     bool *visible = calloc((size_t)count + 1, sizeof *visible);
     if (!visible) abort();
@@ -145,9 +359,10 @@ static Json *state_at(const Json *story, int head)
         const int id = number(item, "id");
         if (id > 0 && id <= count) visible[id] = true;
     }
-    cJSON_ArrayForEach(item, at(story, "simLog")) {
-        const int id = number(item, "anchor");
-        if (id >= 0 && id <= count && visible[id]) apply_stat(state, item);
+    Json *state = initial_state();
+    for (const Json *event = log->child; event; event = event->next) {
+        const int id = number(event, "anchor");
+        if (id >= 0 && id <= count && visible[id]) apply_stat(state, event);
     }
     free(visible);
     cJSON_Delete(path);
@@ -155,7 +370,7 @@ static Json *state_at(const Json *story, int head)
 }
 static Json *preview_state(const Preview *p)
 {
-    Json *state = state_at(p->story, p->parent), *pending;
+    Json *state = simulation_state(p->story, p->parent), *pending;
     cJSON_ArrayForEach(pending, p->tool_pending) apply_stat(state, pending);
     return state;
 }
@@ -178,6 +393,8 @@ static void log_stat(Json *story, int head, const Json *op)
     if (!cJSON_IsArray(log)) put(story, "simLog", log = cJSON_CreateArray());
     Json *copy = cJSON_Duplicate(op, true);
     integer(copy, "anchor", head);
+    const int events = event_count(log);
+    if (events < INT_MAX) integer(copy, "simSequence", events + 1);
     cJSON_AddItemToArray(log, copy);
 }
 static void clock_text(const Json *state, Text *out)
@@ -451,13 +668,14 @@ static bool read_only_tool(const char *tool)
 }
 
 static bool run_sim_read(const char *tool, const Json *op, const Json *story, int head,
-                         const Json *state, Text *result, PhysicsReading *reading)
+                         const Json *state, Text *result, PhysicsReading *reading, PhysicsCache *cache)
 {
     if (!strcmp(tool,"world_inspect")) {
         if (reading) *reading = (PhysicsReading){0};
         return world_inspect(story,head,op,result);
     }
-    return physics_run_reading(tool,op,at(state,"physics"),result,reading);
+    return cache ? physics_run_cached(tool,op,at(state,"physics"),result,reading,cache) :
+        physics_run_reading(tool,op,at(state,"physics"),result,reading);
 }
 static Json *attached_plan(const char *action, const char **attachment)
 {
@@ -645,7 +863,9 @@ static void trace_acoustic_selection(Preview *p, const Json *expanded, const cha
                request);
 }
 
-static void execute_tool(Preview *p, const Json *op, const char *json)
+static bool stage_scenario_edit(Json **scratch, Json *story, int head, Json *state, const Json *op);
+
+static void execute_tool(Preview *p, const Json *op, const char *json, PlanBudget *budget)
 {
     const char *tool = js(op, "neutrino_tool");
     p->tool_rounds++;
@@ -658,22 +878,30 @@ static void execute_tool(Preview *p, const Json *op, const char *json)
         Json *state = preview_state(p);
         PhysicsReading reading;
         Json *world = !strcmp(tool,"world_inspect") ? preview_world(p) : nullptr;
-        if (!run_sim_read(tool,op,world ? world : p->story,p->parent,state,&result,&reading))
-            append(&result, "Physics tool arguments rejected.");
-        else if ((reading.kind == READING_FLUID || reading.kind == READING_ACOUSTIC) &&
-                 p->reading_count < SIM_TOOL_LIMIT)
-            p->readings[p->reading_count++] = reading;
+        if (budget_action(budget, op, state, &result)) {
+            if (!run_sim_read(tool,op,world ? world : p->story,p->parent,state,&result,&reading,nullptr))
+                append(&result, "Physics tool arguments rejected.");
+            else if ((reading.kind == READING_FLUID || reading.kind == READING_ACOUSTIC) &&
+                     p->reading_count < SIM_TOOL_LIMIT)
+                p->readings[p->reading_count++] = reading;
+        }
         cJSON_Delete(world);
         cJSON_Delete(state);
     } else if (*tool) {
-        Json *scratch = cJSON_Duplicate(p->story, true);
-        Json *state = state_at(scratch, p->parent), *pending;
-        cJSON_ArrayForEach(pending, p->tool_pending) apply_tool(scratch, p->parent, state, pending);
-        if (apply_tool(scratch, p->parent, state, op)) {
+        Json *scratch = nullptr, *pending;
+        Json *state = simulation_state(p->story, p->parent);
+        bool valid = true;
+        cJSON_ArrayForEach(pending, p->tool_pending)
+            if (!stage_scenario_edit(&scratch, p->story, p->parent, state, pending)) {
+                valid = false;
+                break;
+            }
+        if (valid && budget_action(budget, op, state, &result) &&
+            stage_scenario_edit(&scratch, p->story, p->parent, state, op)) {
             if (!p->tool_pending) p->tool_pending = cJSON_CreateArray();
             cJSON_AddItemToArray(p->tool_pending, cJSON_Duplicate(op, true));
             append(&result, "Change staged for this reply.");
-        } else append(&result, "Unknown tool, invalid arguments, or unavailable item.");
+        } else if (!result.len) append(&result, "Unknown tool, invalid arguments, or unavailable item.");
         cJSON_Delete(state);
         cJSON_Delete(scratch);
     } else append(&result, "Malformed tool request. Use one JSON object or a bounded array of read-only physics objects, each with a neutrino_tool key.");
@@ -693,6 +921,7 @@ static bool execute_read_only_batch(Preview *p, const Json *batch, const char *j
     cJSON_ArrayForEach(item, batch)
         if (!cJSON_IsObject(item) || !read_only_tool(js(item, "neutrino_tool"))) return false;
     format(&p->tool_results, "Read-only batch submitted by the narrator:\n%s\n", json);
+    PlanBudget budget = plan_budget(p->story);
     cJSON_ArrayForEach(item, batch) {
         Json *expanded = supplied_acoustic_arguments(p, item);
         const Json *selected = expanded ? expanded : item;
@@ -702,7 +931,7 @@ static bool execute_read_only_batch(Preview *p, const Json *batch, const char *j
         trace_acoustic_selection(p, expanded, raw);
         if (already_requested(p, selected))
             format(&p->tool_results, "Repeated tool request skipped inside the batch.\n%s\n", effective);
-        else execute_tool(p, selected, effective);
+        else execute_tool(p, selected, effective, &budget);
         if (expanded) cJSON_free(effective);
         cJSON_free(raw);
         cJSON_Delete(expanded);
@@ -734,17 +963,24 @@ static bool execute_action_order(Preview *p, const Json *plan)
     }
     const Json *continuation = at(plan, "continue");
     int count = cJSON_GetArraySize(actions), index = 0;
-    Text results = {0}, feedback = {0}, failure = {0};
+    Text results = {0}, feedback = {0}, failure = {0}, report = {0};
     Json *pending = cJSON_CreateArray(), *accepted = cJSON_CreateArray();
-    Json *scratch = nullptr, *state = state_at(p->story, p->parent), *op;
+    Json *scratch = nullptr, *state = simulation_state(p->story, p->parent), *op;
     PhysicsReading readings[SIM_TOOL_LIMIT];
     PhysicsReading *evidence = typed ? calloc((size_t)count, sizeof *evidence) : nullptr;
     if (typed && !evidence) abort();
     int measured = 0;
     bool valid = typed || (cJSON_IsObject(plan) && cJSON_GetArraySize(plan) == (continuation ? 2 : 1) &&
                  (!continuation || cJSON_IsBool(continuation)) && cJSON_IsArray(actions) && count > 0);
-    cJSON_ArrayForEach(op, p->tool_pending)
-        if (!stage_scenario_edit(&scratch, p->story, p->parent, state, op)) valid = false;
+    PlanBudget budget = plan_budget(p->story);
+    PhysicsCache cache = {0};
+    cJSON_ArrayForEach(op, p->tool_pending) {
+        if (!valid || !budget_action(&budget, op, state, &failure) ||
+            !stage_scenario_edit(&scratch, p->story, p->parent, state, op)) {
+            valid = false;
+            break;
+        }
+    }
     cJSON_ArrayForEach(op, actions) {
         if (!valid) break;
         ++index;
@@ -769,10 +1005,13 @@ static bool execute_action_order(Preview *p, const Json *plan)
         Json *expanded = supplied_acoustic_arguments(p, requested);
         const Json *effective = expanded ? expanded : requested;
         const char *tool = js(effective, "neutrino_tool");
+        if (strcmp(tool, "scene_flow") && strcmp(tool, "scene_light") && strcmp(tool, "scene_acoustic"))
+            physics_cache_release(&cache);
         Text result = {0};
-        if (read_only_tool(tool)) {
+        if (!budget_action(&budget, effective, state, &failure)) valid = false;
+        else if (read_only_tool(tool)) {
             PhysicsReading reading;
-            valid = run_sim_read(tool,effective,scratch ? scratch : p->story,p->parent,state,&result,&reading) &&
+            valid = run_sim_read(tool,effective,scratch ? scratch : p->story,p->parent,state,&result,&reading,&cache) &&
                 !reading.unavailable;
             if (evidence) evidence[index - 1] = reading;
             if (reading.unavailable) append(&failure, str(&result));
@@ -793,6 +1032,7 @@ static bool execute_action_order(Preview *p, const Json *plan)
             if (!json) abort();
             format(&results, "%d. %s\n%s\n", p->tool_rounds + index, str(&result), json);
             format(&feedback, "%d. %s\n", p->tool_rounds + index, str(&result));
+            valid = reserve_budget(&budget, &(PhysicsCost){0}, result.len + strlen(json), &failure);
             cJSON_free(json);
             cJSON_AddItemToArray(accepted, cJSON_Duplicate(effective, true));
         }
@@ -800,10 +1040,14 @@ static bool execute_action_order(Preview *p, const Json *plan)
         cJSON_Delete(expanded);
         cJSON_Delete(conditional_op);
     }
+    bool pending_commit = !scenario.hypothetical && pending->child;
+    if (valid && typed) {
+        simulation_plan_report(&scenario, at(state, "physics"), evidence, index, true, pending_commit, &report);
+        valid = reserve_budget(&budget, &(PhysicsCost){0}, report.len, &failure);
+    }
     if (valid) {
         if (!scenario.hypothetical && !p->tool_pending) p->tool_pending = cJSON_CreateArray();
         if (!p->tool_requests) p->tool_requests = cJSON_CreateArray();
-        bool pending_commit = !scenario.hypothetical && pending->child;
         while (!scenario.hypothetical && pending->child)
             cJSON_AddItemToArray(p->tool_pending, cJSON_DetachItemFromArray(pending, 0));
         while (accepted->child) cJSON_AddItemToArray(p->tool_requests, cJSON_DetachItemFromArray(accepted, 0));
@@ -813,11 +1057,8 @@ static bool execute_action_order(Preview *p, const Json *plan)
         append(&p->tool_results, str(&results));
         if (!typed) append(&p->tool_feedback, str(&feedback));
         else {
-            Text report = {0};
-            simulation_plan_report(&scenario, at(state, "physics"), evidence, index, true, pending_commit, &report);
             append(&p->tool_feedback, str(&report));
             append(&p->tool_results, str(&report));
-            release(&report);
         }
         p->tool_rounds += count;
         p->tool_prose_only = !cJSON_IsTrue(continuation) || p->tool_rounds >= SIM_TOOL_LIMIT;
@@ -831,14 +1072,16 @@ static bool execute_action_order(Preview *p, const Json *plan)
             format(&p->tool_feedback, "%s\n", str(&failure));
         }
         if (typed) {
-            Text report = {0};
+            clear(&report);
             simulation_plan_report(&scenario, at(state, "physics"), evidence, index, false, false, &report);
-            append(&p->tool_feedback, str(&report));
-            append(&p->tool_results, str(&report));
-            release(&report);
+            if ((double)report.len <= budget.limit[BUDGET_REPORT]) {
+                append(&p->tool_feedback, str(&report));
+                append(&p->tool_results, str(&report));
+            }
         }
         if (++p->tool_rounds >= SIM_TOOL_LIMIT) p->tool_prose_only = true;
     }
+    physics_cache_release(&cache);
     cJSON_Delete(scratch);
     cJSON_Delete(state);
     cJSON_Delete(pending);
@@ -847,6 +1090,7 @@ static bool execute_action_order(Preview *p, const Json *plan)
     release(&results);
     release(&feedback);
     release(&failure);
+    release(&report);
     return true;
 }
 
@@ -881,8 +1125,9 @@ static Json *read_only_sequence(const char *body)
 
 SimulationReply simulation_tool_reply(Preview *p, const char *body)
 {
-    if (!simulation_enabled(p->story)) return SIM_NARRATIVE;
     while (isspace((unsigned char)*body)) body++;
+    if (p->speaker.len) return structured_reply(body) || !strncmp(body, "```", 3) ? SIM_NO_PROSE : SIM_NARRATIVE;
+    if (!simulation_enabled(p->story)) return SIM_NARRATIVE;
     Json *plan = pending_attached_plan(p);
     if (plan) {
         const char *cursor = body;
@@ -966,7 +1211,8 @@ SimulationReply simulation_tool_reply(Preview *p, const char *body)
     char *effective = expanded ? cJSON_PrintUnformatted(expanded) : nullptr;
     if (expanded && !effective) abort();
     trace_acoustic_selection(p, expanded, str(&json));
-    execute_tool(p, selected, expanded ? effective : str(&json));
+    PlanBudget budget = plan_budget(p->story);
+    execute_tool(p, selected, expanded ? effective : str(&json), &budget);
     if (expanded && simulation_attached_acoustic_turn(p)) p->tool_prose_only = true;
     cJSON_free(effective);
     cJSON_Delete(expanded);
@@ -977,7 +1223,7 @@ SimulationReply simulation_tool_reply(Preview *p, const char *body)
 void simulation_commit(App *a, Preview *p, int id)
 {
     if (!simulation_enabled(p->story)) return;
-    Json *state = state_at(p->story, p->parent), *tool;
+    Json *state = simulation_state(p->story, p->parent), *tool;
     cJSON_ArrayForEach(tool, p->tool_pending) apply_tool(p->story, id, state, tool);
     const double step = clock_value(state,"step");
     if (step) {
@@ -988,6 +1234,7 @@ void simulation_commit(App *a, Preview *p, int id)
         cJSON_Delete(tick);
     }
     if (p->tool_results.len) set(story_pick(p->story, id), "simTools", str(&p->tool_results));
+    checkpoint_commit(p->story, id, state);
     cJSON_Delete(state);
     a->ws.dirty = true;
 }
@@ -1038,8 +1285,9 @@ static void player_action_order(App *a, const Json *plan, int head)
     execute_action_order(&sequence, plan);
     bool committed = sequence.tool_pending && sequence.tool_pending->child;
     if (committed) {
-        Json *state = state_at(a->story, head), *op;
+        Json *state = simulation_state(a->story, head), *op;
         cJSON_ArrayForEach(op, sequence.tool_pending) apply_tool(a->story, head, state, op);
+        checkpoint_commit(a->story, head, state);
         a->ws.dirty = true;
         cJSON_Delete(state);
     }
@@ -1050,6 +1298,43 @@ static void player_action_order(App *a, const Json *plan, int head)
     cJSON_Delete(sequence.tool_requests);
     release(&sequence.tool_results);
     release(&sequence.tool_feedback);
+}
+
+static void budget_command(App *a, const char *arg)
+{
+    if (!*arg) {
+        PlanBudget budget = plan_budget(a->story);
+        app_info(a, "Simulation plan limits");
+        for (int i = 0; i < BUDGET_COUNT; ++i)
+            format(&a->info, "%-15s %.9g\n", budgets[i].key, budget.limit[i]);
+        return;
+    }
+    if (!strcmp(arg, "reset")) {
+        cJSON_DeleteItemFromObjectCaseSensitive(a->story, "simBudget");
+        a->ws.dirty = true;
+        app_status(a, "Simulation budgets reset");
+        return;
+    }
+    const char *value = strchr(arg, ' ');
+    if (value) {
+        for (int i = 0; i < BUDGET_COUNT; ++i) {
+            const char *key = budgets[i].key;
+            size_t len = (size_t)(value - arg);
+            if (strlen(key) != len || strncmp(key, arg, len)) continue;
+            char *end;
+            errno = 0;
+            double limit = strtod(value + 1, &end);
+            if (end == value + 1 || *end || errno || !isfinite(limit) || limit < 0 ||
+                limit > largest_exact_minute || (i != BUDGET_SECONDS && floor(limit) != limit)) break;
+            Json *settings = at(a->story, "simBudget");
+            if (!cJSON_IsObject(settings)) put(a->story, "simBudget", settings = cJSON_CreateObject());
+            put(settings, key, cJSON_CreateNumber(limit));
+            a->ws.dirty = true;
+            app_status(a, "Simulation budget saved");
+            return;
+        }
+    }
+    app_status(a, "Use /sim budget to list limits, /sim budget KEY VALUE to edit, or /sim budget reset.");
 }
 
 void simulation_command(App *a, const char *verb, const char *arg)
@@ -1063,9 +1348,12 @@ void simulation_command(App *a, const char *verb, const char *arg)
             append(&a->info,tool_help);
             append(&a->info,physics_help);
             append(&a->info,scenario_help);
+            format(&a->info, "\n/sim checkpoint on|off|EVENTS · interval %d (0 disables)\n",
+                   checkpoint_interval(a->story));
+            append(&a->info, "/sim budget [KEY VALUE|reset] · view or edit resource ceilings\n");
         }
         else {
-            Json *state = state_at(a->story, head);
+            Json *state = simulation_state(a->story, head);
             if (clock) {
                 clock_text(state, &a->info);
                 append(&a->info, "\n/time set DAY HH:MM  ·  /time auto MINUTES|off  ·  /time advance MINUTES");
@@ -1079,6 +1367,25 @@ void simulation_command(App *a, const char *verb, const char *arg)
         return;
     }
     if (preview_busy(&a->preview)) { app_status(a, "Finish the narrator reply before changing scene state."); return; }
+    if (!stats && !clock && (!strcmp(arg, "budget") || !strncmp(arg, "budget ", 7))) {
+        budget_command(a, arg[6] == ' ' ? arg + 7 : "");
+        return;
+    }
+    if (!stats && !clock && !strncmp(arg, "checkpoint ", 11)) {
+        const char *interval = arg + 11;
+        int value;
+        if (!strcmp(interval, "on")) value = CHECKPOINT_INTERVAL;
+        else if (!strcmp(interval, "off")) value = 0;
+        else if (!read_decimal(&interval, 1, 10000, &value) || *interval) {
+            app_status(a, "Use /sim checkpoint on, off, or an interval from 1 to 10000.");
+            return;
+        }
+        integer(a->story, "simCheckpointInterval", value);
+        if (!value) cJSON_DeleteItemFromObjectCaseSensitive(a->story, "simCheckpoints");
+        a->ws.dirty = true;
+        app_status(a, value ? "Simulation checkpoint interval saved" : "Simulation checkpoints disabled");
+        return;
+    }
     if (stats) {
         if (strcmp(arg, "on") && strcmp(arg, "off")) { app_status(a, "Use /stats on or off."); return; }
         put(a->story, "simEnabled", cJSON_CreateBool(!strcmp(arg, "on")));
@@ -1093,12 +1400,17 @@ void simulation_command(App *a, const char *verb, const char *arg)
         return;
     }
     const char *tool = js(op, "neutrino_tool");
-    Json *state = state_at(a->story, head);
+    Json *state = simulation_state(a->story, head);
     Text result = {0};
-    if (*tool && run_sim_read(tool,op,a->story,head,state,&result,nullptr)) {
+    PlanBudget budget = plan_budget(a->story);
+    if (!budget_action(&budget, op, state, &result)) {
+        app_info(a, "Simulation budget");
+        append(&a->info, str(&result));
+    } else if (*tool && run_sim_read(tool,op,a->story,head,state,&result,nullptr,nullptr)) {
         app_info(a, "Physics result");
         append(&a->info, str(&result));
     } else if (*tool && apply_tool(a->story, head, state, op)) {
+        checkpoint_commit(a->story, head, state);
         a->ws.dirty = true;
         app_status(a, "Scene state saved");
     } else app_status(a, clock ? "Use /time set DAY HH:MM, auto MINUTES|off, or advance MINUTES." :

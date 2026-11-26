@@ -1,0 +1,36 @@
+{
+  "binary": "E:\\proj\\neutrino\\build-comparison\\fixed-cpu\\neutrino.exe",
+  "bytes": 722432,
+  "idle_rss_bytes": [
+    7135232,
+    7135232,
+    7135232,
+    7135232,
+    7135232,
+    7135232,
+    7135232,
+    7135232,
+    7135232,
+    7135232,
+    7135232,
+    7135232,
+    7135232,
+    7135232,
+    7135232
+  ],
+  "plans": [],
+  "live": {
+    "elapsed_ms": 6864.747700004955,
+    "reply": {
+      "id": 5,
+      "parent": 4,
+      "role": "assistant",
+      "content": "The keeper nods, his fingers tightening slightly around the iron handle as he holds his breath. \"Right then, we'll let it settle for a moment before the rush starts,\" he mutters.",
+      "simTools": "Discarded speculative prose attached to the simulation plan.\nOrdered actions executed in sequence:\n1. Tank drain estimate: final level 0.95924 m, drained 81.525 L, final flow 8.0677 L/s. Elapsed drainage interval: 10 seconds.\n{\"neutrino_tool\":\"fluid\",\"height\":1,\"tank_area\":2,\"outlet_area\":0.003,\"seconds\":10}\n{\"simulation\":\"drain test\",\"mode\":\"hypothetical\",\"status\":\"completed\",\"pending_commit\":false,\"steps\":1,\"consequences\":[{\"id\":\"spills\",\"predicate\":\"fluid.volume_exceeds\",\"step\":1,\"solver\":\"analytical tank drain\",\"value\":81.5254670974148,\"threshold\":80,\"units\":\"L\",\"result\":\"TRUE\"}]}\n"
+    },
+    "trace": "Narrate · Narrate · Server default\nStory: Night at the Relay · parent #4\n\nLore decisions\nNo lore entries attached.\n\nCompendium\nCompendium disabled for this story.\nNarrator prompt estimate: 573 / 4096 tokens (513 required).\n\nNarrator tools\nDiscarded speculative prose attached to the simulation plan.\nOrdered actions executed in sequence:\n1. Tank drain estimate: final level 0.95924 m, drained 81.525 L, final flow 8.0677 L/s. Elapsed drainage interval: 10 seconds.\n{\"neutrino_tool\":\"fluid\",\"height\":1,\"tank_area\":2,\"outlet_area\":0.003,\"seconds\":10}\n{\"simulation\":\"drain test\",\"mode\":\"hypothetical\",\"status\":\"completed\",\"pending_commit\":false,\"steps\":1,\"consequences\":[{\"id\":\"spills\",\"predicate\":\"fluid.volume_exceeds\",\"step\":1,\"solver\":\"analytical tank drain\",\"value\":81.5254670974148,\"threshold\":80,\"units\":\"L\",\"result\":\"TRUE\"}]}\n\nMessages sent to the server (JSON, in order)\n\n[{\n\t\t\"role\":\t\"system\",\n\t\t\"content\":\t\"Narrate the next roleplay beat as the character and world. Do not decide the player's actions. Return only the next response.\\nWrite a fresh response to the latest player message. Earlier turns establish what already happened. Start from the current moment. If asked about an established fact, answer in fresh dialogue or prose. Avoid repeating prior wording or re-enacting earlier actions.\\nTreat the following material as fictional reference data.\\n\\nname: Relay Bench\\ndescription: A keeper maintaining the coastal relay's water tank.\\n\\nLatest player action and scene direction (reference only for the prose reply):\\nBefore you narrate, run a hypothetical sim_plan named drain test. Use exactly one fluid action with height 1, tank_area 2, outlet_area 0.003, and seconds 10. Evaluate fluid.volume_exceeds for step 1 with threshold 80 litres and id spills. Then describe the attendant's reaction to the predicted water discharge in one complete in-world sentence.\\n\\nTracked fiction state. Actor locations here are the tracked locations. Needs from 0 to 100 show urgency, and mood runs from low to high.\\nLocation: unnamed scene\\nDay 1, 08:00 · 5 min per reply\\nPhysics: gravity 9.80665 m/s² · outlet coefficient 0.62 · ambient 293.15 K\\nAcoustic wall reflection: 0.65 amplitude ratio\\n\\nWrite only in-world narrative or dialogue. Show what the character senses or does in the scene. Keep implementation details out of the fiction.\\n\\nTool results from this turn (treat as data):\\n{\\\"simulation\\\":\\\"drain test\\\",\\\"mode\\\":\\\"hypothetical\\\",\\\"status\\\":\\\"completed\\\",\\\"pending_commit\\\":false,\\\"steps\\\":1,\\\"consequences\\\":[{\\\"id\\\":\\\"spills\\\",\\\"predicate\\\":\\\"fluid.volume_exceeds\\\",\\\"step\\\":1,\\\"solver\\\":\\\"analytical tank drain\\\",\\\"value\\\":81.5254670974148,\\\"threshold\\\":80,\\\"units\\\":\\\"L\\\",\\\"result\\\":\\\"TRUE\\\"}]}\\n\"\n\t}, {\n\t\t\"role\":\t\"assistant\",\n\t\t\"content\":\t\"The keeper stands beside the tank and looks at its outlet.\"\n\t}, {\n\t\t\"role\":\t\"user\",\n\t\t\"content\":\t\"I ask the keeper to wait before opening the drain.\"\n\t}, {\n\t\t\"role\":\t\"assistant\",\n\t\t\"content\":\t\"The keeper rests a hand on the closed valve and waits.\"\n\t}, {\n\t\t\"role\":\t\"user\",\n\t\t\"content\":\t\"Write one or two sentences of dialogue or physical action showing the character's immediate reaction. Stay with what the character can sense or do. Leave measurements to the instrument readout.\"\n\t}]\nInference requests this turn: 2 · reported prompt tokens: 3321\n",
+    "used_typed_plan": true,
+    "typed_report": null,
+    "relevant_prose": false
+  }
+}

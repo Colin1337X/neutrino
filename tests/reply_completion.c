@@ -26,6 +26,11 @@ int main(void)
             return 1;
         }
     }
+    const char *code = "LANTERN QUARTZ SEVEN", *partial = "She opened the";
+    if (!narrator_short_answer(code, strlen(code), "What is the locker code? Reply with the code only.") ||
+        narrator_short_answer(code, strlen(code), "Continue the scene.") ||
+        narrator_short_answer(partial, strlen(partial), "Return only the code.") ||
+        !narrator_short_answer("-3.14", 5, "") || narrator_short_answer("+.", 2, "")) return 1;
     int cols = 138, rows = 34;
     bound_terminal_viewport(&cols, &rows);
     if (cols != 138 || rows != 34) return 1;

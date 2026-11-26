@@ -9,6 +9,12 @@ bool physics_optional(const Json *args, const char *key, double low, double high
 bool physics_model_tool(const char *name);
 bool physics_model_run(const char *name, const Json *args, double gravity, Text *out, bool *unavailable);
 typedef struct {
+    double work, steps, seconds, rays, cells, nodes, ram, mapped;
+} PhysicsCost;
+PhysicsCost physics_cost(const Json *op, const Json *settings);
+PhysicsCost softbody_cost(const Json *args);
+PhysicsCost rigid_cost(const Json *op, const Json *room);
+typedef struct {
     const char *method;
     double final_kg, transferred_kg, equilibrium_kg, gas_kg;
     bool closed;
@@ -44,7 +50,15 @@ typedef struct {
     bool mapped;
 } FlowField;
 
+typedef struct PhysicsCache {
+    FlowField flow;
+    const Json *room;
+} PhysicsCache;
+
+void physics_cache_release(PhysicsCache *cache);
+
 bool flow_parse(const Json *args, const double length[3], FlowConfig *config);
+PhysicsCost flow_cost(const FlowConfig *config);
 FlowField flow_solve(const FlowConfig *config);
 FlowField flow_solve_domain(const FlowConfig *config, const PhysicsBox *solids, size_t count);
 double flow_sample(const FlowField *field, const double local[3]);

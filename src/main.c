@@ -1,6 +1,7 @@
 #include "app.h"
 #include "web.h"
 #include <ctype.h>
+#include <inttypes.h>
 #include <errno.h>
 #include <limits.h>
 #include <signal.h>
@@ -60,6 +61,7 @@ const Command commands[] = {
     {"give", " ITEM | CHARACTER", "Hand a carried item to a party member here"},
     {"use", " ITEM [| TARGET]", "Use an available item in a narrated action"},
     {"talk", " CHARACTER | MESSAGE", "Speak to a character in the current room"},
+    {"knowledge", " CHARACTER | FACT", "Share a fact privately with a character on this branch"},
     {"wear", " ITEM", "Put on an item you carry"},
     {"remove", " ITEM", "Take off a worn item and keep carrying it"},
     {"npc", " NAME | DESCRIPTION", "Add a character in this room"},
@@ -557,6 +559,12 @@ static void messages_add(Json *messages, const char *role, const char *text)
 static void messages_for_story(App *a, Json *messages)
 {
     Preview *p = &a->preview;
+    if (p->speaker.len) {
+        clear(&p->selection_trace);
+        append(&p->selection_trace, "Character context uses only this conversation and shared branch knowledge.\n");
+        world_character_messages(p, messages);
+        return;
+    }
     if (simulation_plan_selector(p)) {
         clear(&p->selection_trace);
         append(&p->selection_trace, "Selecting the player-attached hypothetical plan.\n");
@@ -591,8 +599,6 @@ static void messages_for_story(App *a, Json *messages)
     if (p->messages_context.len) format(&system, "\n\nStory sources:\n%s", str(&p->messages_context));
     if (p->world_context.len)
         format(&system, "\n\nWorld state before the narrator's tool calls:\n%s", str(&p->world_context));
-    if (p->speaker.len)
-        format(&system, "\nThe player addressed %s. Reply as that character in the current room.", str(&p->speaker));
     Json *preset = at(p->story, "preset"), *prompt;
     Json *blocks = at(preset, "blocks");
     if (!blocks) blocks = at(preset, "prompts");
@@ -801,7 +807,8 @@ static void start_candidate(App *a, int index)
     append(&a->trace, wire);
     cJSON_free(wire);
     c->finished = false;
-    bool attached_acoustic = !p->tool_prose_only && !p->tool_rounds && simulation_attached_acoustic_turn(p);
+    bool attached_acoustic = !p->speaker.len && !p->tool_prose_only && !p->tool_rounds &&
+        simulation_attached_acoustic_turn(p);
     c->job = app_inference(a, attached_acoustic ? "narrator-acoustic" : "narrator", messages);
     cJSON_Delete(messages);
     if (c->job) p->active++;
@@ -980,7 +987,7 @@ static bool begin_auto_research(App *a)
 
 static void continue_narrator(App *a)
 {
-    if (begin_recall(a)) return;
+    if (!a->preview.speaker.len && begin_recall(a)) return;
     status(a, "Generating · Esc cancels");
     a->preview.next = 1;
     start_candidate(a, 0);
@@ -1001,11 +1008,13 @@ static void begin(App *a, Operation op, const char *objective, int parent, const
         p->story = a->story;
         p->parent = parent;
         p->head = number(a->story, "head");
-        remember_previous_reply(p);
         if (!speaker && op == SWIPE) speaker = js(story_pick(p->story, p->head), "speaker");
         if (!speaker && op == NARRATE) speaker = js(story_pick(p->story, parent), "addressed");
         if (speaker) append(&p->speaker, speaker);
-        world_context(p->story, parent, &p->world_context);
+        if (!p->speaker.len) {
+            remember_previous_reply(p);
+            world_context(p->story, parent, &p->world_context);
+        }
         if (p->world_context.len > 32000) {
             status(a, "World context exceeds the size limit for this request.");
             return;
@@ -1026,11 +1035,13 @@ static void begin(App *a, Operation op, const char *objective, int parent, const
             return;
         }
     }
-    capture_research(a);
-    if (!collect_context(&a->ws, p->story ? NULL : p->scene, p->story, p->parent,
-                         &p->messages_context, &p->lore_trace)) {
-        status(a, "Required context exceeds the budget. Raise /budget or unpin a source.");
-        return;
+    if (!p->speaker.len) {
+        capture_research(a);
+        if (!collect_context(&a->ws, p->story ? NULL : p->scene, p->story, p->parent,
+                             &p->messages_context, &p->lore_trace)) {
+            status(a, "Required context exceeds the budget. Raise /budget or unpin a source.");
+            return;
+        }
     }
     int count = number(a->ws.root, "neutrinoCandidates");
     if (count < 1 || count > 5 || op >= NARRATE) count = 1;
@@ -1055,7 +1066,7 @@ static void begin(App *a, Operation op, const char *objective, int parent, const
     if (!p->story) show_preview(a);
     memory_pause(a);
     if (p->story) {
-        if (!begin_auto_research(a)) continue_narrator(a);
+        if (p->speaker.len || !begin_auto_research(a)) continue_narrator(a);
     } else {
         status(a, "Generating · Esc cancels");
         dispatch_writing(a);
@@ -1071,6 +1082,11 @@ static bool finish_narrator_prose(App *a, Preview *p, Candidate *c)
     size_t complete = narrator_complete_prefix(body);
     if (end && complete == end) {
         if (p->completion_retry) append(&a->trace, "\nReply completion · shorter draft ended cleanly.\n");
+        return true;
+    }
+    const char *cue = js(story_pick(p->story, p->parent), "content");
+    if (c->metrics.clean_stop && !p->reading_count && narrator_short_answer(body, end, cue)) {
+        append(&a->trace, "\nReply completion · provider ended a short answer.\n");
         return true;
     }
     if (complete) {
@@ -1190,6 +1206,14 @@ static bool update_generation(App *a)
     Candidate *c = &p->candidates[0];
     bool changed = read_candidate(p, c);
     if (!c->finished) return changed;
+    if (changed) {
+        ++p->narrator_requests;
+        p->narrator_prompt_tokens += (uint64_t)c->metrics.prompt_tokens;
+        format(&a->trace, "\nInference requests this turn: %d", p->narrator_requests);
+        if (p->narrator_prompt_tokens)
+            format(&a->trace, " · reported prompt tokens: %" PRIu64, p->narrator_prompt_tokens);
+        append(&a->trace, "\n");
+    }
     if (c->error.len || p->stopped) status(a, c->error.len ? str(&c->error) : "Generation cancelled");
     else {
         if (p->head == number(p->story, "head")) {
@@ -1231,9 +1255,12 @@ static bool update_generation(App *a)
             simulation_commit(a, p, id);
             Json *reply = story_pick(p->story, id);
             if (c->thinking.len) set(reply, "reasoning", str(&c->thinking));
-            if (p->speaker.len) set(reply, "speaker", str(&p->speaker));
+            if (p->speaker.len) {
+                set(reply, "speaker", str(&p->speaker));
+                set(reply, "characterScope", str(&p->speaker));
+            }
             if (p->memory_picks) put(reply, "memoryRecallPicks", cJSON_Duplicate(p->memory_picks, true));
-            memory_schedule(a, p->story, id);
+            if (!p->speaker.len) memory_schedule(a, p->story, id);
             p->open = false;
             if (a->roleplay && a->story == p->story) a->scroll = INT_MAX;
             status(a, p->op == SWIPE ? "Alternate reply saved · /previous or /branch" :
@@ -1927,7 +1954,7 @@ static void slash_command(App *a, char *line)
     if (!strcmp(line,"talk") || !strcmp(line,"use")) { rpg_narration(a,!strcmp(line,"talk"),arg); return; }
     const char *const world_commands[] = {"world", "room", "connect", "go", "item",
         "take", "drop", "wear", "remove", "npc", "weather", "say", "map", "inspect", "inventory", "who", "exits",
-        "look","examine","character","party","give"};
+        "look","examine","character","party","give","knowledge"};
     for (size_t i = 0; i < sizeof world_commands / sizeof *world_commands; i++) {
         if (!strcmp(line, world_commands[i])) { world_command(a, line, arg); return; }
     }

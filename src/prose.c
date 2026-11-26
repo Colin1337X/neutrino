@@ -55,3 +55,38 @@ size_t narrator_complete_prefix(const char *text)
     }
     return complete;
 }
+
+static bool asks_for_code(const char *cue)
+{
+    const char *const phrases[] = {"code only", "only the code", "only with the code"};
+    for (; *cue; ++cue) {
+        for (size_t i = 0; i < sizeof phrases / sizeof *phrases; ++i) {
+            const char *a = cue, *b = phrases[i];
+            while (*b && tolower((unsigned char)*a) == *b) { ++a; ++b; }
+            if (!*b) return true;
+        }
+    }
+    return false;
+}
+
+bool narrator_short_answer(const char *reply, size_t length, const char *cue)
+{
+    while (length && isspace((unsigned char)*reply)) { ++reply; --length; }
+    if (!length || length > 64) return false;
+    size_t number = reply[0] == '+' || reply[0] == '-';
+    while (number < length && isdigit((unsigned char)reply[number])) ++number;
+    if (number == length) return isdigit((unsigned char)reply[length - 1]);
+    if (number > 0 && number + 1 < length && reply[number] == '.' &&
+        isdigit((unsigned char)reply[number - 1])) {
+        for (++number; number < length && isdigit((unsigned char)reply[number]); ++number) {}
+        if (number == length) return true;
+    }
+    if (!asks_for_code(cue)) return false;
+    bool alnum = false;
+    for (size_t i = 0; i < length; ++i) {
+        const unsigned char c = (unsigned char)reply[i];
+        if ((c >= 'A' && c <= 'Z') || isdigit(c)) alnum = true;
+        else if (c != ' ' && c != '-' && c != '_') return false;
+    }
+    return alnum;
+}

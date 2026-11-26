@@ -1009,7 +1009,26 @@ static bool endpoint(const Json *args, const Json *objects, const char *id_key, 
     return true;
 }
 
-static bool scene_query(const char *tool, const Json *args, const Json *settings, Text *out, PhysicsReading *reading)
+void physics_cache_release(PhysicsCache *cache)
+{
+    flow_release(&cache->flow);
+    *cache = (PhysicsCache){0};
+}
+
+static const FlowField *scene_field(PhysicsCache *cache, const Json *room, const Box *bounds,
+                                    const FlowConfig *config, Text *out)
+{
+    if (cache->room == room && cache->flow.grid) append(out, "Reused CFD field. ");
+    else {
+        physics_cache_release(cache);
+        cache->flow = room_flow_solve(room, bounds, config);
+        cache->room = room;
+    }
+    return &cache->flow;
+}
+
+static bool scene_query(const char *tool, const Json *args, const Json *settings, Text *out,
+                        PhysicsReading *reading, PhysicsCache *cache)
 {
     if (!strcmp(tool,"scene_catalog")) {
         double offset;
@@ -1086,28 +1105,27 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
         double point[3];
         if (!at(room, "medium") || !room_flow(at(room, "medium"), &bounds, &config) ||
             !physics_vector(args, "probe", point) || !strictly_inside(&bounds, point)) return false;
-        FlowField field = room_flow_solve(room, &bounds, &config);
-        if (!field.grid && (config.porous || cJSON_IsTrue(at(at(room, "medium"), "solid_geometry")))) {
+        const FlowField *field = scene_field(cache, room, &bounds, &config, out);
+        if (!field->grid && (config.porous || cJSON_IsTrue(at(at(room, "medium"), "solid_geometry")))) {
             if (reading) reading->unavailable = true;
             format(out, "%s unavailable. %s.", config.porous ? "Porous CFD" : "Geometry-aware CFD",
-                   field.fallback ? field.fallback : "No grid");
+                   field->fallback ? field->fallback : "No grid");
         } else {
             for (int axis = 0; axis < 3; ++axis) point[axis] -= bounds.lo[axis];
-            double concentration = flow_sample(&field, point);
+            double concentration = flow_sample(field, point);
             if (reading) {
                 reading->kind = READING_FLOW;
                 reading->tracer_concentration = concentration;
-                reading->voxel_flow = field.solid != nullptr;
+                reading->voxel_flow = field->solid != nullptr;
                 reading->porous_flow = config.porous;
-                reading->porous_speed = field.porous_speed;
-                reading->pore_volume = field.pore_volume;
+                reading->porous_speed = field->porous_speed;
+                reading->pore_volume = field->pore_volume;
             }
             format(out, "%s. Probe concentration %.9g. RMS divergence %.9g s^-1. Mean speed %.9g m/s.",
-                   field.method, concentration, field.divergence, field.speed);
-            if (field.fallback) format(out, " Fallback: %s.", field.fallback);
-            flow_porous_summary(&field, out);
+                   field->method, concentration, field->divergence, field->speed);
+            if (field->fallback) format(out, " Fallback: %s.", field->fallback);
+            flow_porous_summary(field, out);
         }
-        flow_release(&field);
         return true;
     }
     const bool optical = !strcmp(tool,"scene_light");
@@ -1161,20 +1179,17 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
         }
     }
     FlowConfig config;
-    FlowField field = {0};
     const FlowField *gas = nullptr;
     if (at(room,"medium") && room_flow(at(room,"medium"),&bounds,&config) &&
         (optical ? config.light_loss : config.sound_loss) > 0) {
-        field = room_flow_solve(room, &bounds, &config);
-        if (!field.grid && (config.porous || cJSON_IsTrue(at(at(room, "medium"), "solid_geometry")))) {
+        gas = scene_field(cache, room, &bounds, &config, out);
+        if (!gas->grid && (config.porous || cJSON_IsTrue(at(at(room, "medium"), "solid_geometry")))) {
             if (reading) reading->unavailable = true;
             format(out, "%s unavailable. %s.", config.porous ? "Porous CFD" : "Geometry-aware CFD",
-                   field.fallback ? field.fallback : "No grid");
+                   gas->fallback ? gas->fallback : "No grid");
             cJSON_Delete(filtered);
-            flow_release(&field);
             return true;
         }
-        gas = &field;
     }
     const Json *air = at(materials, js(room, "air"));
     Json *query = cJSON_Duplicate(args, true);
@@ -1186,7 +1201,6 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
         bool valid = light(query, filtered ? filtered : room, &bounds, gas, air_loss, out, reading);
         cJSON_Delete(query);
         cJSON_Delete(filtered);
-        flow_release(&field);
         return valid;
     }
     if (!at(query, "medium") && at(air, "material"))
@@ -1197,7 +1211,6 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
     bool valid = acoustic(query, settings, gas, out, reading);
     cJSON_Delete(query);
     cJSON_Delete(filtered);
-    flow_release(&field);
     return valid;
 }
 
@@ -1246,7 +1259,46 @@ static bool prop_load(const Json *args, Text *out)
            stress < capacity ? "holds" : stress == capacity ? "gives slightly" : "breaks");
     return true;
 }
-bool physics_run_reading(const char *name, const Json *args, const Json *settings, Text *out, PhysicsReading *reading)
+PhysicsCost physics_cost(const Json *op, const Json *settings)
+{
+    const char *tool = js(op, "neutrino_tool");
+    if (!strcmp(tool, "softbody3d")) return softbody_cost(op);
+    const Json *room = active_room(settings);
+    if (!strcmp(tool, "scene_step")) return rigid_cost(op, room);
+    PhysicsCost cost = {0};
+    FlowConfig flow;
+    if (!strcmp(tool, "flow3d") || !strcmp(tool, "fluid") || !strcmp(tool, "gas")) {
+        double dimensions[3];
+        if (physics_vector(op, "size", dimensions) && flow_parse(op, dimensions, &flow))
+            return flow_cost(&flow);
+    }
+    const bool acoustic_query = !strcmp(tool, "scene_acoustic"), optical_query = !strcmp(tool, "scene_light");
+    if (acoustic_query || optical_query || !strcmp(tool, "scene_flow")) {
+        Box bounds;
+        const Json *medium = at(room, "medium");
+        if (medium && read_box(room, &bounds) && room_flow(medium, &bounds, &flow) &&
+            (acoustic_query ? flow.sound_loss > 0 : optical_query ? flow.light_loss > 0 : true))
+            cost = flow_cost(&flow);
+    }
+    const double shapes = cJSON_GetArraySize(at(room, "objects"));
+    if (!strcmp(tool, "scene_rays")) {
+        double generated;
+        cost.rays = at(op, "directions") ? cJSON_GetArraySize(at(op, "directions")) :
+            physics_scalar(op, "count", 1, RAY_BATCH_MAX, &generated) ? generated : 0;
+        cost.work += cost.rays * (1 + shapes);
+    } else if (!strcmp(tool, "rays") || !strcmp(tool, "ray")) {
+        cost.rays = !strcmp(tool, "ray") ? 1 : cJSON_GetArraySize(at(op, "rays"));
+        cost.work += cost.rays;
+    } else if (acoustic_query || optical_query || !strcmp(tool, "acoustic")) {
+        const double blockers = !strcmp(tool, "acoustic") ? cJSON_GetArraySize(at(op, "blockers")) : shapes;
+        cost.rays = ACOUSTIC_ROOM_PATHS + 6 * fmin(ACOUSTIC_BLOCKERS, blockers);
+        cost.work += cost.rays * (1 + 2 * blockers);
+    }
+    return cost;
+}
+
+bool physics_run_cached(const char *name, const Json *args, const Json *settings, Text *out,
+                        PhysicsReading *reading, PhysicsCache *cache)
 {
     if (reading) *reading = (PhysicsReading){0};
     if (mass_transfer_tool(name)) {
@@ -1263,7 +1315,7 @@ bool physics_run_reading(const char *name, const Json *args, const Json *setting
     if (!strcmp(name, "scene_inspect") || !strcmp(name, "scene_rays") || !strcmp(name, "scene_acoustic") ||
         !strcmp(name, "scene_light") || !strcmp(name,"scene_catalog") || !strcmp(name, "scene_flow") ||
         !strcmp(name, "scene_spill") || !strcmp(name, "scene_puddles"))
-        return scene_query(name, args, settings, out, reading);
+        return scene_query(name, args, settings, out, reading, cache);
     if (!strcmp(name, "ray")) return ray(args, out);
     if (!strcmp(name, "rays")) return rays(args, out, reading);
     if (!strcmp(name, "acoustic")) return acoustic(args, settings, nullptr, out, reading);
@@ -1281,6 +1333,14 @@ bool physics_run_reading(const char *name, const Json *args, const Json *setting
     if (physics_model_tool(name))
         return physics_model_run(name, args, setting(settings, GRAVITY), out, reading ? &reading->unavailable : nullptr);
     return false;
+}
+
+bool physics_run_reading(const char *name, const Json *args, const Json *settings, Text *out, PhysicsReading *reading)
+{
+    PhysicsCache cache = {0};
+    const bool valid = physics_run_cached(name, args, settings, out, reading, &cache);
+    physics_cache_release(&cache);
+    return valid;
 }
 bool physics_run(const char *name, const Json *args, const Json *settings, Text *out)
 {

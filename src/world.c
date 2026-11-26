@@ -540,6 +540,62 @@ bool world_address(const Json *story, const char *line, Text *speaker, const cha
     return speaker->len > 0;
 }
 
+static void character_message(Json *messages, const char *role, const char *content)
+{
+    Json *message = cJSON_CreateObject();
+    set(message, "role", role);
+    set(message, "content", content);
+    cJSON_AddItemToArray(messages, message);
+}
+
+void world_character_messages(const Preview *p, Json *messages)
+{
+    const char *speaker = str(&p->speaker);
+    Json *path = story_path(p->story, p->parent);
+    Text rules = {0};
+    format(&rules, "Speak as %s. Give a short in-character reply based on this conversation and the "
+        "information shared with you below. Treat it as potentially mistaken or outdated. Express "
+        "uncertainty when needed. Return dialogue or a visible reaction in prose. No tools are available.\n", speaker);
+    if (p->completion_retry) append(&rules, "Reply in one complete sentence and end with punctuation.\n");
+
+    const Json *grants = at(p->story, "characterKnowledge");
+    const Json *node = path->child, *grant;
+    cJSON_ArrayForEach(grant, grants) {
+        if (!equal_name(js(grant, "recipient"), speaker)) continue;
+        const int anchor = number(grant, "anchor");
+        /* Grants can be appended from a rewind, so each record checks its own source. */
+        for (node = path->child; node && number(node, "id") < anchor; node = node->next) {}
+        if (anchor < 0 || (anchor && number(node, "id") != anchor)) continue;
+        const char *fact = js(grant, "fact");
+        if (rules.len + strlen(fact) > 8192) break;
+        format(&rules, "\nShared with you: %s", fact);
+    }
+    character_message(messages, "system", str(&rules));
+    release(&rules);
+
+    const Json *turns[12];
+    size_t count = 0, bytes = 0;
+    for (node = path->child ? path->child->prev : nullptr; node && count < sizeof turns / sizeof *turns;
+         node = node == path->child ? nullptr : node->prev) {
+        const char *role = js(node, "role");
+        const bool inbound = !strcmp(role, "user") && equal_name(speaker, js(node, "addressed"));
+        const bool outbound = !strcmp(role, "assistant") && equal_name(speaker, js(node, "characterScope"));
+        if (!inbound && !outbound) continue;
+        const size_t len = strlen(js(node, "content"));
+        if (count && len > 8192 - bytes) break;
+        turns[count++] = node;
+        if (len >= 8192 - bytes) break;
+        bytes += len;
+    }
+    for (size_t i = count; i > 0; --i) {
+        const Json *turn = turns[i - 1];
+        character_message(messages, js(turn, "role"), js(turn, "content"));
+    }
+    if (!count || strcmp(js(turns[0], "role"), "user"))
+        character_message(messages, "user", "How do you respond?");
+    cJSON_Delete(path);
+}
+
 static void world_panel(App *a, bool log)
 {
     app_info(a, log ? "World activity" : "World & inventory");
@@ -771,6 +827,35 @@ static void character_command(App *a, char *argument)
     cJSON_Delete(op);
 }
 
+static void knowledge_command(App *a, char *argument)
+{
+    char *separator = strchr(argument, '|');
+    if (!separator) {
+        app_status(a, "Use /knowledge CHARACTER | FACT to share a belief with that character.");
+        return;
+    }
+    *separator++ = 0;
+    const char *name = trim(argument), *fact = trim(separator);
+    const int head = number(a->story, "head");
+    Json *state = world_state(a->story, head);
+    const Json *recipient = named(at(state, "npc"), name);
+    if (!recipient) recipient = named(at(state, "party"), name);
+    if (recipient && *fact && strlen(fact) <= 1200) {
+        Json *grant = cJSON_CreateObject(), *physical = simulation_state(a->story, head);
+        set(grant, "recipient", js(recipient, "name"));
+        set(grant, "fact", fact);
+        set(grant, "source", "player");
+        set(grant, "kind", "hearsay");
+        integer(grant, "anchor", head);
+        put(grant, "minute", cJSON_Duplicate(at(physical, "clock"), false));
+        cJSON_AddItemToArray(array(a->story, "characterKnowledge"), grant);
+        cJSON_Delete(physical);
+        a->ws.dirty = true;
+        app_status(a, "Character knowledge saved on the active branch");
+    } else app_status(a, "Choose a known character and a fact of up to 1200 bytes.");
+    cJSON_Delete(state);
+}
+
 void world_command(App *a, const char *verb, char *argument)
 {
     if (!a->roleplay || !a->story) { app_status(a, "Open a roleplay story to use its world."); return; }
@@ -789,6 +874,7 @@ void world_command(App *a, const char *verb, char *argument)
     if (!strcmp(verb, "who")) { room_roster(a); return; }
     if (!strcmp(verb, "exits")) { room_exits(a); return; }
     if (preview_busy(&a->preview)) { app_status(a, "Finish the active reply before changing the world."); return; }
+    if (!strcmp(verb, "knowledge")) { knowledge_command(a, argument); return; }
     if (!strcmp(verb,"give")) {
         char *target = strchr(argument,'|');
         if (!target) { app_status(a,"Use /give ITEM | CHARACTER."); return; }

@@ -1,0 +1,11 @@
+method,repetition,mean_ms
+cold,1,28.375000
+cold,2,28.250000
+cold,3,28.750000
+cold,4,29.250000
+cold,5,28.875000
+reused,1,0.001750
+reused,2,0.002000
+reused,3,0.002000
+reused,4,0.002250
+reused,5,0.001750
