@@ -277,13 +277,19 @@ static bool transfer(Inference *j, Response *r, long *status)
     CURL *curl = curl_easy_init();
     if (!curl) return false;
     struct curl_slist *headers = NULL;
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    headers = curl_slist_append(headers, "Accept: text/event-stream, application/json");
-    headers = curl_slist_append(headers, "Expect:");
     Text auth = {0};
-    if (*j->key) {
-        format(&auth, "Authorization: Bearer %s", j->key);
-        headers = curl_slist_append(headers, str(&auth));
+    if (*j->key) format(&auth, "Authorization: Bearer %s", j->key);
+    const char *fields[] = {"Content-Type: application/json", "Accept: text/event-stream, application/json",
+                            "Expect:", *j->key ? str(&auth) : nullptr, nullptr};
+    for (size_t i = 0; fields[i]; ++i) {
+        struct curl_slist *next = curl_slist_append(headers, fields[i]);
+        if (!next) {
+            curl_slist_free_all(headers);
+            curl_easy_cleanup(curl);
+            release(&auth);
+            return false;
+        }
+        headers = next;
     }
     curl_easy_setopt(curl, CURLOPT_URL, j->url);
 #if LIBCURL_VERSION_NUM >= 0x075500
