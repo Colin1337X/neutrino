@@ -1,6 +1,7 @@
 #include "app.h"
 #include "ray.h"
 #include "physics_models.h"
+#include "spill.h"
 
 #include <float.h>
 #include <limits.h>
@@ -196,6 +197,12 @@ const Json *physics_scene_body(const Json *settings, const char *entity)
     return at(scene_object(at(active_room(settings), "objects"), entity), "rigid");
 }
 
+bool physics_scene_spill(const Json *settings, const char *entity, const char *surface,
+                         Json *evidence, double *litres)
+{
+    return spill_evidence(active_room(settings), entity, surface, evidence, litres);
+}
+
 static bool acoustic_properties(const Json *material, double *loss, double *reflectivity)
 {
     return cJSON_IsObject(material) && physics_scalar(material, "loss_db_per_m", 0, 1e6, loss) &&
@@ -353,7 +360,21 @@ bool physics_scene_edit(Json *settings, const Json *op)
         put(copy,"optical",attributes);
     }
     if (object) {
-        if (at(object, "rigid")) put(copy, "rigid", cJSON_Duplicate(at(object, "rigid"), true));
+        if (at(object, "rigid")) {
+            Json *rigid = cJSON_Duplicate(at(object, "rigid"), true);
+            Box previous;
+            bool same_hull = read_box(object, &previous);
+            for (int k = 0; same_hull && k < 3; ++k)
+                same_hull = fabs((shape.hi[k]-shape.lo[k])-(previous.hi[k]-previous.lo[k])) <= 1e-8;
+            if (!same_hull) {
+                cJSON_DeleteItemFromObjectCaseSensitive(rigid, "orientation");
+                cJSON_DeleteItemFromObjectCaseSensitive(rigid, "half_extents_m");
+                cJSON_DeleteItemFromObjectCaseSensitive(rigid, "angular_momentum");
+                cJSON_DeleteItemFromObjectCaseSensitive(rigid, "rotation_rad");
+                cJSON_DeleteItemFromObjectCaseSensitive(rigid, "rotation_blocked");
+            }
+            put(copy, "rigid", rigid);
+        }
         if (!cJSON_ReplaceItemViaPointer(objects, object, copy)) {
             cJSON_Delete(copy);
             return false;
@@ -1031,6 +1052,21 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
         return true;
     }
     if (!strcmp(tool, "scene_rays")) return scene_rays(args, room, &bounds, out, reading);
+    if (!strcmp(tool, "scene_spill")) {
+        const char *entity = js(args, "entity"), *surface = js(args, "target");
+        if (!scene_name(entity) || (at(args, "target") && !scene_name(surface))) return false;
+        Json *evidence = cJSON_CreateObject();
+        double litres;
+        bool found = spill_evidence(room, entity, surface, evidence, &litres);
+        if (found) {
+            put(evidence, "selected_l", cJSON_CreateNumber(litres));
+            char *json = cJSON_PrintUnformatted(evidence);
+            if (json) append(out, json);
+            cJSON_free(json);
+        } else append(out, "No tracked water release for this entity.");
+        cJSON_Delete(evidence);
+        return true;
+    }
     if (!strcmp(tool, "scene_flow")) {
         FlowConfig config;
         double point[3];
@@ -1194,7 +1230,8 @@ bool physics_run_reading(const char *name, const Json *args, const Json *setting
 {
     if (reading) *reading = (PhysicsReading){0};
     if (!strcmp(name, "scene_inspect") || !strcmp(name, "scene_rays") || !strcmp(name, "scene_acoustic") ||
-        !strcmp(name, "scene_light") || !strcmp(name,"scene_catalog") || !strcmp(name, "scene_flow"))
+        !strcmp(name, "scene_light") || !strcmp(name,"scene_catalog") || !strcmp(name, "scene_flow") ||
+        !strcmp(name, "scene_spill"))
         return scene_query(name, args, settings, out, reading);
     if (!strcmp(name, "ray")) return ray(args, out);
     if (!strcmp(name, "rays")) return rays(args, out, reading);

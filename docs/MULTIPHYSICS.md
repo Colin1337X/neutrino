@@ -34,9 +34,12 @@ Reports distinguish TRUE, FALSE, INSUFFICIENT_DATA, UNSUPPORTED, and SIMULATION_
 | entity.exists | entity by name in the active layout |
 | entity.overlaps | entity and target. AABB interiors must overlap |
 | entity.moved | entity. Net translation in the last rigid step |
+| entity.rotated | entity. Angular path length in radians during the last rigid step |
 | entity.contacts | entity and target. Reports the greatest normal impact energy and its time for that target in the last rigid step. Use @room for the room boundary |
 | entity.structural_failure | entity. Whether it fractured and the recorded fracture energy and time |
 | fluid.leaves_container | entity. Cumulative water volume released by fracture |
+| fluid.spill_deposited | source entity. Landed and airborne water, with the deposited volume's centroid and footprint bounds |
+| fluid.deposits_on | source entity and target surface. Same evidence, with volume and footprint restricted to that surface |
 | fluid.volume_exceeds | step and threshold in litres drained |
 | fluid.level_exceeds | step and threshold in metres of remaining fluid |
 | fluid.concentration_exceeds | step and relative concentration threshold at a scene_flow probe |
@@ -56,9 +59,13 @@ Attach a rigid body to an existing object with scene_body, name, and mass_kg. Op
 
 The solver uses 240 Hz substeps with swept AABB pairs, static room boundaries, and normal impulses. It rejects initial overlaps involving moving bodies. Limits are 128 registered boxes, 10 seconds per step and 24 collision events per substep. Solver failures leave the step unchanged. A room's mechanics clock is measured in seconds independently of the story clock. The current implementation replays committed steps when reconstructing branch state.
 
-An object's registered material may specify mechanical.fracture_j. A normal collision with enough relative kinetic energy splits the box in two along its longest horizontal axis and releases any carried water into the spill ledger. The original name identifies the first piece; the second uses the suffix #2. The pieces divide dry mass equally and inherit the post-impact velocity. The fracture is persistent and modeled as inelastic. The spill ledger describes released volume. It does not simulate the subsequent flow.
+The scene_impulse tool takes name, impulse_ns in newton-seconds, and optional offset_m from the body's center in world coordinates. An offset on or inside the body applies angular impulse as well as linear impulse. Free bodies carry world-space angular momentum and a quaternion orientation. The solver uses the rectangular-prism inertia tensor and advances the orientation at each substep. Fixed mounts and rails lock rotation. The shared geometry uses the axis-aligned hull of the oriented prism, and a hull overlap blocks rotation inelastically. Swept contact impulses still act along the translational normal through the center. Corner torque and rolling friction are outside the model.
 
-The [falling container](../benchmarks/falling-container.json) fixture holds a jug, releases it, steps the shared geometry, and measures optical and acoustic paths from the final impact location. These paths test propagation to receiver coordinates. Detection, source identification and private knowledge require additional character models. Rotational dynamics, friction, flexible joints, and engineering-grade fracture are outside this model.
+An object's registered material may specify mechanical.fracture_j. A normal collision with enough relative kinetic energy splits the current hull in two along its longest horizontal axis. The original name identifies the first piece; the second uses the suffix #2. The pieces divide dry mass equally and inherit the post-impact linear velocity. Fracture is persistent and inelastic. Fragments start without spin.
+
+At fracture, 25 equal-volume water parcels sample the jug's oriented footprint and inherit its post-impact linear and tangential velocities. Gravity carries the parcels to upward static surfaces. Side contacts stop the corresponding velocity component. The parcels and their landing surfaces are stored in the room on the same branch as the fracture. The scene_spill tool accepts entity and optional target to inspect the volume, centroid and footprint. The model conserves the initialized parcel volumes. It does not resolve water interacting with moving fragments, pooling depth, runoff or splashes after landing.
+
+The [original falling container](../benchmarks/falling-container.json) fixture remains a regression control. The [rotating container](../benchmarks/rotating-container.json) adds balanced off-center impulses and two named floor sections. Both fixtures measure optical and acoustic paths from the final impact location. These paths test propagation to receiver coordinates. Detection, source identification and private knowledge require additional character models.
 
 End the current player turn with Simulation setup: followed by a complete hypothetical sim_plan to attach a long experiment. The model can select it with the short object {"neutrino_tool":"sim_plan"}. The simulator validates and runs the supplied actions. Stage-mode plans cannot be attached this way. The raw trace records the selection and the executed actions.
 
@@ -71,9 +78,9 @@ Set method to cfd and solid_geometry to true in scene_medium to use the room's b
 | Area | Status |
 | --- | --- |
 | State and orchestration | Shared branch-local AABB geometry and propagation materials, ordered and conditional transactions, analytical and numerical queries |
-| Mechanics | Shared translational rigid bodies, fixed mounts, rails and persistent two-piece brittle fracture. Rotational dynamics, joint networks and compound shapes are unfinished |
+| Mechanics | Quaternion rotation, off-center impulse, swept AABB translation, fixed mounts, rails and persistent two-piece brittle fracture. Contact torque, friction, joint networks and compound shapes are unfinished |
 | Propagation | Existing CPU, compute and hardware RT visibility paths. Acoustic and optical queries share geometry, material profiles and named endpoints. The supported paths are direct and first-bounce with material attenuation and cutoffs |
-| Continuum | Periodic CFD and opt-in CPU voxel obstacles. Free-surface simulation, phase transitions, and two-way fluid-solid coupling are unfinished |
+| Continuum | Ballistic water deposition, periodic CFD and opt-in CPU voxel obstacles. Shallow-water runoff, free-surface simulation, phase transitions, and two-way fluid-solid coupling are unfinished |
 | Character perception | Signal reception predicates describe the solver's receiver. Character knowledge records, access controls and isolated character inference are unfinished |
 | Runtime scaling | Existing GPU and Windows mapped-buffer paths. Obstacle pressure projection runs on CPU. The plan enforces action and query counts. Global time and byte budgeting, persistent solver fields and out-of-core tiled scheduling are unfinished |
 
@@ -87,3 +94,5 @@ The C regression suite checks geometric flight time, analytical drainage, condit
     BUILD/scene_physics_test --rigid-timing
 
 Use the Windows executable path on Windows. Add --provider http://127.0.0.1:PORT/v1 and --model MODEL for an isolated live narration test. Use --fixtures benchmarks/falling-container.json and --live-plan "falling water container" to reproduce the attached-plan test. The benchmark records raw timings, exact reports and persistence checks. The existing scene_physics_test --rt and scene_physics_test --cfd-gpu modes check supported hardware paths against CPU results.
+
+For the spin and water deposition run, use --fixtures benchmarks/rotating-container.json and --live-plan "falling water container with spin".

@@ -66,13 +66,16 @@ bool simulation_plan_parse(const Json *plan, SimulationPlan *parsed)
     return true;
 }
 
-typedef enum { ENTITY_EXISTS, ENTITY_OVERLAPS, ENTITY_MOVED, ENTITY_CONTACTS, ENTITY_FRACTURED, FLUID_RELEASED,
+typedef enum { ENTITY_EXISTS, ENTITY_OVERLAPS, ENTITY_MOVED, ENTITY_ROTATED, ENTITY_CONTACTS,
+               ENTITY_FRACTURED, FLUID_RELEASED, FLUID_DEPOSITED, FLUID_SURFACE,
                FLUID_DRAINED, FLUID_LEVEL, FLOW_TRACER,
                SIGNAL_REACHES, SIGNAL_ARRIVES, SIGNAL_POWER } Predicate;
 static const struct { const char *name; Predicate kind; } predicates[] = {
     {"entity.exists", ENTITY_EXISTS}, {"entity.overlaps", ENTITY_OVERLAPS},
     {"entity.moved", ENTITY_MOVED}, {"entity.contacts", ENTITY_CONTACTS},
+    {"entity.rotated", ENTITY_ROTATED},
     {"entity.structural_failure", ENTITY_FRACTURED}, {"fluid.leaves_container", FLUID_RELEASED},
+    {"fluid.spill_deposited", FLUID_DEPOSITED}, {"fluid.deposits_on", FLUID_SURFACE},
     {"fluid.volume_exceeds", FLUID_DRAINED}, {"fluid.level_exceeds", FLUID_LEVEL},
     {"fluid.concentration_exceeds", FLOW_TRACER},
     {"signal.reaches_receiver", SIGNAL_REACHES}, {"signal.arrival_before", SIGNAL_ARRIVES},
@@ -90,10 +93,22 @@ static const char *rigid_result(Predicate kind, const Json *query, const Json *s
     const char *entity = js(query, "entity"), *target = js(query, "target");
     if (!label(entity)) return "INSUFFICIENT_DATA";
     const Json *body = physics_scene_body(settings, entity);
+    if (kind == FLUID_DEPOSITED || kind == FLUID_SURFACE) {
+        double litres;
+        if ((kind == FLUID_SURFACE && !label(target)) ||
+            !physics_scene_spill(settings, entity, kind == FLUID_SURFACE ? target : "", evidence, &litres))
+            return "INSUFFICIENT_DATA";
+        set(evidence, "solver", "ballistic water parcels");
+        set(evidence, "approximation", "static-surface deposition; no runoff or depth");
+        if (kind == FLUID_SURFACE) set(evidence, "target", target);
+        put(evidence, "value", cJSON_CreateNumber(litres));
+        set(evidence, "units", "L");
+        return litres > 0 ? "TRUE" : "FALSE";
+    }
     if (!body || !at(body, "translation_m")) return "INSUFFICIENT_DATA";
-    set(evidence, "solver", "swept translational AABB rigid bodies");
-    if (kind == FLUID_RELEASED) set(evidence, "approximation", "released volume only; flow pattern unmodeled");
-    else set(evidence, "approximation", "translational dynamics; rotation unmodeled");
+    set(evidence, "solver", "quaternion rigid bodies with swept AABB contacts");
+    if (kind == FLUID_RELEASED) set(evidence, "approximation", "volume released into ballistic parcels");
+    else set(evidence, "approximation", "conservative collision hull; center-normal impacts");
     if (kind == ENTITY_CONTACTS) {
         if (!label(target) || (strcmp(target, "@room") && physics_scene_relation(settings, target, nullptr) != 1))
             return "INSUFFICIENT_DATA";
@@ -111,11 +126,11 @@ static const char *rigid_result(Predicate kind, const Json *query, const Json *s
         field_evidence(evidence, body, "fracture_time_s");
         return cJSON_IsTrue(at(body, "fractured")) ? "TRUE" : "FALSE";
     }
-    const char *key = kind == FLUID_RELEASED ? "released_l" : "translation_m";
+    const char *key = kind == FLUID_RELEASED ? "released_l" : kind == ENTITY_ROTATED ? "rotation_rad" : "translation_m";
     const Json *value = at(body, key);
     if (!cJSON_IsNumber(value)) return "INSUFFICIENT_DATA";
     put(evidence, "value", cJSON_Duplicate(value, false));
-    set(evidence, "units", kind == FLUID_RELEASED ? "L" : "m");
+    set(evidence, "units", kind == FLUID_RELEASED ? "L" : kind == ENTITY_ROTATED ? "rad" : "m");
     return value->valuedouble > 1e-9 ? "TRUE" : "FALSE";
 }
 
@@ -127,7 +142,8 @@ static const char *evaluate(const Json *query, const Json *settings, const Physi
     while (i < sizeof predicates / sizeof *predicates && strcmp(name, predicates[i].name)) ++i;
     if (i == sizeof predicates / sizeof *predicates) return "UNSUPPORTED";
     Predicate kind = predicates[i].kind;
-    if (kind == ENTITY_MOVED || kind == ENTITY_CONTACTS || kind == ENTITY_FRACTURED || kind == FLUID_RELEASED)
+    if (kind == ENTITY_MOVED || kind == ENTITY_ROTATED || kind == ENTITY_CONTACTS || kind == ENTITY_FRACTURED ||
+        kind == FLUID_RELEASED || kind == FLUID_DEPOSITED || kind == FLUID_SURFACE)
         return rigid_result(kind, query, settings, evidence);
     if (kind == ENTITY_EXISTS || kind == ENTITY_OVERLAPS) {
         const char *entity = js(query, "entity"), *target = js(query, "target");

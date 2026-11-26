@@ -90,9 +90,13 @@ def run(binary, examples, repetitions, output, provider, model, live_example=Non
                    "fluid.volume_exceeds for step 1 with threshold 80 litres and id spills. "
                    "Then describe the attendant's reaction to the predicted water discharge in one complete in-world sentence.")
             if live_example:
+                spinning = any(query["predicate"] == "entity.rotated" for query in live_example["plan"]["queries"])
+                detail = ("Describe the vertical-axis spin and where the water lands according to the results. "
+                          "Use the west and east sections of the floor if the measurements support them. "
+                          "Avoid end-over-end tumbling, runoff, or puddle depth.") if spinning else (
+                          "Describe the fall without rotation or a spray pattern, since neither is measured.")
                 cue = ("Select the attached hypothetical experiment. Once the simulator has responded, describe the predicted fall in-world, "
-                       "including what happens to the jug and water. Keep it conditional. Describe the fall "
-                       "without rotation or a spray pattern, since neither is measured.\n" +
+                       "including what happens to the jug and water. Keep it conditional. " + detail + "\n" +
                        "Simulation setup: " +
                        json.dumps(live_example["plan"], separators=(",", ":")))
             start = time.perf_counter()

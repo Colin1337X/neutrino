@@ -1,10 +1,12 @@
 #include "app.h"
 #include "ray.h"
 #include "physics_models.h"
+#include "spill.h"
 
 #include <float.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -97,6 +99,69 @@ static bool rigid_dynamics(void)
         fabs(rigid_value(left, "translation_m") - 1) < 1e-8 &&
         fabs(rigid_value(right, "translation_m") - 1) < 1e-8;
     cJSON_Delete(settings);
+    return ok;
+}
+
+static bool rotation_and_spill(void)
+{
+    Json *settings = cJSON_CreateObject();
+    bool ok = rigid_actions(settings,
+        "[{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[8,6,8]},"
+        "{\"neutrino_tool\":\"scene_place\",\"name\":\"rotor\",\"kind\":\"object\",\"min\":[2,2,4],\"max\":[4,3,5]},"
+        "{\"neutrino_tool\":\"scene_body\",\"name\":\"rotor\",\"mass_kg\":2},"
+        "{\"neutrino_tool\":\"scene_impulse\",\"name\":\"rotor\",\"offset_m\":[1,0,0],\"impulse_ns\":[0,0.125,0]},"
+        "{\"neutrino_tool\":\"scene_impulse\",\"name\":\"rotor\",\"offset_m\":[-1,0,0],\"impulse_ns\":[0,-0.125,0]},"
+        "{\"neutrino_tool\":\"scene_step\",\"seconds\":0.5}]");
+    const Json *rotor = physics_scene_body(settings, "rotor"), *orientation = at(rotor, "orientation");
+    const Json *angle = cJSON_GetArrayItem(orientation, 3);
+    // The balanced pushes give Lz=.25 kg m²/s; rectangular prism Iz=5/6 kg m².
+    const double expected = .25 / (5.0/6) * .5;
+    ok &= fabs(rigid_value(rotor, "rotation_rad")-expected) < 1e-10 &&
+        cJSON_IsNumber(angle) && fabs(angle->valuedouble-sin(expected/2)) < 1e-10 &&
+        fabs(rigid_value(rotor, "translation_m") - .5*9.80665*.5*.5) < 1e-9;
+    ok &= rigid_actions(settings, "[{\"neutrino_tool\":\"scene_step\",\"seconds\":0.25}]");
+    rotor = physics_scene_body(settings, "rotor");
+    angle = cJSON_GetArrayItem(at(rotor, "orientation"), 3);
+    ok &= cJSON_IsNumber(angle) && fabs(angle->valuedouble-sin(expected*.75)) < 1e-10;
+    cJSON_Delete(settings);
+
+    SpillSet spills = {0}, reloaded = {0};
+    Spill *water = spill_add(&spills);
+    if (!water) return false;
+    strcpy(water->source, "jug");
+    water->litres = 1.25;
+    for (int i = 0; i < SPILL_PARCELS; ++i) {
+        water->parcels[i].point[0] = i < 12 ? 1 : .1;
+        water->parcels[i].point[1] = 1;
+        water->parcels[i].point[2] = 2;
+        water->parcels[i].velocity[0] = 1;
+    }
+    PhysicsBox room = {{0,0,0},{4,4,4}};
+    SpillSurface solid[] = {{{{1.3,0,.25},{2,2,1}}, "tray"}, {{{0,0,0},{4,4,.25}}, "floor"}};
+    for (int tick = 0; tick < 100; ++tick)
+        spill_advance(&spills, &room, solid, 2, 10, tick*.0025, (tick+1)*.0025);
+    Json *state = cJSON_CreateObject(), *evidence = cJSON_CreateObject();
+    spill_store(&spills, state);
+    double litres;
+    ok &= spill_evidence(state, "jug", "tray", evidence, &litres) &&
+        litres == 0 && fabs(rigid_value(evidence, "airborne_l")-1.25) < 1e-12 &&
+        spill_load(&reloaded, state);
+    for (int tick = 100; tick < 400; ++tick)
+        spill_advance(&reloaded, &room, solid, 2, 10, tick*.0025, (tick+1)*.0025);
+    if (reloaded.count == 1) {
+        spill_store(&reloaded, state);
+        ok &= spill_evidence(state, "jug", "tray", evidence, &litres) &&
+            fabs(litres-.6) < 1e-12 && fabs(rigid_value(evidence, "deposited_l")-1.25) < 1e-12 &&
+            rigid_value(evidence, "airborne_l") == 0;
+        double center[3];
+        ok &= physics_vector(evidence, "centroid_m", center) &&
+            fabs(center[0] - (1+sqrt(.2))) < 1e-5 && center[2] == 1;
+        ok &= spill_evidence(state, "jug", "floor", evidence, &litres) && fabs(litres-.65) < 1e-12;
+    } else ok = false;
+    cJSON_Delete(evidence);
+    cJSON_Delete(state);
+    free(spills.items);
+    free(reloaded.items);
     return ok;
 }
 
@@ -1050,6 +1115,7 @@ int main(int argc, char **argv)
     if (!optics_and_gas()) { fputs("3D optics and gas attenuation checks failed.\n", stderr); failures++; }
     if (!scenario_protocol()) { fputs("Typed scenario protocol failed.\n", stderr); failures++; }
     if (!rigid_dynamics()) { fputs("Shared rigid dynamics test failed.\n", stderr); failures++; }
+    if (!rotation_and_spill()) { fputs("Rotation and spill physics test failed.\n", stderr); failures++; }
     if (!rigid_branch_replay()) { fputs("Rigid branch replay test failed.\n", stderr); failures++; }
     if (!attached_rigid_plan()) { fputs("Attached rigid plan test failed.\n", stderr); failures++; }
     if (!solid_cfd()) { fputs("Voxel CFD boundary test failed.\n", stderr); failures++; }

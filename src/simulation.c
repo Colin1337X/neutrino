@@ -261,7 +261,9 @@ static const char scenario_help[] =
     "Rigid bodies: scene_body attaches mass_kg (dry mass), optional liquid_l, restitution and velocity to a named object. "
     "scene_constraint takes name and mode fixed/free/rail; rail uses axis x/y/z. scene_step advances the room by seconds. "
     "Use scene_material mechanical:{fracture_j} to set an impact threshold for a brittle object. "
-    "Query entity.moved, entity.contacts (with target), entity.structural_failure and fluid.leaves_container by entity name.\n"
+    "scene_impulse takes name, impulse_ns vector, and optional center-relative offset_m. "
+    "Query entity.rotated, entity.moved, entity.contacts (with target), entity.structural_failure and fluid.leaves_container by name. "
+    "fluid.spill_deposited and fluid.deposits_on (with target) give volume and footprint. scene_spill reads this by entity.\n"
     "sim_plan: name, mode (hypothetical/stage), actions (ordered tool objects), queries (id and predicate). "
     "Hypothetical plans leave the story unchanged. Predicates: entity.exists(entity), entity.overlaps(entity,target), "
     "fluid.volume_exceeds(step,threshold in L), fluid.level_exceeds(step,threshold in m), "
@@ -433,6 +435,7 @@ static bool read_only_tool(const char *tool)
            !strcmp(tool, "fluid") || !strcmp(tool, "gas") || !strcmp(tool, "prop_load") ||
            !strcmp(tool, "scene_inspect") || !strcmp(tool, "scene_rays") || !strcmp(tool, "scene_acoustic") ||
            !strcmp(tool, "scene_light") || !strcmp(tool,"scene_catalog") || !strcmp(tool, "scene_flow") ||
+           !strcmp(tool, "scene_spill") ||
            !strcmp(tool,"world_inspect") ||
            physics_model_tool(tool);
 }

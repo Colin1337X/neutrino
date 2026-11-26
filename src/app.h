@@ -50,6 +50,8 @@ void simulation_plan_report(const SimulationPlan *plan, const Json *settings,
                             bool pending_commit, Text *out);
 int physics_scene_relation(const Json *settings, const char *entity, const char *target);
 const Json *physics_scene_body(const Json *settings, const char *entity);
+bool physics_scene_spill(const Json *settings, const char *entity, const char *surface,
+                         Json *evidence, double *litres);
 typedef struct {
     Operation op;
     Json *scene, *story;
