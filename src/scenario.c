@@ -66,15 +66,58 @@ bool simulation_plan_parse(const Json *plan, SimulationPlan *parsed)
     return true;
 }
 
-typedef enum { ENTITY_EXISTS, ENTITY_OVERLAPS, FLUID_DRAINED, FLUID_LEVEL, FLOW_TRACER,
+typedef enum { ENTITY_EXISTS, ENTITY_OVERLAPS, ENTITY_MOVED, ENTITY_CONTACTS, ENTITY_FRACTURED, FLUID_RELEASED,
+               FLUID_DRAINED, FLUID_LEVEL, FLOW_TRACER,
                SIGNAL_REACHES, SIGNAL_ARRIVES, SIGNAL_POWER } Predicate;
 static const struct { const char *name; Predicate kind; } predicates[] = {
     {"entity.exists", ENTITY_EXISTS}, {"entity.overlaps", ENTITY_OVERLAPS},
+    {"entity.moved", ENTITY_MOVED}, {"entity.contacts", ENTITY_CONTACTS},
+    {"entity.structural_failure", ENTITY_FRACTURED}, {"fluid.leaves_container", FLUID_RELEASED},
     {"fluid.volume_exceeds", FLUID_DRAINED}, {"fluid.level_exceeds", FLUID_LEVEL},
     {"fluid.concentration_exceeds", FLOW_TRACER},
     {"signal.reaches_receiver", SIGNAL_REACHES}, {"signal.arrival_before", SIGNAL_ARRIVES},
     {"signal.power_exceeds", SIGNAL_POWER}
 };
+
+static void field_evidence(Json *evidence, const Json *body, const char *key)
+{
+    const Json *value = at(body, key);
+    if (cJSON_IsNumber(value)) put(evidence, key, cJSON_Duplicate(value, false));
+}
+
+static const char *rigid_result(Predicate kind, const Json *query, const Json *settings, Json *evidence)
+{
+    const char *entity = js(query, "entity"), *target = js(query, "target");
+    if (!label(entity)) return "INSUFFICIENT_DATA";
+    const Json *body = physics_scene_body(settings, entity);
+    if (!body || !at(body, "translation_m")) return "INSUFFICIENT_DATA";
+    set(evidence, "solver", "swept translational AABB rigid bodies");
+    if (kind == FLUID_RELEASED) set(evidence, "approximation", "released volume only; flow pattern unmodeled");
+    else set(evidence, "approximation", "translational dynamics; rotation unmodeled");
+    if (kind == ENTITY_CONTACTS) {
+        if (!label(target) || (strcmp(target, "@room") && physics_scene_relation(settings, target, nullptr) != 1))
+            return "INSUFFICIENT_DATA";
+        const Json *item;
+        cJSON_ArrayForEach(item, at(body, "contacts"))
+            if (!strcmp(js(item, "target"), target)) {
+                field_evidence(evidence, item, "peak_impact_j");
+                field_evidence(evidence, item, "peak_impact_time_s");
+                return "TRUE";
+            }
+        return "FALSE";
+    }
+    if (kind == ENTITY_FRACTURED) {
+        field_evidence(evidence, body, "fracture_energy_j");
+        field_evidence(evidence, body, "fracture_time_s");
+        return cJSON_IsTrue(at(body, "fractured")) ? "TRUE" : "FALSE";
+    }
+    const char *key = kind == FLUID_RELEASED ? "released_l" : "translation_m";
+    const Json *value = at(body, key);
+    if (!cJSON_IsNumber(value)) return "INSUFFICIENT_DATA";
+    put(evidence, "value", cJSON_Duplicate(value, false));
+    set(evidence, "units", kind == FLUID_RELEASED ? "L" : "m");
+    return value->valuedouble > 1e-9 ? "TRUE" : "FALSE";
+}
 
 static const char *evaluate(const Json *query, const Json *settings, const PhysicsReading readings[],
                             int steps, Json *evidence)
@@ -84,6 +127,8 @@ static const char *evaluate(const Json *query, const Json *settings, const Physi
     while (i < sizeof predicates / sizeof *predicates && strcmp(name, predicates[i].name)) ++i;
     if (i == sizeof predicates / sizeof *predicates) return "UNSUPPORTED";
     Predicate kind = predicates[i].kind;
+    if (kind == ENTITY_MOVED || kind == ENTITY_CONTACTS || kind == ENTITY_FRACTURED || kind == FLUID_RELEASED)
+        return rigid_result(kind, query, settings, evidence);
     if (kind == ENTITY_EXISTS || kind == ENTITY_OVERLAPS) {
         const char *entity = js(query, "entity"), *target = js(query, "target");
         if (!label(entity) || (kind == ENTITY_OVERLAPS && !label(target))) return "INSUFFICIENT_DATA";

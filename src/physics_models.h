@@ -20,6 +20,9 @@ typedef struct {
 } FlowConfig;
 
 typedef struct { double lo[3], hi[3]; } PhysicsBox;
+bool rigid_edit(Json *room, Json *object, const Json *materials, const PhysicsBox *bounds,
+                const Json *op, double gravity);
+bool rigid_tool(const char *name);
 
 typedef struct {
     FlowConfig config;

@@ -33,6 +33,10 @@ Reports distinguish TRUE, FALSE, INSUFFICIENT_DATA, UNSUPPORTED, and SIMULATION_
 | --- | --- |
 | entity.exists | entity by name in the active layout |
 | entity.overlaps | entity and target. AABB interiors must overlap |
+| entity.moved | entity. Net translation in the last rigid step |
+| entity.contacts | entity and target. Reports the greatest normal impact energy and its time for that target in the last rigid step. Use @room for the room boundary |
+| entity.structural_failure | entity. Whether it fractured and the recorded fracture energy and time |
+| fluid.leaves_container | entity. Cumulative water volume released by fracture |
 | fluid.volume_exceeds | step and threshold in litres drained |
 | fluid.level_exceeds | step and threshold in metres of remaining fluid |
 | fluid.concentration_exceeds | step and relative concentration threshold at a scene_flow probe |
@@ -46,6 +50,20 @@ The scene_material tool defines reusable acoustic and optical profiles in the br
 
 The scene_air tool selects a registered material_id for uniform attenuation in the current room. Use an empty string to clear it. An acoustic query can supply an explicit medium for that calculation. The scene_translate tool moves a named box by a metre offset vector. Acoustic and optical queries take coordinates or the center of named boxes through source_entity and receiver_entity. The endpoint boxes are omitted from the blocker set for that measurement.
 
+## Rigid bodies and brittle fracture
+
+Attach a rigid body to an existing object with scene_body, name, and mass_kg. Optional fields are liquid_l, restitution and velocity in metres per second. Supply dry mass. The model adds 1 kg per litre of carried water and rejects water above the box's exterior volume. Apply scene_constraint with mode fixed, free or rail. A rail requires axis x, y or z and removes velocity on the other axes. Use scene_step with seconds to advance all bodies in the active layout under its configured gravity.
+
+The solver uses 240 Hz substeps with swept AABB pairs, static room boundaries, and normal impulses. It rejects initial overlaps involving moving bodies. Limits are 128 registered boxes, 10 seconds per step and 24 collision events per substep. Solver failures leave the step unchanged. A room's mechanics clock is measured in seconds independently of the story clock. The current implementation replays committed steps when reconstructing branch state.
+
+An object's registered material may specify mechanical.fracture_j. A normal collision with enough relative kinetic energy splits the box in two along its longest horizontal axis and releases any carried water into the spill ledger. The original name identifies the first piece; the second uses the suffix #2. The pieces divide dry mass equally and inherit the post-impact velocity. The fracture is persistent and modeled as inelastic. The spill ledger describes released volume. It does not simulate the subsequent flow.
+
+The [falling container](../benchmarks/falling-container.json) fixture holds a jug, releases it, steps the shared geometry, and measures optical and acoustic paths from the final impact location. These paths test propagation to receiver coordinates. Detection, source identification and private knowledge require additional character models. Rotational dynamics, friction, flexible joints, and engineering-grade fracture are outside this model.
+
+End the current player turn with Simulation setup: followed by a complete hypothetical sim_plan to attach a long experiment. The model can select it with the short object {"neutrino_tool":"sim_plan"}. The simulator validates and runs the supplied actions. Stage-mode plans cannot be attached this way. The raw trace records the selection and the executed actions.
+
+## Voxel continuum
+
 Set method to cfd and solid_geometry to true in scene_medium to use the room's boxes as zero-normal-flux voxel obstacles. The CPU solver closes adjacent velocity faces and uses obstacle-aware pressure and diffusion stencils. The outer numerical domain remains periodic. Boxes are rasterized by cell center, so thin geometry below grid resolution can be missed. An entirely unresolved interface is reported as unavailable. The scene_flow tool reads the configured medium at a world-space probe. Sound and light queries with gas losses can use the same solved field. Each query currently solves the field again.
 
 ## Capability and validation scope
@@ -53,7 +71,7 @@ Set method to cfd and solid_geometry to true in scene_medium to use the room's b
 | Area | Status |
 | --- | --- |
 | State and orchestration | Shared branch-local AABB geometry and propagation materials, ordered and conditional transactions, analytical and numerical queries |
-| Mechanics | Box translation and overlap plus existing trajectory and deformation tools. Shared rigid bodies, constraints, compound shapes, and persistent fracture are unfinished |
+| Mechanics | Shared translational rigid bodies, fixed mounts, rails and persistent two-piece brittle fracture. Rotational dynamics, joint networks and compound shapes are unfinished |
 | Propagation | Existing CPU, compute and hardware RT visibility paths. Acoustic and optical queries share geometry, material profiles and named endpoints. The supported paths are direct and first-bounce with material attenuation and cutoffs |
 | Continuum | Periodic CFD and opt-in CPU voxel obstacles. Free-surface simulation, phase transitions, and two-way fluid-solid coupling are unfinished |
 | Character perception | Signal reception predicates describe the solver's receiver. Character knowledge records, access controls and isolated character inference are unfinished |
@@ -66,5 +84,6 @@ The C regression suite checks geometric flight time, analytical drainage, condit
     cmake --build BUILD --config Release
     ctest --test-dir BUILD -C Release --output-on-failure
     python benchmarks/multiphysics.py BUILD/neutrino --fixtures benchmarks/multiphysics-scenarios.json --out results.json
+    BUILD/scene_physics_test --rigid-timing
 
-Use the Windows executable path on Windows. Add --provider http://127.0.0.1:PORT/v1 and --model MODEL for an isolated live narration test. The benchmark records raw timings, exact reports and persistence checks. The existing scene_physics_test --rt and scene_physics_test --cfd-gpu modes check supported hardware paths against CPU results.
+Use the Windows executable path on Windows. Add --provider http://127.0.0.1:PORT/v1 and --model MODEL for an isolated live narration test. Use --fixtures benchmarks/falling-container.json and --live-plan "falling water container" to reproduce the attached-plan test. The benchmark records raw timings, exact reports and persistence checks. The existing scene_physics_test --rt and scene_physics_test --cfd-gpu modes check supported hardware paths against CPU results.

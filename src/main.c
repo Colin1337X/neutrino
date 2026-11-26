@@ -557,6 +557,14 @@ static void messages_add(Json *messages, const char *role, const char *text)
 static void messages_for_story(App *a, Json *messages)
 {
     Preview *p = &a->preview;
+    if (simulation_plan_selector(p)) {
+        clear(&p->selection_trace);
+        append(&p->selection_trace, "Selecting the player-attached hypothetical plan.\n");
+        messages_add(messages, "system", "A validated hypothetical experiment is attached. "
+                     "Select it with exactly {\"neutrino_tool\":\"sim_plan\"}. Return that object alone.");
+        messages_add(messages, "user", "Run the attached experiment. Reply only with {\"neutrino_tool\":\"sim_plan\"}.");
+        return;
+    }
     Json *card = at(p->story, "card"), *persona = at(p->story, "persona");
     Text system = {0};
     append(&system, instructions[p->op]);

@@ -16,14 +16,20 @@ from fixtures import build
 from gateway_history import free_port, process, request, wait
 
 
-def run(binary, examples, repetitions, output, provider, model):
+def run(binary, examples, repetitions, output, provider, model, live_example=None):
     with tempfile.TemporaryDirectory(prefix="neutrino-multiphysics-") as scratch, ExitStack() as stack:
         folder = Path(scratch)
         build(folder, 1)
         workspace = folder / "workspace.json"
         data = json.loads(workspace.read_text(encoding="utf-8"))
         data["stories"][0]["simEnabled"] = False
-        if provider:
+        if provider and live_example:
+            story = data["stories"][0]
+            story["card"]["description"] = "A coastal relay keeper checking a fixture holding a ceramic jug over a stone floor."
+            story["nodes"][0]["content"] = "A ceramic jug hangs above the stone floor. Alice and Bob stand nearby."
+            story["nodes"][1]["content"] = "I ask what would happen if the fixture lets go."
+            story["nodes"][2]["content"] = "The keeper peers at the jug and considers the question."
+        elif provider:
             story = data["stories"][0]
             story["card"]["description"] = "A keeper maintaining the coastal relay's water tank."
             story["nodes"][0]["content"] = "The keeper stands beside the tank and looks at its outlet."
@@ -83,6 +89,12 @@ def run(binary, examples, repetitions, output, provider, model):
                    "action with height 1, tank_area 2, outlet_area 0.003, and seconds 10. Evaluate "
                    "fluid.volume_exceeds for step 1 with threshold 80 litres and id spills. "
                    "Then describe the attendant's reaction to the predicted water discharge in one complete in-world sentence.")
+            if live_example:
+                cue = ("Select the attached hypothetical experiment. Once the simulator has responded, describe the predicted fall in-world, "
+                       "including what happens to the jug and water. Keep it conditional. Describe the fall "
+                       "without rotation or a spray pattern, since neither is measured.\n" +
+                       "Simulation setup: " +
+                       json.dumps(live_example["plan"], separators=(",", ":")))
             start = time.perf_counter()
             submit(cue)
 
@@ -98,10 +110,24 @@ def run(binary, examples, repetitions, output, provider, model):
                 reply = None
             trace = submit("/trace")["panel"]["text"]
             content = reply["content"] if reply else ""
+            typed_report = None
+            if live_example:
+                for line in trace.splitlines():
+                    if line.startswith('{"simulation":'):
+                        candidate = json.loads(line)
+                        if candidate["simulation"] == live_example["plan"]["name"]:
+                            typed_report = candidate
+                used_plan = (typed_report is not None and typed_report["status"] == "completed" and
+                             not typed_report["pending_commit"] and
+                             {entry["id"]: entry["result"] for entry in typed_report["consequences"]} ==
+                             live_example["results"])
+                pattern = r"\b(water|spill\w*)\b"
+            else:
+                used_plan = '"predicate":"fluid.volume_exceeds"' in trace and '"result":"TRUE"' in trace
+                pattern = r"\b(water|drain|tank|valve|outlet)\b"
             result["live"] = {"elapsed_ms": (time.perf_counter() - start) * 1000, "reply": reply,
-                              "trace": trace, "used_typed_plan": '"predicate":"fluid.volume_exceeds"' in trace and
-                              '"result":"TRUE"' in trace,
-                              "relevant_prose": bool(re.search(r"\b(water|drain|tank|valve|outlet)\b", content, re.I))
+                              "trace": trace, "used_typed_plan": used_plan, "typed_report": typed_report,
+                              "relevant_prose": bool(re.search(pattern, content, re.I))
                               and not re.search(r"\b(neutrino_tool|sim_plan|json)\b", content, re.I)}
         output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"{binary.name} median idle RSS {median(rss)/2**20:.2f} MiB")
@@ -119,8 +145,12 @@ if __name__ == "__main__":
     parser.add_argument("--reps", type=int, default=10)
     parser.add_argument("--provider")
     parser.add_argument("--model")
+    parser.add_argument("--live-plan", help="Name of the fixture plan to submit to the model")
     args = parser.parse_args()
     if args.reps < 1 or bool(args.provider) != bool(args.model):
         parser.error("Use a positive repeat count and supply provider and model together.")
     scenarios = json.loads(args.fixtures.read_text(encoding="utf-8")) if args.fixtures else []
-    run(args.binary.resolve(), scenarios, args.reps, args.out, args.provider, args.model)
+    selected = next((example for example in scenarios if example["plan"]["name"] == args.live_plan), None)
+    if args.live_plan and (not selected or not args.provider):
+        parser.error("--live-plan needs a matching fixture and provider")
+    run(args.binary.resolve(), scenarios, args.reps, args.out, args.provider, args.model, selected)

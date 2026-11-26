@@ -49,6 +49,7 @@ void simulation_plan_report(const SimulationPlan *plan, const Json *settings,
                             const PhysicsReading readings[], int steps, bool complete,
                             bool pending_commit, Text *out);
 int physics_scene_relation(const Json *settings, const char *entity, const char *target);
+const Json *physics_scene_body(const Json *settings, const char *entity);
 typedef struct {
     Operation op;
     Json *scene, *story;
@@ -174,6 +175,7 @@ void simulation_command(App *a, const char *verb, const char *arg);
 void simulation_prompt(const Preview *p, Text *system);
 void simulation_player_reference(Text *out, const char *action);
 bool simulation_acoustic_selection_prompt(const Preview *p, Text *out, const char *action);
+bool simulation_plan_selector(const Preview *p);
 bool simulation_attached_acoustic_turn(const Preview *p);
 typedef enum { SIM_NARRATIVE, SIM_REGENERATE, SIM_NO_PROSE } SimulationReply;
 SimulationReply simulation_tool_reply(Preview *p, const char *body);

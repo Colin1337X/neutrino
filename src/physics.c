@@ -191,6 +191,11 @@ int physics_scene_relation(const Json *settings, const char *entity, const char 
     return 1;
 }
 
+const Json *physics_scene_body(const Json *settings, const char *entity)
+{
+    return at(scene_object(at(active_room(settings), "objects"), entity), "rigid");
+}
+
 static bool acoustic_properties(const Json *material, double *loss, double *reflectivity)
 {
     return cJSON_IsObject(material) && physics_scalar(material, "loss_db_per_m", 0, 1e6, loss) &&
@@ -210,15 +215,23 @@ bool physics_scene_edit(Json *settings, const Json *op)
     if (!strcmp(tool, "scene_material")) {
         const char *name = js(op, "name");
         const Json *acoustic = at(op, "acoustic"), *optical = at(op, "optical");
+        const Json *mechanical = at(op, "mechanical");
         double first, second, third;
-        if (!scene_name(name) || (!acoustic && !optical) ||
+        if (!scene_name(name) || (!acoustic && !optical && !mechanical) ||
             (acoustic && !acoustic_properties(acoustic, &first, &second)) ||
-            (optical && !optical_properties(optical, &first, &second, &third))) return false;
+            (optical && !optical_properties(optical, &first, &second, &third)) ||
+            (mechanical && (!cJSON_IsObject(mechanical) ||
+            !physics_scalar(mechanical, "fracture_j", 0.001, 1e9, &first)))) return false;
         Json *materials = at(settings, "materials3d");
         if (!materials) put(settings, "materials3d", materials = cJSON_CreateObject());
         Json *entry = cJSON_CreateObject();
         if (acoustic) put(entry, "material", cJSON_Duplicate(acoustic, true));
         if (optical) put(entry, "optical", cJSON_Duplicate(optical, true));
+        if (mechanical) {
+            Json *properties = cJSON_CreateObject();
+            put(properties, "fracture_j", cJSON_CreateNumber(first));
+            put(entry, "mechanical", properties);
+        }
         put(materials, name, entry);
         return true;
     }
@@ -260,6 +273,8 @@ bool physics_scene_edit(Json *settings, const Json *op)
         return true;
     }
     if (!room || !read_box(room, &bounds)) return false;
+    if (!strcmp(tool, "scene_step"))
+        return rigid_edit(room, nullptr, at(settings, "materials3d"), &bounds, op, setting(settings, GRAVITY));
     if (!strcmp(tool, "scene_air")) {
         const char *id = js(op, "material_id");
         if (!cJSON_IsString(at(op, "material_id")) ||
@@ -285,6 +300,8 @@ bool physics_scene_edit(Json *settings, const Json *op)
     const char *name = js(op, "name");
     if (!scene_name(name)) return false;
     Json *object = scene_object(objects, name);
+    if (rigid_tool(tool))
+        return rigid_edit(room, object, at(settings, "materials3d"), &bounds, op, setting(settings, GRAVITY));
     if (!strcmp(tool, "scene_translate")) {
         double offset[3];
         if (!read_box(object, &shape) || !physics_vector(op, "offset", offset)) return false;
@@ -306,6 +323,7 @@ bool physics_scene_edit(Json *settings, const Json *op)
         !contained_box(&bounds, &shape)) return false;
     const char *kind = js(op, "kind");
     if (strcmp(kind, "object") && strcmp(kind, "wall")) return false;
+    if (at(object, "rigid") && strcmp(kind, "object")) return false;
     const Json *material = at(op, "material");
     const Json *optical = at(op, "optical");
     const char *material_id = js(op, "material_id");
@@ -335,6 +353,7 @@ bool physics_scene_edit(Json *settings, const Json *op)
         put(copy,"optical",attributes);
     }
     if (object) {
+        if (at(object, "rigid")) put(copy, "rigid", cJSON_Duplicate(at(object, "rigid"), true));
         if (!cJSON_ReplaceItemViaPointer(objects, object, copy)) {
             cJSON_Delete(copy);
             return false;

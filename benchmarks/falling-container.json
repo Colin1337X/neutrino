@@ -1,0 +1,40 @@
+[
+  {
+    "plan": {
+      "neutrino_tool": "sim_plan",
+      "name": "falling water container",
+      "mode": "hypothetical",
+      "actions": [
+        {"neutrino_tool": "scene_room", "min": [0,0,0], "max": [8,6,4]},
+        {"neutrino_tool": "scene_material", "name": "brittle ceramic", "mechanical": {"fracture_j": 30}},
+        {"neutrino_tool": "scene_place", "name": "floor", "kind": "wall", "min": [0,0,0], "max": [8,6,0.25]},
+        {"neutrino_tool": "scene_place", "name": "jug", "kind": "object", "min": [2,2,2], "max": [2.5,2.5,2.5], "material_id": "brittle ceramic"},
+        {"neutrino_tool": "scene_body", "name": "jug", "mass_kg": 2, "liquid_l": 1},
+        {"neutrino_tool": "scene_constraint", "name": "jug", "mode": "fixed"},
+        {"neutrino_tool": "scene_step", "seconds": 0.25},
+        {"neutrino_tool": "scene_constraint", "name": "jug", "mode": "free", "when": {"predicate": "entity.moved", "entity": "jug", "expect": false}},
+        {"neutrino_tool": "scene_step", "seconds": 0.85},
+        {"neutrino_tool": "scene_light", "source_entity": "jug", "listener": [2.125,4,1.6], "backend": "cpu"},
+        {"neutrino_tool": "scene_acoustic", "source_entity": "jug", "listener": [2.125,4.5,1.6], "backend": "cpu"}
+      ],
+      "queries": [
+        {"id": "jug_moved", "predicate": "entity.moved", "entity": "jug"},
+        {"id": "jug_hit_floor", "predicate": "entity.contacts", "entity": "jug", "target": "floor"},
+        {"id": "jug_broke", "predicate": "entity.structural_failure", "entity": "jug"},
+        {"id": "water_spilled", "predicate": "fluid.leaves_container", "entity": "jug"},
+        {"id": "second_fragment_exists", "predicate": "entity.exists", "entity": "jug#2"},
+        {"id": "alice_has_light_path", "predicate": "signal.reaches_receiver", "step": 10},
+        {"id": "bob_has_sound_path", "predicate": "signal.reaches_receiver", "step": 11}
+      ]
+    },
+    "results": {
+      "jug_moved": "TRUE",
+      "jug_hit_floor": "TRUE",
+      "jug_broke": "TRUE",
+      "water_spilled": "TRUE",
+      "second_fragment_exists": "TRUE",
+      "alice_has_light_path": "TRUE",
+      "bob_has_sound_path": "TRUE"
+    }
+  }
+]

@@ -20,6 +20,182 @@ static void free_protocol(Preview *p)
     release(&p->tool_results);
 }
 
+static bool rigid_actions(Json *settings, const char *actions)
+{
+    Json *array = cJSON_Parse(actions), *op;
+    bool valid = cJSON_IsArray(array);
+    cJSON_ArrayForEach(op, array)
+        if (!physics_scene_edit(settings, op)) { valid = false; break; }
+    cJSON_Delete(array);
+    return valid;
+}
+
+static double rigid_value(const Json *body, const char *key)
+{
+    const Json *value = at(body, key);
+    return cJSON_IsNumber(value) ? value->valuedouble : NAN;
+}
+
+static bool rigid_dynamics(void)
+{
+    const char *room =
+        "[{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[8,6,4]},"
+        "{\"neutrino_tool\":\"scene_material\",\"name\":\"ceramic\",\"mechanical\":{\"fracture_j\":30}},"
+        "{\"neutrino_tool\":\"scene_place\",\"name\":\"floor\",\"kind\":\"wall\",\"min\":[0,0,0],\"max\":[8,6,0.25]},"
+        "{\"neutrino_tool\":\"scene_place\",\"name\":\"jug\",\"kind\":\"object\",\"min\":[2,2,2],\"max\":[2.5,2.5,2.5],"
+        "\"material_id\":\"ceramic\"},"
+        "{\"neutrino_tool\":\"scene_body\",\"name\":\"jug\",\"mass_kg\":2,\"liquid_l\":1},"
+        "{\"neutrino_tool\":\"scene_constraint\",\"name\":\"jug\",\"mode\":\"fixed\"},"
+        "{\"neutrino_tool\":\"scene_step\",\"seconds\":0.25}]";
+    const char *release_and_drop =
+        "[{\"neutrino_tool\":\"scene_constraint\",\"name\":\"jug\",\"mode\":\"free\"},"
+        "{\"neutrino_tool\":\"scene_step\",\"seconds\":0.85}]";
+    Json *settings = cJSON_CreateObject();
+    bool ok = rigid_actions(settings, room);
+    const Json *held = physics_scene_body(settings, "jug");
+    ok &= rigid_value(held, "translation_m") == 0;
+
+    Json *blocked = cJSON_Duplicate(settings, true);
+    ok &= rigid_actions(blocked,
+        "[{\"neutrino_tool\":\"scene_place\",\"name\":\"jug#2\",\"kind\":\"object\",\"min\":[4,4,1],\"max\":[5,5,2]},"
+        "{\"neutrino_tool\":\"scene_constraint\",\"name\":\"jug\",\"mode\":\"free\"}]");
+    Json *before_failure = cJSON_Duplicate(blocked, true);
+    bool drop_rejected = !rigid_actions(blocked, "[{\"neutrino_tool\":\"scene_step\",\"seconds\":0.85}]");
+    ok &= drop_rejected && cJSON_Compare(blocked, before_failure, true);
+    cJSON_Delete(before_failure);
+    cJSON_Delete(blocked);
+
+    ok &= rigid_actions(settings, release_and_drop);
+    const Json *jug = physics_scene_body(settings, "jug"), *piece = physics_scene_body(settings, "jug#2");
+    const Json *contacts = at(jug, "contacts");
+    ok &= cJSON_IsTrue(at(jug, "fractured")) && !strcmp(js(piece, "fragment_of"), "jug") &&
+        fabs(rigid_value(jug, "fracture_energy_j") - 3 * 9.80665 * 1.75) < 0.001 &&
+        fabs(rigid_value(jug, "fracture_time_s") - (0.25 + sqrt(3.5 / 9.80665))) < 1e-5 &&
+        fabs(rigid_value(jug, "translation_m") - 1.75) < 1e-8 &&
+        rigid_value(jug, "released_l") == 1 && rigid_value(jug, "liquid_l") == 0 &&
+        rigid_value(jug, "mass_kg") + rigid_value(piece, "mass_kg") == 2 &&
+        !strcmp(js(cJSON_GetArrayItem(contacts, 0), "target"), "floor");
+    ok &= rigid_actions(settings, "[{\"neutrino_tool\":\"scene_step\",\"seconds\":0.1}]");
+    jug = physics_scene_body(settings, "jug");
+    ok &= cJSON_IsTrue(at(jug, "fractured")) && rigid_value(jug, "released_l") == 1;
+    cJSON_Delete(settings);
+
+    settings = cJSON_CreateObject();
+    ok &= rigid_actions(settings,
+        "[{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[8,6,4]},"
+        "{\"neutrino_tool\":\"scene_place\",\"name\":\"a\",\"kind\":\"object\",\"min\":[1,1,1],\"max\":[2,2,2]},"
+        "{\"neutrino_tool\":\"scene_place\",\"name\":\"b\",\"kind\":\"object\",\"min\":[3,1,1],\"max\":[4,2,2]},"
+        "{\"neutrino_tool\":\"scene_body\",\"name\":\"a\",\"mass_kg\":1,\"restitution\":1,\"velocity\":[4,3,2]},"
+        "{\"neutrino_tool\":\"scene_body\",\"name\":\"b\",\"mass_kg\":1,\"restitution\":1},"
+        "{\"neutrino_tool\":\"scene_constraint\",\"name\":\"a\",\"mode\":\"rail\",\"axis\":\"x\"},"
+        "{\"neutrino_tool\":\"scene_constraint\",\"name\":\"b\",\"mode\":\"rail\",\"axis\":\"x\"},"
+        "{\"neutrino_tool\":\"scene_step\",\"seconds\":0.5}]");
+    double a[3], b[3];
+    const Json *left = physics_scene_body(settings, "a"), *right = physics_scene_body(settings, "b");
+    ok &= physics_vector(left, "velocity", a) && physics_vector(right, "velocity", b) &&
+        fabs(a[0]) < 1e-8 && fabs(b[0] - 4) < 1e-8 && a[1] == 0 && a[2] == 0 &&
+        fabs(rigid_value(left, "translation_m") - 1) < 1e-8 &&
+        fabs(rigid_value(right, "translation_m") - 1) < 1e-8;
+    cJSON_Delete(settings);
+    return ok;
+}
+
+static int rigid_timing(void)
+{
+    const int sizes[] = {1, 8, 32, 64, 128};
+    puts("bodies,seconds,repetition,mean_ms");
+    for (size_t i = 0; i < sizeof sizes / sizeof *sizes; ++i) {
+        Json *settings = cJSON_CreateObject();
+        bool valid = rigid_actions(settings, "[{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[8,40,40]}]");
+        for (int j = 0; valid && j < sizes[i]; ++j) {
+            int y = 1 + 2 * (j % 16), z = 1 + 2 * (j / 16);
+            Text operations = {0};
+            format(&operations,
+                "[{\"neutrino_tool\":\"scene_place\",\"name\":\"p%d\",\"kind\":\"object\",\"min\":[1,%d,%d],\"max\":[2,%d,%d]},"
+                "{\"neutrino_tool\":\"scene_body\",\"name\":\"p%d\",\"mass_kg\":1,\"velocity\":[0.5,0,0]},"
+                "{\"neutrino_tool\":\"scene_constraint\",\"name\":\"p%d\",\"mode\":\"rail\",\"axis\":\"x\"}]",
+                j, y, z, y + 1, z + 1, j, j);
+            valid = rigid_actions(settings, str(&operations));
+            release(&operations);
+        }
+        Json *step = cJSON_Parse("{\"neutrino_tool\":\"scene_step\",\"seconds\":0.25}");
+        for (int sample = 0; valid && sample <= 5; ++sample) {
+            const int batches = 16;
+            clock_t elapsed = 0;
+            for (int batch = 0; valid && batch < batches; ++batch) {
+                Json *scratch = cJSON_Duplicate(settings, true);
+                clock_t start = clock();
+                valid = scratch && physics_scene_edit(scratch, step);
+                clock_t finish = clock();
+                elapsed += finish - start;
+                valid &= start != (clock_t)-1 && finish != (clock_t)-1;
+                cJSON_Delete(scratch);
+            }
+            if (valid && sample) printf("%d,0.25,%d,%.6f\n", sizes[i], sample,
+                                       1000.0 * elapsed / (CLOCKS_PER_SEC * (double)batches));
+        }
+        cJSON_Delete(step);
+        cJSON_Delete(settings);
+        if (!valid) return 1;
+    }
+    return 0;
+}
+
+static bool rigid_branch_replay(void)
+{
+    const char *stage =
+        "{\"neutrino_tool\":\"sim_plan\",\"name\":\"drop\",\"mode\":\"stage\",\"actions\":["
+        "{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[8,6,4]},"
+        "{\"neutrino_tool\":\"scene_place\",\"name\":\"box\",\"kind\":\"object\",\"min\":[1,1,1],\"max\":[2,2,2]},"
+        "{\"neutrino_tool\":\"scene_body\",\"name\":\"box\",\"mass_kg\":1},"
+        "{\"neutrino_tool\":\"scene_step\",\"seconds\":0.5}],"
+        "\"queries\":[{\"id\":\"landed\",\"predicate\":\"entity.contacts\",\"entity\":\"box\",\"target\":\"@room\"}]}";
+    const char *inspect =
+        "{\"neutrino_tool\":\"sim_plan\",\"name\":\"inspect\",\"mode\":\"hypothetical\","
+        "\"actions\":[{\"neutrino_tool\":\"scene_catalog\"}],"
+        "\"queries\":[{\"id\":\"landed\",\"predicate\":\"entity.contacts\",\"entity\":\"box\",\"target\":\"@room\"}]}";
+    Workspace ws = {.root = cJSON_CreateObject()};
+    Preview placed = {.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    bool ok = simulation_tool_reply(&placed, stage) == SIM_REGENERATE &&
+        cJSON_GetArraySize(placed.tool_pending) == 4 && strstr(str(&placed.tool_feedback), "\"result\":\"TRUE\"");
+    int accepted = story_push(&ws, placed.story, 0, "assistant", "The box lands.");
+    int sibling = story_push(&ws, placed.story, 0, "assistant", "The room stays empty.");
+    App app = {0};
+    simulation_commit(&app, &placed, accepted);
+    char *serialized = cJSON_PrintUnformatted(placed.story);
+    Preview replay = {.story = cJSON_Parse(serialized), .parent = accepted};
+    ok &= simulation_tool_reply(&replay, inspect) == SIM_REGENERATE &&
+        strstr(str(&replay.tool_feedback), "\"result\":\"TRUE\"");
+    free_protocol(&replay);
+    replay = (Preview){.story = cJSON_Parse(serialized), .parent = sibling};
+    ok &= simulation_tool_reply(&replay, inspect) == SIM_REGENERATE &&
+        strstr(str(&replay.tool_feedback), "\"result\":\"INSUFFICIENT_DATA\"");
+    free_protocol(&replay);
+    cJSON_free(serialized);
+    cJSON_Delete(ws.root);
+    free_protocol(&placed);
+    return ok;
+}
+
+static bool attached_rigid_plan(void)
+{
+    Workspace ws = {.root = cJSON_CreateObject()};
+    Preview p = {.story = cJSON_Parse("{\"simEnabled\":true,\"nodes\":[]}")};
+    const char *input = "Calculate a hypothetical experiment.\nSimulation setup: "
+        "{\"neutrino_tool\":\"sim_plan\",\"name\":\"attached\",\"mode\":\"hypothetical\",\"actions\":["
+        "{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[8,6,4]}],\"queries\":[]}";
+    p.parent = story_push(&ws, p.story, 0, "user", input);
+    bool ok = simulation_plan_selector(&p) &&
+        simulation_tool_reply(&p, "{\"neutrino_tool\":\"tune\",\"setting\":\"gravity\",\"value\":1}") == SIM_REGENERATE &&
+        simulation_plan_selector(&p) && !p.tool_pending &&
+        simulation_tool_reply(&p, "{\"neutrino_tool\":\"sim_plan\"}") == SIM_REGENERATE &&
+        !simulation_plan_selector(&p) && !p.tool_pending &&
+        strstr(str(&p.tool_feedback), "\"simulation\":\"attached\"");
+    cJSON_Delete(ws.root);
+    free_protocol(&p);
+    return ok;
+}
+
 static bool scenario_protocol(void)
 {
     const char *experiment =
@@ -773,6 +949,7 @@ static bool supplied_acoustic_protocol(void)
 
 int main(int argc, char **argv)
 {
+    if (argc > 1 && !strcmp(argv[1], "--rigid-timing")) return rigid_timing();
     if (argc > 1 && !strcmp(argv[1], "--cfd-timing")) return cfd_timing();
     const struct {
         const char *name, *json, *expected;
@@ -872,6 +1049,9 @@ int main(int argc, char **argv)
     } else if (argc > 1 && !strcmp(argv[1],"--cfd-gpu")) puts("OpenCL pressure projection matches CPU; Windows mapped memory matches CPU.");
     if (!optics_and_gas()) { fputs("3D optics and gas attenuation checks failed.\n", stderr); failures++; }
     if (!scenario_protocol()) { fputs("Typed scenario protocol failed.\n", stderr); failures++; }
+    if (!rigid_dynamics()) { fputs("Shared rigid dynamics test failed.\n", stderr); failures++; }
+    if (!rigid_branch_replay()) { fputs("Rigid branch replay test failed.\n", stderr); failures++; }
+    if (!attached_rigid_plan()) { fputs("Attached rigid plan test failed.\n", stderr); failures++; }
     if (!solid_cfd()) { fputs("Voxel CFD boundary test failed.\n", stderr); failures++; }
     if (!scene_protocol("cpu")) { fputs("3D scene simulation protocol failed.\n", stderr); failures++; }
 #ifndef NEUTRINO_VULKAN_RT

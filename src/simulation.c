@@ -65,7 +65,7 @@ static bool apply_stat(Json *state, const Json *op)
     if (!strcmp(tool, "tune")) return physics_tune(at(state, "physics"), op);
     if (!strcmp(tool, "scene_room") || !strcmp(tool, "scene_place") || !strcmp(tool, "scene_remove") ||
         !strcmp(tool, "scene_medium") || !strcmp(tool,"scene_select") || !strcmp(tool, "scene_material") ||
-        !strcmp(tool, "scene_air") || !strcmp(tool, "scene_translate"))
+        !strcmp(tool, "scene_air") || !strcmp(tool, "scene_translate") || rigid_tool(tool))
         return physics_scene_edit(at(state, "physics"), op);
     if (!strcmp(tool, "set_time") || !strcmp(tool, "auto_time") || !strcmp(tool, "advance")) {
         const bool step = !strcmp(tool, "auto_time"), advancing = !strcmp(tool, "advance");
@@ -258,6 +258,10 @@ static const char scenario_help[] =
     "scene_air selects a material_id for room-medium attenuation. scene_translate moves a named box by an offset vector. "
     "Scene acoustic and light endpoints can use source_entity and receiver_entity instead of coordinates.\n"
     "For voxel CFD, add solid_geometry:true with method:cfd to scene_medium. scene_flow reads concentration at a probe point.\n"
+    "Rigid bodies: scene_body attaches mass_kg (dry mass), optional liquid_l, restitution and velocity to a named object. "
+    "scene_constraint takes name and mode fixed/free/rail; rail uses axis x/y/z. scene_step advances the room by seconds. "
+    "Use scene_material mechanical:{fracture_j} to set an impact threshold for a brittle object. "
+    "Query entity.moved, entity.contacts (with target), entity.structural_failure and fluid.leaves_container by entity name.\n"
     "sim_plan: name, mode (hypothetical/stage), actions (ordered tool objects), queries (id and predicate). "
     "Hypothetical plans leave the story unchanged. Predicates: entity.exists(entity), entity.overlaps(entity,target), "
     "fluid.volume_exceeds(step,threshold in L), fluid.level_exceeds(step,threshold in m), "
@@ -442,6 +446,22 @@ static bool run_sim_read(const char *tool, const Json *op, const Json *story, in
     }
     return physics_run_reading(tool,op,at(state,"physics"),result,reading);
 }
+static Json *attached_plan(const char *action, const char **attachment)
+{
+    static const char marker[] = "Simulation setup:";
+    const char *start = strstr(action, marker);
+    if (!start || strlen(start) > SIM_COMMAND_LIMIT) return nullptr;
+    Json *value = cJSON_ParseWithOpts(start + sizeof marker - 1, nullptr, true);
+    SimulationPlan plan;
+    if (strcmp(js(value, "neutrino_tool"), "sim_plan") || !simulation_plan_parse(value, &plan) ||
+        !plan.hypothetical) {
+        cJSON_Delete(value);
+        return nullptr;
+    }
+    if (attachment) *attachment = start;
+    return value;
+}
+
 static void player_reference(Text *out, const char *action, bool acoustic_only)
 {
     const char *start = strpbrk(action, "[{");
@@ -467,7 +487,12 @@ static void player_reference(Text *out, const char *action, bool acoustic_only)
 
 void simulation_player_reference(Text *out, const char *action)
 {
-    player_reference(out, action, false);
+    const char *attachment;
+    Json *plan = attached_plan(action, &attachment);
+    if (plan) {
+        append_n(out, action, (size_t)(attachment - action));
+        cJSON_Delete(plan);
+    } else player_reference(out, action, false);
 }
 
 static bool already_requested(const Preview *p, const Json *op)
@@ -476,6 +501,27 @@ static bool already_requested(const Preview *p, const Json *op)
     cJSON_ArrayForEach(previous, p->tool_requests)
         if (op && cJSON_Compare(previous, op, true)) return true;
     return false;
+}
+
+static Json *pending_attached_plan(const Preview *p)
+{
+    if (p->tool_prose_only || !simulation_enabled(p->story)) return nullptr;
+    const Json *player = story_pick(p->story, p->parent);
+    if (strcmp(js(player, "role"), "user")) return nullptr;
+    Json *plan = attached_plan(js(player, "content"), nullptr);
+    if (plan && already_requested(p, plan)) {
+        cJSON_Delete(plan);
+        return nullptr;
+    }
+    return plan;
+}
+
+bool simulation_plan_selector(const Preview *p)
+{
+    Json *plan = pending_attached_plan(p);
+    bool pending = plan != nullptr;
+    cJSON_Delete(plan);
+    return pending;
 }
 
 static bool argument_subset(const Json *selection, const Json *supplied)
@@ -748,6 +794,7 @@ static bool execute_action_order(Preview *p, const Json *plan)
         while (!scenario.hypothetical && pending->child)
             cJSON_AddItemToArray(p->tool_pending, cJSON_DetachItemFromArray(pending, 0));
         while (accepted->child) cJSON_AddItemToArray(p->tool_requests, cJSON_DetachItemFromArray(accepted, 0));
+        if (typed) cJSON_AddItemToArray(p->tool_requests, cJSON_Duplicate(plan, true));
         for (int i = 0; i < measured; ++i) p->readings[p->reading_count++] = readings[i];
         append(&p->tool_results, "Ordered actions executed in sequence:\n");
         append(&p->tool_results, str(&results));
@@ -823,6 +870,30 @@ SimulationReply simulation_tool_reply(Preview *p, const char *body)
 {
     if (!simulation_enabled(p->story)) return SIM_NARRATIVE;
     while (isspace((unsigned char)*body)) body++;
+    Json *plan = pending_attached_plan(p);
+    if (plan) {
+        const char *cursor = body;
+        if (!strncmp(cursor, "\x60\x60\x60", 3)) {
+            cursor += 3;
+            if (!strncmp(cursor, "json", 4)) cursor += 4;
+        }
+        Json *selection = cJSON_ParseWithOpts(cursor, nullptr, false);
+        bool selected = cJSON_IsObject(selection) && cJSON_GetArraySize(selection) == 1 &&
+            !strcmp(js(selection, "neutrino_tool"), "sim_plan");
+        cJSON_Delete(selection);
+        bool completed = false;
+        if (selected) {
+            append(&p->tool_results, "Narrator selected the attached hypothetical simulation plan.\n");
+            execute_action_order(p, plan);
+            completed = already_requested(p, plan);
+        } else {
+            append(&p->tool_results, "Discarded a draft that did not select the attached simulation plan.\n");
+            ++p->tool_rounds;
+        }
+        cJSON_Delete(plan);
+        if (selected && !completed) return SIM_NO_PROSE;
+        return !selected && p->tool_rounds >= 2 ? SIM_NO_PROSE : SIM_REGENERATE;
+    }
     size_t length = strlen(body);
     while (length && isspace((unsigned char)body[length - 1])) length--;
     Text json = {0};
