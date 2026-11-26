@@ -1,0 +1,30 @@
+[
+  {
+    "plan": {
+      "neutrino_tool": "sim_plan",
+      "name": "porous flow and material uptake",
+      "mode": "hypothetical",
+      "actions": [
+        {"neutrino_tool":"scene_room","min":[0,0,0],"max":[2,2,2]},
+        {"neutrino_tool":"scene_medium","method":"cfd","resolution":8,"seconds":1,"viscosity":0.01,"diffusivity":0,"porous":{"porosity":0.4,"permeability_m2":0.01,"drive_m_s2":[0.5,0,0]}},
+        {"neutrino_tool":"scene_flow","probe":[1,1,1]},
+        {"neutrino_tool":"gas_liquid_absorption","gas_volume_m3":2,"liquid_volume_m3":1,"gas_kg_m3":2,"partition":2,"kla_s_inv":0.25,"seconds":2},
+        {"neutrino_tool":"vapor_sorption","dry_mass_kg":2,"relative_humidity":0.5,"capacity_kg_per_kg":0.2,"affinity":2,"rate_s_inv":0.5,"seconds":2},
+        {"neutrino_tool":"polymer_moisture_uptake","dry_mass_kg":2,"thickness_m":0.002,"diffusivity_m2_s":1e-10,"surface_kg_per_kg":0.05,"seconds":10000}
+      ],
+      "queries": [
+        {"id":"seepage","predicate":"flow.porous_speed_exceeds","step":3,"threshold":0.3},
+        {"id":"dissolved","predicate":"mass_transfer.transferred_exceeds","step":4,"threshold":1},
+        {"id":"adsorbed","predicate":"mass_transfer.final_exceeds","step":5,"threshold":0.1},
+        {"id":"polymer_water","predicate":"mass_transfer.final_exceeds","step":6,"threshold":0.09}
+      ]
+    },
+    "results": {"seepage":"TRUE","dissolved":"TRUE","adsorbed":"TRUE","polymer_water":"TRUE"},
+    "measurements": {
+      "seepage": {"value":0.3160602794143,"pore_volume_m3":3.2},
+      "dissolved": {"value":1.2642411176571,"gas_kg":2.7357588823429},
+      "adsorbed": {"value":0.1264241117657},
+      "polymer_water": {"value":0.0931259678463}
+    }
+  }
+]

@@ -291,7 +291,7 @@ static bool thermal(const Json *args, Text *out)
     return true;
 }
 
-static bool flow(const Json *args, Text *out)
+static bool flow(const Json *args, Text *out, bool *unavailable)
 {
     double size[3], probe[3];
     FlowConfig config;
@@ -302,11 +302,18 @@ static bool flow(const Json *args, Text *out)
     if (at(args, "probe") && !physics_vector(args,"probe",probe)) return false;
     for(int axis=0; axis<3; ++axis) if(probe[axis]<0 || probe[axis]>size[axis]) return false;
     FlowField field = flow_solve(&config);
+    if (config.porous && !field.grid) {
+        if (unavailable) *unavailable = true;
+        format(out, "Porous CFD unavailable. %s.", field.fallback ? field.fallback : "No grid");
+        flow_release(&field);
+        return true;
+    }
     format(out, "3D %s flow: %s, %s; tracer at probe %.8g after %.8g s.",
            *medium ? medium : "liquid", field.method, field.memory, flow_sample(&field,probe), config.seconds);
     if (field.grid) format(out, " Grid %d^3, mean speed %.7g m/s, divergence RMS %.7g 1/s, mean tracer %.7g.",
                            config.resolution,field.speed,field.divergence,field.tracer_mean);
     if (field.fallback) format(out, " Fallback: %s.", field.fallback);
+    flow_porous_summary(&field, out);
     flow_release(&field);
     return true;
 }
@@ -359,7 +366,7 @@ bool physics_model_run(const char *name, const Json *args, double gravity, Text 
     if (!strcmp(name,"softbody3d")) return softbody(args,gravity,out,unavailable);
     if (!strcmp(name,"trajectory3d")) return trajectory(args,gravity,out);
     if (!strcmp(name,"thermal3d")) return thermal(args,out);
-    if (!strcmp(name,"flow3d")) return flow(args,out);
+    if (!strcmp(name,"flow3d")) return flow(args,out,unavailable);
     if (!strcmp(name,"ignition3d")) return ignition(args,out);
     return false;
 }

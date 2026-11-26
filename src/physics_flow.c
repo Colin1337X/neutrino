@@ -46,7 +46,20 @@ bool flow_parse(const Json *args, const double length[3], FlowConfig *config)
         if (length[axis] < .01 || length[axis] > 1000 || fabs(config->wind[axis]) > 25 ||
             config->center[axis] < 0 || config->center[axis] >= length[axis]) return false;
         config->length[axis] = length[axis];
+        config->porous_max[axis] = length[axis];
     }
+    const Json *porous = at(args, "porous");
+    if (!porous) return true;
+    if (!config->cfd || config->viscosity <= 0 || !cJSON_IsObject(porous) ||
+        !physics_scalar(porous, "permeability_m2", 1e-16, 1e6, &config->permeability) ||
+        !physics_scalar(porous, "porosity", .001, 1, &config->porosity) ||
+        (at(porous, "min") && !physics_vector(porous, "min", config->porous_min)) ||
+        (at(porous, "max") && !physics_vector(porous, "max", config->porous_max)) ||
+        (at(porous, "drive_m_s2") && !physics_vector(porous, "drive_m_s2", config->porous_drive))) return false;
+    for (int axis = 0; axis < 3; ++axis)
+        if (config->porous_min[axis] < 0 || config->porous_max[axis] > length[axis] ||
+            config->porous_max[axis] <= config->porous_min[axis] || fabs(config->porous_drive[axis]) > 25) return false;
+    config->porous = true;
     return true;
 }
 
@@ -279,15 +292,19 @@ static void transport(int n, const unsigned char *solid, const double inv[3], do
 
 FlowField flow_solve_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t box_count)
 {
-    FlowField field = {.config = *c, .method = "reduced Gaussian transport", .memory = "analytic"};
+    FlowField field = {.config = *c, .method = c->porous ? "porous CFD unavailable" : "reduced Gaussian transport",
+                       .memory = c->porous ? "none" : "analytic"};
     if (!c->cfd) return field;
     const int n = c->resolution;
     const size_t cells = (size_t)n*n*n;
     double inv[3], inverse2 = 0, max_courant = 0;
+    double drag = c->porous ? c->viscosity / c->permeability : 0;
     for (int axis=0; axis<3; ++axis) {
         inv[axis] = n/c->length[axis];
         inverse2 += inv[axis]*inv[axis];
         max_courant += (fabs(c->wind[axis])+c->vortex)*inv[axis];
+        if (c->porous) max_courant += fabs(c->porous_drive[axis])*
+            (drag > 0 ? fmin(c->seconds, 1/drag) : c->seconds)*inv[axis];
     }
     const double steps_needed = fmax(1, ceil(c->seconds * fmax(2*max_courant,
                                                   4*fmax(c->viscosity,c->diffusivity)*inverse2)));
@@ -310,6 +327,13 @@ FlowField flow_solve_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t
             return field;
         }
     }
+    unsigned char *porous = c->porous ? calloc(cells, 1) : nullptr;
+    if (c->porous && !porous) {
+        flow_release(&field);
+        field.fallback = "CFD porous mask allocation unavailable";
+        field.memory = "none";
+        return field;
+    }
     double *velocity[3] = {field.grid+cells, field.grid+2*cells,field.grid+3*cells};
     double *next[3] = {field.grid+4*cells,field.grid+5*cells,field.grid+6*cells};
     double *dye_next=field.grid+7*cells, *rhs=field.grid+8*cells, *p=field.grid+9*cells, *q=field.grid+10*cells;
@@ -324,6 +348,13 @@ FlowField flow_solve_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t
                 solid &= point[axis] >= boxes[j].lo[axis] && point[axis] < boxes[j].hi[axis];
         }
         if (solid) { field.solid[i] = 1; continue; }
+        if (porous) {
+            bool inside = true;
+            for (int axis = 0; axis < 3; ++axis)
+                inside &= point[axis] >= c->porous_min[axis] && point[axis] < c->porous_max[axis];
+            porous[i] = inside;
+            field.porous_cells += inside;
+        }
         ++fluid_cells;
         const double tau = 6.283185307179586;
         velocity[0][i] = c->wind[0] + c->vortex*sin(tau*(y+.5)/n);
@@ -331,18 +362,27 @@ FlowField flow_solve_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t
         velocity[2][i] = c->wind[2] + c->vortex*sin(tau*(x+.5)/n);
         field.grid[i] = gaussian(c,point,0);
     }
-    if (!fluid_cells || (field.solid && fluid_cells == cells)) {
+    if (!fluid_cells || (field.solid && fluid_cells == cells) || (porous && !field.porous_cells)) {
+        free(porous);
         flow_release(&field);
-        field.fallback = "CFD geometry has no resolved fluid/solid interface at this resolution";
-        field.memory = "analytic";
+        field.fallback = !fluid_cells || (box_count && fluid_cells == cells) ?
+            "CFD geometry has no resolved fluid/solid interface at this resolution" :
+            "CFD porous region has no fluid cells at this resolution";
+        field.memory = c->porous ? "none" : "analytic";
         return field;
     }
     close_faces(n, field.solid, velocity);
     const double dt=c->seconds/steps_needed;
+    double decay = exp(-drag*dt), force_integral = drag > 0 ? -expm1(-drag*dt)/drag : dt;
     bool gpu = c->gpu, used_gpu = false;
     for (int step=0; dt>0 && step<(int)steps_needed; ++step) {
         for (int axis=0; axis<3; ++axis)
             transport(n,field.solid,inv,dt,c->viscosity,velocity[axis],next[axis],rhs,velocity);
+        if (porous) {
+            for (int axis = 0; axis < 3; ++axis)
+                for (size_t i = 0; i < cells; ++i)
+                    if (porous[i]) next[axis][i] = next[axis][i]*decay + c->porous_drive[axis]*force_integral;
+        }
         gpu = project(n,field.solid,inv,next,rhs,p,q,gpu);
         used_gpu |= gpu;
         transport(n,field.solid,inv,dt,c->diffusivity,field.grid,dye_next,rhs,next);
@@ -357,12 +397,19 @@ FlowField flow_solve_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t
         neighbors(n,x,y,z,lo,hi);
         double div=divergence_at(velocity,i,hi,inv);
         field.divergence += div*div;
-        field.speed += hypot(hypot(velocity[0][i],velocity[1][i]),velocity[2][i]);
+        double speed = hypot(hypot(velocity[0][i],velocity[1][i]),velocity[2][i]);
+        field.speed += speed;
+        if (porous && porous[i]) field.porous_speed += speed;
         field.tracer_mean += field.grid[i];
     }
     field.divergence = sqrt(field.divergence/fluid_cells);
     field.speed /= fluid_cells;
     field.tracer_mean /= fluid_cells;
+    if (porous && field.porous_cells) {
+        field.porous_speed /= field.porous_cells;
+        field.pore_volume = c->porosity * field.porous_cells / (inv[0]*inv[1]*inv[2]);
+    }
+    free(porous);
     if (!isfinite(field.divergence) || !isfinite(field.speed) || !isfinite(field.tracer_mean)) {
         flow_release(&field);
         field.fallback = "CFD produced a non-finite state";
@@ -382,4 +429,11 @@ FlowField flow_solve_domain(const FlowConfig *c, const PhysicsBox *boxes, size_t
 FlowField flow_solve(const FlowConfig *config)
 {
     return flow_solve_domain(config, nullptr, 0);
+}
+
+void flow_porous_summary(const FlowField *field, Text *out)
+{
+    if (field->grid && field->config.porous)
+        format(out, " Darcy momentum drag: %zu porous cells, pore volume %.8g m³, mean porous speed %.8g m/s.",
+               field->porous_cells, field->pore_volume, field->porous_speed);
 }

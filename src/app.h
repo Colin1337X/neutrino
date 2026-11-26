@@ -25,7 +25,8 @@ typedef struct {
 } Candidate;
 enum { SIM_TOOL_LIMIT = 12, ACOUSTIC_BLOCKERS = 16, ACOUSTIC_ROOM_PATHS = 7,
        PHYSICS_ACOUSTIC_PATHS = ACOUSTIC_ROOM_PATHS + 6 * ACOUSTIC_BLOCKERS };
-typedef enum { READING_NONE, READING_FLUID, READING_ACOUSTIC, READING_OPTICAL, READING_FLOW } ReadingKind;
+typedef enum { READING_NONE, READING_FLUID, READING_ACOUSTIC, READING_OPTICAL, READING_FLOW,
+               READING_MASS_TRANSFER } ReadingKind;
 typedef struct {
     ReadingKind kind;
     double seconds, level_m, drained_l, remaining_l, flow_lps, initial_flow_lps;
@@ -34,7 +35,11 @@ typedef struct {
     bool material_acoustics, unavailable;
     double optical_power, optical_first_ns;
     double tracer_concentration;
-    bool voxel_flow;
+    double porous_speed, pore_volume;
+    bool voxel_flow, porous_flow;
+    const char *transfer_method;
+    double transferred_kg, final_kg, equilibrium_kg, gas_kg;
+    bool closed_transfer;
 } PhysicsReading;
 enum { SCENARIO_ACTION_LIMIT = 32 };
 typedef struct {

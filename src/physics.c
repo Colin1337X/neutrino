@@ -308,7 +308,8 @@ bool physics_scene_edit(Json *settings, const Json *op)
         if (!room_flow(op, &bounds, &config)) return false;
         Json *medium = cJSON_CreateObject();
         const char *const keys[] = {"method","seconds","sigma_m","concentration","viscosity","diffusivity","vortex_m_s",
-                                    "resolution","center","wind","sound_loss","light_loss","memory","backend","solid_geometry"};
+                                    "resolution","center","wind","sound_loss","light_loss","memory","backend","solid_geometry",
+                                    "porous"};
         for (size_t i = 0; i < sizeof keys / sizeof *keys; ++i)
             if (at(op,keys[i])) put(medium,keys[i],cJSON_Duplicate(at(op,keys[i]),true));
         put(room, "medium", medium);
@@ -1086,9 +1087,10 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
         if (!at(room, "medium") || !room_flow(at(room, "medium"), &bounds, &config) ||
             !physics_vector(args, "probe", point) || !strictly_inside(&bounds, point)) return false;
         FlowField field = room_flow_solve(room, &bounds, &config);
-        if (!field.grid && cJSON_IsTrue(at(at(room, "medium"), "solid_geometry"))) {
+        if (!field.grid && (config.porous || cJSON_IsTrue(at(at(room, "medium"), "solid_geometry")))) {
             if (reading) reading->unavailable = true;
-            format(out, "Geometry-aware CFD unavailable. %s.", field.fallback ? field.fallback : "No grid");
+            format(out, "%s unavailable. %s.", config.porous ? "Porous CFD" : "Geometry-aware CFD",
+                   field.fallback ? field.fallback : "No grid");
         } else {
             for (int axis = 0; axis < 3; ++axis) point[axis] -= bounds.lo[axis];
             double concentration = flow_sample(&field, point);
@@ -1096,10 +1098,14 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
                 reading->kind = READING_FLOW;
                 reading->tracer_concentration = concentration;
                 reading->voxel_flow = field.solid != nullptr;
+                reading->porous_flow = config.porous;
+                reading->porous_speed = field.porous_speed;
+                reading->pore_volume = field.pore_volume;
             }
             format(out, "%s. Probe concentration %.9g. RMS divergence %.9g s^-1. Mean speed %.9g m/s.",
                    field.method, concentration, field.divergence, field.speed);
             if (field.fallback) format(out, " Fallback: %s.", field.fallback);
+            flow_porous_summary(&field, out);
         }
         flow_release(&field);
         return true;
@@ -1160,9 +1166,10 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
     if (at(room,"medium") && room_flow(at(room,"medium"),&bounds,&config) &&
         (optical ? config.light_loss : config.sound_loss) > 0) {
         field = room_flow_solve(room, &bounds, &config);
-        if (!field.grid && cJSON_IsTrue(at(at(room, "medium"), "solid_geometry"))) {
+        if (!field.grid && (config.porous || cJSON_IsTrue(at(at(room, "medium"), "solid_geometry")))) {
             if (reading) reading->unavailable = true;
-            format(out, "Geometry-aware CFD unavailable. %s.", field.fallback ? field.fallback : "No grid");
+            format(out, "%s unavailable. %s.", config.porous ? "Porous CFD" : "Geometry-aware CFD",
+                   field.fallback ? field.fallback : "No grid");
             cJSON_Delete(filtered);
             flow_release(&field);
             return true;
@@ -1242,6 +1249,17 @@ static bool prop_load(const Json *args, Text *out)
 bool physics_run_reading(const char *name, const Json *args, const Json *settings, Text *out, PhysicsReading *reading)
 {
     if (reading) *reading = (PhysicsReading){0};
+    if (mass_transfer_tool(name)) {
+        MassTransfer mass;
+        if (!mass_transfer_run(name, args, &mass)) return false;
+        format(out, "%s. Transferred %+.8g kg; final target mass %.8g kg; equilibrium target mass %.8g kg.",
+               mass.method, mass.transferred_kg, mass.final_kg, mass.equilibrium_kg);
+        if (mass.closed) format(out, " Final gas mass %.8g kg; total solute %.8g kg.", mass.gas_kg, mass.gas_kg+mass.final_kg);
+        if (reading) *reading = (PhysicsReading){.kind=READING_MASS_TRANSFER,
+            .transfer_method=mass.method,.transferred_kg=mass.transferred_kg,.final_kg=mass.final_kg,
+            .equilibrium_kg=mass.equilibrium_kg,.gas_kg=mass.gas_kg,.closed_transfer=mass.closed};
+        return true;
+    }
     if (!strcmp(name, "scene_inspect") || !strcmp(name, "scene_rays") || !strcmp(name, "scene_acoustic") ||
         !strcmp(name, "scene_light") || !strcmp(name,"scene_catalog") || !strcmp(name, "scene_flow") ||
         !strcmp(name, "scene_spill") || !strcmp(name, "scene_puddles"))
@@ -1253,7 +1271,7 @@ bool physics_run_reading(const char *name, const Json *args, const Json *setting
         (at(args,"size") || strcmp(js(args,"method"),"reduced"))) {
         Json *flow = cJSON_Duplicate(args,true);
         set(flow,"medium",!strcmp(name,"gas") ? "gas" : "liquid");
-        bool valid = physics_model_run("flow3d",flow,setting(settings,GRAVITY),out,nullptr);
+        bool valid = physics_model_run("flow3d",flow,setting(settings,GRAVITY),out,reading ? &reading->unavailable : nullptr);
         cJSON_Delete(flow);
         return valid;
     }

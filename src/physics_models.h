@@ -8,6 +8,13 @@ bool physics_vector(const Json *args, const char *key, double value[3]);
 bool physics_optional(const Json *args, const char *key, double low, double high, double initial, double *value);
 bool physics_model_tool(const char *name);
 bool physics_model_run(const char *name, const Json *args, double gravity, Text *out, bool *unavailable);
+typedef struct {
+    const char *method;
+    double final_kg, transferred_kg, equilibrium_kg, gas_kg;
+    bool closed;
+} MassTransfer;
+bool mass_transfer_tool(const char *name);
+bool mass_transfer_run(const char *name, const Json *args, MassTransfer *result);
 void *physics_memory_alloc(size_t bytes, bool prefer_mapped, bool *mapped, const char **description);
 void physics_memory_free(void *memory, bool mapped);
 
@@ -15,8 +22,9 @@ typedef struct {
     double length[3], center[3], wind[3];
     double seconds, sigma, density, viscosity, diffusivity, vortex;
     double sound_loss, light_loss;
+    double permeability, porosity, porous_min[3], porous_max[3], porous_drive[3];
     int resolution;
-    bool cfd, mapped, gpu;
+    bool cfd, mapped, gpu, porous;
 } FlowConfig;
 
 typedef struct { double lo[3], hi[3]; } PhysicsBox;
@@ -28,7 +36,8 @@ typedef struct {
     FlowConfig config;
     double *grid;
     unsigned char *solid;
-    double divergence, speed, tracer_mean;
+    double divergence, speed, tracer_mean, porous_speed, pore_volume;
+    size_t porous_cells;
     const char *method;
     const char *memory;
     const char *fallback;
@@ -42,4 +51,5 @@ double flow_sample(const FlowField *field, const double local[3]);
 double flow_column(const FlowField *field, const double a[3], const double b[3], const double origin[3],
                    double start, double end);
 void flow_release(FlowField *field);
+void flow_porous_summary(const FlowField *field, Text *out);
 #endif

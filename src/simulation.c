@@ -268,6 +268,12 @@ static const char scenario_help[] =
     "scene_runoff configures min_xy, max_xy, cells, optional conductivity_m2_s and slope. "
     "scene_step moves landed water across the grid. Query fluid.pools_on (entity,target,threshold in L), "
     "fluid.depth_exceeds (entity,optional target,threshold in m), or use scene_puddles by entity.\n"
+    "flow3d and scene_medium accept porous:{permeability_m2,porosity,optional min/max region,optional drive_m_s2} with method:cfd. "
+    "Measure porous speed with flow.porous_speed_exceeds(step,threshold in m/s) after scene_flow.\n"
+    "gas_liquid_absorption: gas_volume_m3, liquid_volume_m3, gas_kg_m3, optional liquid_kg_m3, partition, kla_s_inv, seconds. "
+    "vapor_sorption: dry_mass_kg, relative_humidity (0..1), capacity_kg_per_kg, affinity, rate_s_inv, optional initial_kg_per_kg, seconds. "
+    "polymer_moisture_uptake: dry_mass_kg, thickness_m, diffusivity_m2_s, surface_kg_per_kg, optional initial_kg_per_kg, seconds. "
+    "Query mass_transfer.transferred_exceeds or mass_transfer.final_exceeds with step and threshold in kg.\n"
     "sim_plan: name, mode (hypothetical/stage), actions (ordered tool objects), queries (id and predicate). "
     "Hypothetical plans leave the story unchanged. Predicates: entity.exists(entity), entity.overlaps(entity,target), "
     "fluid.volume_exceeds(step,threshold in L), fluid.level_exceeds(step,threshold in m), "
@@ -441,7 +447,7 @@ static bool read_only_tool(const char *tool)
            !strcmp(tool, "scene_light") || !strcmp(tool,"scene_catalog") || !strcmp(tool, "scene_flow") ||
            !strcmp(tool, "scene_spill") || !strcmp(tool, "scene_puddles") ||
            !strcmp(tool,"world_inspect") ||
-           physics_model_tool(tool);
+           physics_model_tool(tool) || mass_transfer_tool(tool);
 }
 
 static bool run_sim_read(const char *tool, const Json *op, const Json *story, int head,

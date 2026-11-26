@@ -68,7 +68,7 @@ bool simulation_plan_parse(const Json *plan, SimulationPlan *parsed)
 
 typedef enum { ENTITY_EXISTS, ENTITY_OVERLAPS, ENTITY_MOVED, ENTITY_ROTATED, ENTITY_CONTACTS,
                ENTITY_FRACTURED, FLUID_RELEASED, FLUID_DEPOSITED, FLUID_SURFACE, FLUID_POOL, FLUID_DEPTH,
-               FLUID_DRAINED, FLUID_LEVEL, FLOW_TRACER,
+               FLUID_DRAINED, FLUID_LEVEL, FLOW_TRACER, FLOW_POROUS_SPEED, MASS_TRANSFERRED, MASS_FINAL,
                SIGNAL_REACHES, SIGNAL_ARRIVES, SIGNAL_POWER } Predicate;
 static const struct { const char *name; Predicate kind; } predicates[] = {
     {"entity.exists", ENTITY_EXISTS}, {"entity.overlaps", ENTITY_OVERLAPS},
@@ -79,6 +79,8 @@ static const struct { const char *name; Predicate kind; } predicates[] = {
     {"fluid.pools_on", FLUID_POOL}, {"fluid.depth_exceeds", FLUID_DEPTH},
     {"fluid.volume_exceeds", FLUID_DRAINED}, {"fluid.level_exceeds", FLUID_LEVEL},
     {"fluid.concentration_exceeds", FLOW_TRACER},
+    {"flow.porous_speed_exceeds", FLOW_POROUS_SPEED},
+    {"mass_transfer.transferred_exceeds", MASS_TRANSFERRED}, {"mass_transfer.final_exceeds", MASS_FINAL},
     {"signal.reaches_receiver", SIGNAL_REACHES}, {"signal.arrival_before", SIGNAL_ARRIVES},
     {"signal.power_exceeds", SIGNAL_POWER}
 };
@@ -182,6 +184,25 @@ static const char *evaluate(const Json *query, const Json *settings, const Physi
         value = reading->optical_power;
         unit = "relative power";
         set(evidence, "solver", "geometric optics");
+    } else if (kind == MASS_TRANSFERRED || kind == MASS_FINAL) {
+        if (reading->kind != READING_MASS_TRANSFER ||
+            !physics_scalar(query, "threshold", -DBL_MAX, DBL_MAX, &threshold)) return "INSUFFICIENT_DATA";
+        value = kind == MASS_TRANSFERRED ? reading->transferred_kg : reading->final_kg;
+        set(evidence, "solver", reading->transfer_method);
+        const char *keys[] = {"transferred_kg", "final_kg", "equilibrium_kg"};
+        double masses[] = {reading->transferred_kg, reading->final_kg, reading->equilibrium_kg};
+        for (size_t k = 0; k < sizeof keys/sizeof *keys; ++k) put(evidence, keys[k], cJSON_CreateNumber(masses[k]));
+        if (reading->closed_transfer) put(evidence, "gas_kg", cJSON_CreateNumber(reading->gas_kg));
+        put(evidence, "value", cJSON_CreateNumber(value));
+        put(evidence, "threshold", cJSON_CreateNumber(threshold));
+        set(evidence, "units", "kg");
+        return value > threshold ? "TRUE" : "FALSE";
+    } else if (kind == FLOW_POROUS_SPEED) {
+        if (reading->kind != READING_FLOW || !reading->porous_flow) return "INSUFFICIENT_DATA";
+        value = reading->porous_speed;
+        unit = "m/s";
+        put(evidence, "pore_volume_m3", cJSON_CreateNumber(reading->pore_volume));
+        set(evidence, "solver", "incompressible CFD with Darcy drag");
     } else if (kind == FLOW_TRACER) {
         if (reading->kind != READING_FLOW) return "INSUFFICIENT_DATA";
         value = reading->tracer_concentration;

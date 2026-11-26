@@ -48,6 +48,9 @@ Reports distinguish TRUE, FALSE, INSUFFICIENT_DATA, UNSUPPORTED, and SIMULATION_
 | signal.reaches_receiver | step with a supported acoustic or optical path above cutoff |
 | signal.arrival_before | step and threshold in milliseconds |
 | signal.power_exceeds | step and threshold as strongest received optical power relative to a source at 1 m |
+| flow.porous_speed_exceeds | step with scene_flow, threshold in m/s. Reports mean speed across resolved porous cells and the modeled pore volume |
+| mass_transfer.transferred_exceeds | step with a mass-transfer tool, threshold in kg. Positive is uptake, negative is release |
+| mass_transfer.final_exceeds | step with a mass-transfer tool, threshold in kg. Reports final target mass |
 
 ## Shared spatial data
 
@@ -85,6 +88,21 @@ This is a mass-conserving heightfield approximation. It models gravity-driven mo
 
 Set method to cfd and solid_geometry to true in scene_medium to use the room's boxes as zero-normal-flux voxel obstacles. The CPU solver closes adjacent velocity faces and uses obstacle-aware pressure and diffusion stencils. The outer numerical domain remains periodic. Boxes are rasterized by cell center, so thin geometry below grid resolution can be missed. An entirely unresolved interface is reported as unavailable. The scene_flow tool reads the configured medium at a world-space probe. Sound and light queries with gas losses can use the same solved field. Each query currently solves the field again.
 
+## Porous flow and material uptake
+
+Each model accepts explicit parameters with SI units. Run the [material transport fixture](../benchmarks/material-transport.json) through /sim to exercise all four models and inspect their typed results.
+
+| Tool | Parameters and model |
+| --- | --- |
+| Flow3D or scene_medium with porous | Set method to cfd and supply positive kinematic viscosity via viscosity in m²/s. The porous object takes permeability_m2 and porosity, plus optional room-relative min and max in metres and drive_m_s2. The default region fills the domain. Velocity evolves under additional linear Darcy drag with coefficient viscosity divided by permeability. Porosity determines reported pore volume. |
+| gas_liquid_absorption | Supply gas_volume_m3, liquid_volume_m3, gas_kg_m3, optional liquid_kg_m3, partition, kla_s_inv, and seconds. The partition is equilibrium liquid concentration divided by gas concentration. The two well-mixed compartments conserve dilute solute and approach the Henry equilibrium exponentially. |
+| vapor_sorption | Supply dry_mass_kg, relative_humidity as a fraction from 0 to 1, capacity_kg_per_kg, affinity, rate_s_inv, optional initial_kg_per_kg, and seconds. Uses a Langmuir isotherm with first-order approach to equilibrium at fixed humidity and temperature. The vapor source has prescribed humidity. |
+| polymer_moisture_uptake | Supply dry_mass_kg, full thickness_m, diffusivity_m2_s, surface_kg_per_kg, optional initial_kg_per_kg, and seconds. Uses the average Fickian uptake of a flat sheet held at the same fixed moisture loading on both faces. Diffusivity and sheet dimensions remain fixed. |
+
+Porous CFD uses the existing incompressible pressure solver with a voxelized linear drag term. It does not resolve individual pores, porosity-weighted pressure or tracer storage, saturation, capillary pressure, or nonlinear drag. Regions thinner than the grid can be unavailable. Porous queries report that failure explicitly. The analytical mass-transfer tools report signed transfer and equilibrium as well as final mass. They run as independent experiments with prescribed inputs. They do not automatically change a room's humidity or tracking ledger.
+
+The model conventions follow [Brinkman momentum-drag theory](https://doc.comsol.com/6.4/doc/com.comsol.help.edecm/edecm_ug_fluidflow.09.128.html), [IUPAC's dimensionless Henry solubility definition](https://goldbook.iupac.org/terms/view/09018/plain), [Langmuir's adsorption model](https://doi.org/10.1021/ja02242a004), and [Crank's plane-sheet diffusion solutions](https://people.bath.ac.uk/ensdasr/PAPERS/Crank-The-Mathematics-of-Diffusion.pdf).
+
 ## Capability and validation scope
 
 | Area | Status |
@@ -92,7 +110,7 @@ Set method to cfd and solid_geometry to true in scene_medium to use the room's b
 | State and orchestration | Shared branch-local AABB geometry and propagation materials, ordered and conditional transactions, analytical and numerical queries |
 | Mechanics | Quaternion rotation, off-center impulse, swept AABB translation, fixed mounts, rails and persistent two-piece brittle fracture. Contact torque, friction, joint networks and compound shapes are unfinished |
 | Propagation | Existing CPU, compute and hardware RT visibility paths. Acoustic and optical queries share geometry, material profiles and named endpoints. The supported paths are direct and first-bounce with material attenuation and cutoffs |
-| Continuum | Ballistic water deposition, heightfield runoff and pooling, periodic CFD and opt-in CPU voxel obstacles. Momentum-resolving free-surface simulation, phase transitions, and two-way fluid-solid coupling are unfinished |
+| Continuum | Ballistic water deposition, heightfield runoff, pooling, periodic CFD, voxel obstacles, linear porous drag, and analytical mass transfer. Momentum-resolving free-surface simulation, phase transitions, and two-way fluid-solid coupling are unfinished |
 | Character perception | Signal reception predicates describe the solver's receiver. Character knowledge records, access controls and isolated character inference are unfinished |
 | Runtime scaling | Existing GPU and Windows mapped-buffer paths. Obstacle pressure projection runs on CPU. The plan enforces action and query counts. Global time and byte budgeting, persistent solver fields and out-of-core tiled scheduling are unfinished |
 

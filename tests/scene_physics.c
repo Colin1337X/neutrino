@@ -525,6 +525,66 @@ static bool ordered_protocol(void)
     return ok;
 }
 
+static bool material_transport(void)
+{
+    const char *porous = "{\"method\":\"cfd\",\"resolution\":8,\"seconds\":1,\"viscosity\":0.01,\"diffusivity\":0,"
+        "\"porous\":{\"porosity\":0.4,\"permeability_m2\":0.01,\"drive_m_s2\":[0.5,0,0]}}";
+    Json *args = cJSON_Parse(porous);
+    const double size[] = {2,2,2};
+    FlowConfig config = {0};
+    bool ok = flow_parse(args, size, &config);
+    if (ok) {
+        FlowField field = flow_solve(&config);
+        ok &= field.grid && field.porous_cells == 512 && fabs(field.pore_volume - 3.2) < 1e-12 &&
+            fabs(field.porous_speed - .5*(1-exp(-1))) < 1e-12 && field.divergence < 1e-12;
+        flow_release(&field);
+        config.porous_max[0] = .01;
+        field = flow_solve(&config);
+        ok &= !field.grid && field.fallback && strstr(field.fallback, "no fluid cells");
+        flow_release(&field);
+        config.porous_max[0] = 2;
+        config.porous_max[1] = 1;
+        config.porous_drive[0] = 0;
+        config.wind[0] = .5;
+        field = flow_solve(&config);
+        ok &= field.grid && field.porous_cells == 256 && fabs(field.pore_volume - 1.6) < 1e-12 &&
+            field.porous_speed < field.speed && field.speed < .5 && field.divergence < 1e-12;
+        flow_release(&field);
+    }
+    set(args, "method", "reduced");
+    ok &= !flow_parse(args, size, &config);
+    cJSON_Delete(args);
+
+    struct { const char *tool, *json; double final, transferred; } models[] = {
+        {"gas_liquid_absorption","{\"gas_volume_m3\":2,\"liquid_volume_m3\":1,\"gas_kg_m3\":2,"
+             "\"partition\":2,\"kla_s_inv\":0.25,\"seconds\":2}", 2*(1-exp(-1)), 2*(1-exp(-1))},
+        {"gas_liquid_absorption","{\"gas_volume_m3\":1,\"liquid_volume_m3\":1,\"gas_kg_m3\":0,"
+             "\"liquid_kg_m3\":1,\"partition\":0,\"kla_s_inv\":1,\"seconds\":1}", exp(-1), exp(-1)-1},
+        {"vapor_sorption","{\"dry_mass_kg\":2,\"relative_humidity\":0.5,\"capacity_kg_per_kg\":0.2,"
+             "\"affinity\":2,\"rate_s_inv\":0.5,\"seconds\":2}", .2*(1-exp(-1)), .2*(1-exp(-1))},
+        {"vapor_sorption","{\"dry_mass_kg\":2,\"relative_humidity\":0,\"capacity_kg_per_kg\":0.2,"
+             "\"initial_kg_per_kg\":0.1,\"affinity\":2,\"rate_s_inv\":1,\"seconds\":1}", .2*exp(-1), .2*(exp(-1)-1)},
+        {"polymer_moisture_uptake","{\"dry_mass_kg\":2,\"thickness_m\":0.002,\"diffusivity_m2_s\":1e-10,"
+             "\"surface_kg_per_kg\":0.05,\"seconds\":10000}", .0931259678463, .0931259678463},
+        {"polymer_moisture_uptake","{\"dry_mass_kg\":2,\"thickness_m\":0.002,\"diffusivity_m2_s\":1e-10,"
+             "\"surface_kg_per_kg\":0.05,\"seconds\":1}", .0011283791671, .0011283791671},
+        {"polymer_moisture_uptake","{\"dry_mass_kg\":2,\"thickness_m\":0.002,\"diffusivity_m2_s\":1e-10,"
+             "\"surface_kg_per_kg\":0.05,\"seconds\":0}", 0, 0},
+    };
+    for (size_t i = 0; i < sizeof models/sizeof *models; ++i) {
+        MassTransfer mass = {0};
+        args = cJSON_Parse(models[i].json);
+        bool valid = mass_transfer_run(models[i].tool, args, &mass) &&
+            fabs(mass.final_kg-models[i].final) < 1e-8 && fabs(mass.transferred_kg-models[i].transferred) < 1e-8 &&
+            (!mass.closed || fabs(mass.gas_kg+mass.final_kg-(i == 0 ? 4 : 1)) < 1e-12);
+        if (!valid) fprintf(stderr, "%s reference: got %.10g kg, expected %.10g kg.\n",
+                            models[i].tool, mass.final_kg, models[i].final);
+        ok &= valid;
+        cJSON_Delete(args);
+    }
+    return ok;
+}
+
 static bool solid_cfd(void)
 {
     FlowConfig config = {.length={8,8,8},.center={4.5,4.5,4.5},.sigma=.3,.density=1,
@@ -1185,6 +1245,7 @@ int main(int argc, char **argv)
     if (!rigid_branch_replay()) { fputs("Rigid branch replay test failed.\n", stderr); failures++; }
     if (!attached_rigid_plan()) { fputs("Attached rigid plan test failed.\n", stderr); failures++; }
     if (!solid_cfd()) { fputs("Voxel CFD boundary test failed.\n", stderr); failures++; }
+    if (!material_transport()) { fputs("Material transport test failed.\n", stderr); failures++; }
     if (!scene_protocol("cpu")) { fputs("3D scene simulation protocol failed.\n", stderr); failures++; }
 #ifndef NEUTRINO_VULKAN_RT
     Json *no_rt = cJSON_Parse(cases[3].json);
