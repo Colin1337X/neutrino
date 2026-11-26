@@ -38,12 +38,13 @@ typedef void *Loader;
 #define RT_FUNCTIONS(X) \
     X(GetBufferDeviceAddress) X(CreateAccelerationStructureKHR) X(DestroyAccelerationStructureKHR) \
     X(GetAccelerationStructureBuildSizesKHR) X(GetAccelerationStructureDeviceAddressKHR) \
-    X(CmdBuildAccelerationStructuresKHR)
+    X(CmdBuildAccelerationStructuresKHR) X(ResetCommandPool)
 static const char *const rt_extensions[] = {
     VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, VK_KHR_RAY_QUERY_EXTENSION_NAME,
     VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME
 };
 static void rt_release_scene(void);
+static void rt_release_dispatch(void);
 #endif
 
 static struct {
@@ -95,6 +96,7 @@ static PFN_vkGetInstanceProcAddr open_loader(void)
 static void close_backend(void)
 {
 #ifdef NEUTRINO_VULKAN_RT
+    rt_release_dispatch();
     rt_release_scene();
     if (vk.rt_pipeline) vk.DestroyPipeline(vk.device, vk.rt_pipeline, NULL);
     if (vk.rt_layout) vk.DestroyPipelineLayout(vk.device, vk.rt_layout, NULL);
@@ -364,11 +366,21 @@ done:
 #ifdef NEUTRINO_VULKAN_RT
 typedef struct { VkBuffer buffer; VkDeviceMemory memory; VkDeviceAddress address; void *map; } RtBuffer;
 typedef struct { RtBuffer storage; VkAccelerationStructureKHR handle; } RtStructure;
-static struct {
+typedef struct {
     RtStructure blas, tlas;
+    RtBuffer bounds, instance, bottom_scratch, top_scratch;
     RtBox boxes[16];
-    size_t count;
-} rt_scene;
+    size_t count, capacity;
+    bool valid;
+} RtScene;
+static RtScene rt_scene;
+static struct {
+    RtBuffer data;
+    VkDescriptorPool descriptors;
+    VkDescriptorSet set;
+    VkCommandPool commands;
+    VkCommandBuffer command;
+} rt_dispatch;
 
 static void rt_free_buffer(RtBuffer *buffer)
 {
@@ -381,11 +393,27 @@ static void rt_free_structure(RtStructure *structure)
     if (structure->handle) vk.DestroyAccelerationStructureKHR(vk.device, structure->handle, NULL);
     rt_free_buffer(&structure->storage);
 }
+static void rt_free_scene(RtScene *scene)
+{
+    rt_free_structure(&scene->tlas);
+    rt_free_structure(&scene->blas);
+    rt_free_buffer(&scene->top_scratch);
+    rt_free_buffer(&scene->bottom_scratch);
+    rt_free_buffer(&scene->instance);
+    rt_free_buffer(&scene->bounds);
+    *scene = (RtScene){0};
+}
 static void rt_release_scene(void)
 {
-    rt_free_structure(&rt_scene.tlas);
-    rt_free_structure(&rt_scene.blas);
-    memset(&rt_scene, 0, sizeof rt_scene);
+    rt_free_scene(&rt_scene);
+}
+
+static void rt_release_dispatch(void)
+{
+    if (rt_dispatch.commands) vk.DestroyCommandPool(vk.device, rt_dispatch.commands, NULL);
+    if (rt_dispatch.descriptors) vk.DestroyDescriptorPool(vk.device, rt_dispatch.descriptors, NULL);
+    rt_free_buffer(&rt_dispatch.data);
+    memset(&rt_dispatch, 0, sizeof rt_dispatch);
 }
 
 static bool rt_buffer(RtBuffer *out, VkDeviceSize size, VkBufferUsageFlags usage, bool upload)
@@ -419,16 +447,22 @@ static bool rt_buffer(RtBuffer *out, VkDeviceSize size, VkBufferUsageFlags usage
 static bool rt_build_info(RtStructure *out, RtBuffer *scratch,
                           VkAccelerationStructureBuildGeometryInfoKHR *build, uint32_t primitives)
 {
-    VkAccelerationStructureBuildSizesInfoKHR sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-    vk.GetAccelerationStructureBuildSizesKHR(vk.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-                                            build, &primitives, &sizes);
-    if (!rt_buffer(&out->storage, sizes.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
-                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, false) ||
-        !rt_buffer(scratch, sizes.buildScratchSize + vk.scratch_alignment - 1,
-                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, false)) return false;
-    VkAccelerationStructureCreateInfoKHR info = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-        .buffer = out->storage.buffer, .size = sizes.accelerationStructureSize, .type = build->type};
-    if (vk.CreateAccelerationStructureKHR(vk.device, &info, NULL, &out->handle) != VK_SUCCESS) return false;
+    if (!out->handle) {
+        VkAccelerationStructureBuildSizesInfoKHR sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+        vk.GetAccelerationStructureBuildSizesKHR(vk.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                                build, &primitives, &sizes);
+        VkDeviceSize scratch_size = sizes.buildScratchSize > sizes.updateScratchSize ?
+            sizes.buildScratchSize : sizes.updateScratchSize;
+        if (!rt_buffer(&out->storage, sizes.accelerationStructureSize,
+                       VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                       VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, false) ||
+            !rt_buffer(scratch, scratch_size + vk.scratch_alignment,
+                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, false)) return false;
+        VkAccelerationStructureCreateInfoKHR info = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+            .buffer = out->storage.buffer, .size = sizes.accelerationStructureSize, .type = build->type};
+        if (vk.CreateAccelerationStructureKHR(vk.device, &info, NULL, &out->handle) != VK_SUCCESS) return false;
+    }
+    if (build->mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR) build->srcAccelerationStructure = out->handle;
     build->dstAccelerationStructure = out->handle;
     build->scratchData.deviceAddress = (scratch->address + vk.scratch_alignment - 1) &
                                       ~((VkDeviceAddress)vk.scratch_alignment - 1);
@@ -467,44 +501,82 @@ fail:
     return false;
 }
 
+static bool init_rt_dispatch(void)
+{
+    if (rt_dispatch.command) return true;
+    const size_t capacity = 4096*(sizeof(RtRay)+sizeof(RtHit)) + 16*sizeof(RtBox);
+    if (!rt_buffer(&rt_dispatch.data, capacity, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true)) goto fail;
+    VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+                                    {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1}};
+    VkDescriptorPoolCreateInfo pool = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = 1, .poolSizeCount = 2, .pPoolSizes = sizes};
+    if (vk.CreateDescriptorPool(vk.device, &pool, NULL, &rt_dispatch.descriptors) != VK_SUCCESS) goto fail;
+    VkDescriptorSetAllocateInfo descriptor = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = rt_dispatch.descriptors, .descriptorSetCount = 1, .pSetLayouts = &vk.rt_descriptors};
+    if (vk.AllocateDescriptorSets(vk.device, &descriptor, &rt_dispatch.set) != VK_SUCCESS) goto fail;
+    VkCommandPoolCreateInfo commands = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, .queueFamilyIndex = vk.family};
+    if (vk.CreateCommandPool(vk.device, &commands, NULL, &rt_dispatch.commands) != VK_SUCCESS) goto fail;
+    VkCommandBufferAllocateInfo allocation = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = rt_dispatch.commands, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
+    if (vk.AllocateCommandBuffers(vk.device, &allocation, &rt_dispatch.command) == VK_SUCCESS) return true;
+fail:
+    rt_release_dispatch();
+    return false;
+}
+
 bool ray_vulkan_rt(const RtRay *rays, size_t count, const RtBox *boxes, size_t box_count, RtHit *hits)
 {
-    if (!count || count > 4096 || !box_count || box_count > 16 || !init_rt_pipeline()) return false;
+    /* Every submitted batch waits for the queue before returning. Reuse is serial. */
+    if (!count || count > 4096 || !box_count || box_count > 16 || !init_rt_pipeline() ||
+        !init_rt_dispatch() || vk.ResetCommandPool(vk.device, rt_dispatch.commands, 0) != VK_SUCCESS) return false;
     static_assert(sizeof(RtBox) == sizeof(VkAabbPositionsKHR), "Vulkan AABB layout");
     static_assert(sizeof(RtRay) == 6 * sizeof(float) && sizeof(RtHit) == 2 * sizeof(float), "RT shader buffer layout");
-    RtStructure blas = {0}, tlas = {0};
-    RtBuffer bounds = {0}, instance = {0}, bottom_scratch = {0}, top_scratch = {0}, data = {0};
-    VkDescriptorPool pool = VK_NULL_HANDLE;
-    VkCommandPool commands = VK_NULL_HANDLE;
+    RtScene replacement = {0};
+    const RtBuffer *data = &rt_dispatch.data;
+    const VkDescriptorSet set = rt_dispatch.set;
+    const VkCommandBuffer command = rt_dispatch.command;
     bool success = false;
-    bool build_scene = rt_scene.count != box_count ||
-                       memcmp(rt_scene.boxes, boxes, box_count * sizeof *boxes) != 0;
+    const bool reuse = rt_scene.capacity >= box_count;
+    RtScene *scene = reuse ? &rt_scene : &replacement;
+    const bool same_count = scene->count == box_count;
+    const bool build_scene = !same_count || !scene->valid ||
+        memcmp(scene->boxes, boxes, box_count * sizeof *boxes) != 0;
+    const VkBuildAccelerationStructureModeKHR mode = same_count && scene->valid ?
+        VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     const VkBufferUsageFlags input = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
                                     VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     size_t input_size = count * sizeof *rays + box_count * sizeof *boxes;
     size_t size = input_size + count * sizeof *hits;
-    if (!rt_buffer(&data, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true)) goto done;
-    memcpy(data.map, rays, count * sizeof *rays);
-    memcpy((unsigned char *)data.map + count * sizeof *rays, boxes, box_count * sizeof *boxes);
+    memcpy(data->map, rays, count * sizeof *rays);
+    memcpy((unsigned char *)data->map + count * sizeof *rays, boxes, box_count * sizeof *boxes);
     VkAccelerationStructureGeometryKHR geometry = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
         .geometryType = VK_GEOMETRY_TYPE_AABBS_KHR, .geometry.aabbs = {
             .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR,
             .stride = sizeof(VkAabbPositionsKHR)}};
     VkAccelerationStructureBuildGeometryInfoKHR bottom = {
         .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
-        .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+        .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, .mode = mode,
+        .flags = VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
         .geometryCount = 1, .pGeometries = &geometry};
     VkAccelerationStructureGeometryKHR instances = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
         .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR, .geometry.instances = {
             .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR}};
     VkAccelerationStructureBuildGeometryInfoKHR top = {
         .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
-        .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+        .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, .mode = mode,
+        .flags = VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
         .geometryCount = 1, .pGeometries = &instances};
     if (build_scene) {
-        if (!rt_buffer(&bounds, box_count * sizeof(VkAabbPositionsKHR), input, true) ||
-            !rt_buffer(&instance, sizeof(VkAccelerationStructureInstanceKHR), input, true)) goto done;
-        RtBox *conservative = bounds.map;
+        /* Do not refit again until all of the updated bounds have completed successfully. */
+        scene->valid = false;
+        if (!reuse) {
+            scene->capacity = 1;
+            while (scene->capacity < box_count) scene->capacity *= 2;
+            if (!rt_buffer(&scene->bounds, scene->capacity * sizeof(VkAabbPositionsKHR), input, true) ||
+                !rt_buffer(&scene->instance, sizeof(VkAccelerationStructureInstanceKHR), input, true)) goto done;
+        }
+        RtBox *conservative = scene->bounds.map;
         for (size_t i = 0; i < box_count; ++i) {
             for (int axis = 0; axis < 3; ++axis) {
                 float scale = fmaxf(1, fmaxf(fabsf(boxes[i].lo[axis]), fabsf(boxes[i].hi[axis])));
@@ -513,50 +585,37 @@ bool ray_vulkan_rt(const RtRay *rays, size_t count, const RtBox *boxes, size_t b
                 conservative[i].hi[axis] = boxes[i].hi[axis] + pad;
             }
         }
-        geometry.geometry.aabbs.data.deviceAddress = bounds.address;
-        instances.geometry.instances.data.deviceAddress = instance.address;
-        if (!rt_build_info(&blas, &bottom_scratch, &bottom, (uint32_t)box_count) ||
-            !rt_build_info(&tlas, &top_scratch, &top, 1)) goto done;
-        VkAccelerationStructureDeviceAddressInfoKHR address = {
-            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR, .accelerationStructure = blas.handle};
-        VkDeviceAddress blas_address = vk.GetAccelerationStructureDeviceAddressKHR(vk.device, &address);
-        if (!blas_address) goto done;
-        VkAccelerationStructureInstanceKHR object = {
-            .transform.matrix = {{1,0,0,0}, {0,1,0,0}, {0,0,1,0}}, .mask = 0xff,
-            .accelerationStructureReference = blas_address};
-        memcpy(instance.map, &object, sizeof object);
+        geometry.geometry.aabbs.data.deviceAddress = scene->bounds.address;
+        instances.geometry.instances.data.deviceAddress = scene->instance.address;
+        if (!rt_build_info(&scene->blas, &scene->bottom_scratch, &bottom, (uint32_t)scene->capacity) ||
+            !rt_build_info(&scene->tlas, &scene->top_scratch, &top, 1)) goto done;
+        if (!reuse) {
+            VkAccelerationStructureDeviceAddressInfoKHR address = {
+                .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+                .accelerationStructure = scene->blas.handle};
+            VkDeviceAddress blas_address = vk.GetAccelerationStructureDeviceAddressKHR(vk.device, &address);
+            if (!blas_address) goto done;
+            VkAccelerationStructureInstanceKHR object = {
+                .transform.matrix = {{1,0,0,0}, {0,1,0,0}, {0,0,1,0}}, .mask = 0xff,
+                .accelerationStructureReference = blas_address};
+            memcpy(scene->instance.map, &object, sizeof object);
+        }
     }
 
-    VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
-                                    {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1}};
-    VkDescriptorPoolCreateInfo descriptor_pool = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets = 1, .poolSizeCount = 2, .pPoolSizes = sizes};
-    if (vk.CreateDescriptorPool(vk.device, &descriptor_pool, NULL, &pool) != VK_SUCCESS) goto done;
-    VkDescriptorSet set;
-    VkDescriptorSetAllocateInfo descriptors = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .descriptorPool = pool, .descriptorSetCount = 1, .pSetLayouts = &vk.rt_descriptors};
-    if (vk.AllocateDescriptorSets(vk.device, &descriptors, &set) != VK_SUCCESS) goto done;
-    VkDescriptorBufferInfo storage = {.buffer = data.buffer, .range = size};
-    VkWriteDescriptorSetAccelerationStructureKHR scene = {
+    VkDescriptorBufferInfo storage = {.buffer = data->buffer, .range = size};
+    VkWriteDescriptorSetAccelerationStructureKHR scene_descriptor = {
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
-        .accelerationStructureCount = 1, .pAccelerationStructures = build_scene ? &tlas.handle : &rt_scene.tlas.handle};
+        .accelerationStructureCount = 1, .pAccelerationStructures = &scene->tlas.handle};
     VkWriteDescriptorSet writes[] = {
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0,
          .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &storage},
-        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = &scene, .dstSet = set, .dstBinding = 1,
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = &scene_descriptor, .dstSet = set, .dstBinding = 1,
          .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR}
     };
     vk.UpdateDescriptorSets(vk.device, 2, writes, 0, NULL);
-    VkCommandPoolCreateInfo command_pool = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, .queueFamilyIndex = vk.family};
-    if (vk.CreateCommandPool(vk.device, &command_pool, NULL, &commands) != VK_SUCCESS) goto done;
-    VkCommandBuffer command;
-    VkCommandBufferAllocateInfo allocation = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = commands, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
     VkCommandBufferBeginInfo begin = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
-    if (vk.AllocateCommandBuffers(vk.device, &allocation, &command) != VK_SUCCESS ||
-        vk.BeginCommandBuffer(command, &begin) != VK_SUCCESS) goto done;
+    if (vk.BeginCommandBuffer(command, &begin) != VK_SUCCESS) goto done;
     VkAccelerationStructureBuildRangeInfoKHR bottom_range = {.primitiveCount = (uint32_t)box_count};
     VkAccelerationStructureBuildRangeInfoKHR top_range = {.primitiveCount = 1};
     const VkAccelerationStructureBuildRangeInfoKHR *range = &bottom_range;
@@ -564,6 +623,16 @@ bool ray_vulkan_rt(const RtRay *rays, size_t count, const RtBox *boxes, size_t b
         .srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
         .dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR};
     if (build_scene) {
+        if (reuse) {
+            VkMemoryBarrier reuse_barrier = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                                 VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+                .dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                                 VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR};
+            vk.CmdPipelineBarrier(command, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                                  0, 1, &reuse_barrier, 0, NULL, 0, NULL);
+        }
         vk.CmdBuildAccelerationStructuresKHR(command, 1, &bottom, &range);
         vk.CmdPipelineBarrier(command, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                               VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &build_barrier, 0, NULL, 0, NULL);
@@ -584,26 +653,20 @@ bool ray_vulkan_rt(const RtRay *rays, size_t count, const RtBox *boxes, size_t b
     if (vk.EndCommandBuffer(command) != VK_SUCCESS) goto done;
     VkSubmitInfo submit = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &command};
     success = vk.QueueSubmit(vk.queue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS && vk.QueueWaitIdle(vk.queue) == VK_SUCCESS;
-    if (success) memcpy(hits, (unsigned char *)data.map + input_size, count * sizeof *hits);
+    if (success) memcpy(hits, (unsigned char *)data->map + input_size, count * sizeof *hits);
 
 done:
-    if (commands) vk.DestroyCommandPool(vk.device, commands, NULL);
-    if (pool) vk.DestroyDescriptorPool(vk.device, pool, NULL);
     if (success && build_scene) {
-        rt_release_scene();
-        rt_scene.blas = blas;
-        rt_scene.tlas = tlas;
-        memcpy(rt_scene.boxes, boxes, box_count * sizeof *boxes);
-        rt_scene.count = box_count;
-    } else {
-        rt_free_structure(&tlas);
-        rt_free_structure(&blas);
+        memcpy(scene->boxes, boxes, box_count * sizeof *boxes);
+        scene->count = box_count;
+        scene->valid = true;
+        if (!reuse) {
+            rt_release_scene();
+            rt_scene = replacement;
+            replacement = (RtScene){0};
+        }
     }
-    rt_free_buffer(&top_scratch);
-    rt_free_buffer(&bottom_scratch);
-    rt_free_buffer(&data);
-    rt_free_buffer(&instance);
-    rt_free_buffer(&bounds);
+    rt_free_scene(&replacement);
     return success;
 }
 #endif

@@ -210,7 +210,7 @@ Build the optional Vulkan compute backend on Windows or Linux with `-DNEUTRINO_V
 
 Add `-DNEUTRINO_VULKAN_RT=ON` to enable hardware ray queries on a Vulkan 1.2 GPU and driver that support `VK_KHR_ray_query` and acceleration structures. Select `"backend":"rt"` for `rays`, `scene_rays`, or acoustic occlusion. Results and `/trace` identify a successful dispatch as **Vulkan hardware RT**. If explicitly selected RT is unavailable, the tool reports it. The existing automatic backend order still applies when `backend` is omitted. [Khronos Vulkan ray queries](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_ray_query.html)
 
-The RT path caches the last unchanged group of boxes used for traversal. Acoustic material transmission and attenuation still use the CPU. Use `scene_physics_test --rt` to verify hardware execution.
+The RT path keeps one scene cache. It reuses unchanged geometry, refits moved boxes in place when the box count is unchanged, and reuses acceleration-structure storage when rebuilding within capacity. The command pool, descriptors, and mapped ray buffer are also reused between batches. Acoustic material transmission and attenuation still use the CPU. Use `scene_physics_test --rt` to verify hardware execution. [Vulkan acceleration structure update rules](https://docs.vulkan.org/spec/latest/chapters/accelstructures.html)
 
 `/memory items` shows the active branch's filed props and their evidence. Multiple named props can be kept from a single sentence when the narrator establishes their actions or locations. Use `/inventory` for the player-controlled world inventory.
 

@@ -685,9 +685,13 @@ static float reference_slab(const float *row)
 
 static bool rt_parity(void)
 {
-    RtBox boxes[] = {
+    RtBox boxes[16] = {
         {{2, -1, -1}, {3, 1, 1}}, {{4, -1, -1}, {5, 2, 2}}, {{2, -1, -1}, {3, 1, 1}}
     };
+    for (size_t i = 3; i < sizeof boxes / sizeof *boxes; ++i) {
+        float x = (float)i + 4;
+        boxes[i] = (RtBox){{x,-1,-1}, {x+0.5f,1,1}};
+    }
     static RtRay rays[4096];
     static RtHit hits[4096];
     for (size_t i = 0; i < 4096; ++i) {
@@ -696,13 +700,17 @@ static bool rt_parity(void)
                           {(i % 6 == 0) ? -1 : 1, (i % 3 == 0) ? 0 : .125f, 0}};
     }
     rays[0] = (RtRay){{2.5f, 0, 0}, {0, 0, 0}};
-    for (int pass = 0; pass < 3; ++pass) {
+    const size_t counts[] = {3,3,3,3,2,2,16,3};
+    for (size_t pass = 0; pass < sizeof counts / sizeof *counts; ++pass) {
         if (pass == 2) boxes[0].lo[0] = 2.75f;
-        if (!ray_vulkan_rt(rays, 4096, boxes, sizeof boxes / sizeof *boxes, hits)) return false;
+        if (pass == 3) boxes[1] = (RtBox){{1, -1.5f, -1}, {1.5f, 2, 2}};
+        if (pass == 5) boxes[0].lo[0] = 2;
+        size_t count = counts[pass];
+        if (!ray_vulkan_rt(rays, 4096, boxes, count, hits)) return false;
         for (size_t i = 0; i < 4096; ++i) {
             int winner = -1;
             float expected = -1;
-            for (size_t box = 0; box < sizeof boxes / sizeof *boxes; ++box) {
+            for (size_t box = 0; box < count; ++box) {
                 float row[RAY_VALUES];
                 memcpy(row, &rays[i], sizeof rays[i]);
                 memcpy(row + 6, &boxes[box], sizeof boxes[box]);
@@ -713,7 +721,7 @@ static bool rt_parity(void)
                 }
             }
             if (hits[i].box != (float)winner || !(fabsf(hits[i].distance - expected) < 1e-5f)) {
-                fprintf(stderr, "RT parity pass %d ray %zu: expected box %d at %g, got box %g at %g\n",
+                fprintf(stderr, "RT parity pass %zu ray %zu: expected box %d at %g, got box %g at %g\n",
                         pass, i, winner, expected, hits[i].box, hits[i].distance);
                 return false;
             }
