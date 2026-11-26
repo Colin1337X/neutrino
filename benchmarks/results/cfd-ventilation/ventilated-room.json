@@ -1,0 +1,111 @@
+{
+  "binary": "E:\\proj\\neutrino\\build-comparison\\fixed-cpu\\neutrino.exe",
+  "bytes": 760320,
+  "idle_rss_bytes": [
+    8245248,
+    8245248,
+    8245248,
+    8245248,
+    8245248,
+    8245248,
+    8245248,
+    8245248,
+    8245248,
+    8245248,
+    8245248,
+    8245248,
+    8245248,
+    8245248,
+    8245248
+  ],
+  "plans": [
+    {
+      "name": "ventilated relay room",
+      "times_ms": [
+        61.94780000078026,
+        59.90169999131467,
+        47.232099997927435,
+        62.87960000918247,
+        61.793900007614866,
+        46.73309999634512,
+        60.30050000117626
+      ],
+      "report": {
+        "simulation": "ventilated relay room",
+        "mode": "hypothetical",
+        "status": "completed",
+        "pending_commit": false,
+        "steps": 7,
+        "consequences": [
+          {
+            "id": "sealed_tracer",
+            "predicate": "fluid.concentration_exceeds",
+            "step": 3,
+            "solver": "room medium",
+            "boundary": "closed",
+            "value": 0.999998460674957,
+            "threshold": 0.99,
+            "units": "relative tracer",
+            "result": "TRUE"
+          },
+          {
+            "id": "inlet_rate",
+            "predicate": "flow.inflow_exceeds",
+            "step": 6,
+            "solver": "balanced CFD ventilation",
+            "value": 3,
+            "threshold": 2.99,
+            "units": "m³/s",
+            "result": "TRUE"
+          },
+          {
+            "id": "exhaust_rate",
+            "predicate": "flow.outflow_exceeds",
+            "step": 6,
+            "solver": "balanced CFD ventilation",
+            "value": 3,
+            "threshold": 2.99,
+            "units": "m³/s",
+            "result": "TRUE"
+          },
+          {
+            "id": "inlet_tracer",
+            "predicate": "fluid.concentration_exceeds",
+            "step": 6,
+            "solver": "room medium",
+            "boundary": "ventilated",
+            "flow_time_s": 2,
+            "value": 0.13062809811700737,
+            "threshold": 0.5,
+            "units": "relative tracer",
+            "result": "FALSE"
+          },
+          {
+            "id": "exhaust_tracer",
+            "predicate": "fluid.concentration_exceeds",
+            "step": 7,
+            "solver": "room medium",
+            "boundary": "ventilated",
+            "flow_time_s": 2,
+            "value": 0.975258770039044,
+            "threshold": 0.9,
+            "units": "relative tracer",
+            "result": "TRUE"
+          },
+          {
+            "id": "field_time",
+            "predicate": "flow.time_exceeds",
+            "step": 7,
+            "solver": "saved CFD field",
+            "value": 2,
+            "threshold": 1.99,
+            "units": "s",
+            "result": "TRUE"
+          }
+        ]
+      },
+      "median_ms": 60.30050000117626,
+      "trace": "Ordered actions executed in sequence:\n1. Change staged for this reply.\n{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[4,3,2]}\n2. Change staged for this reply.\n{\"neutrino_tool\":\"scene_medium\",\"method\":\"cfd\",\"resolution\":8,\"seconds\":2,\"sigma_m\":1000,\"viscosity\":0.04,\"diffusivity\":0.01,\"boundary\":\"closed\"}\n3. 3D incompressible Navier-Stokes, CPU closed exterior. Probe concentration 0.999998461. RMS divergence 0 s^-1. Mean speed 0 m/s.\n{\"neutrino_tool\":\"scene_flow\",\"probe\":[0.25,1.6875,1.125]}\n4. Change staged for this reply.\n{\"neutrino_tool\":\"scene_medium\",\"method\":\"cfd\",\"resolution\":8,\"seconds\":0,\"wind\":[0.5,0,0],\"sigma_m\":1000,\"viscosity\":0.04,\"diffusivity\":0.01,\"boundary\":\"no_slip\",\"boundaries\":{\"x_min\":{\"type\":\"inflow\",\"speed_m_s\":0.5,\"tracer\":0},\"x_max\":{\"type\":\"outflow\"}}}\n5. Initialized and advanced CFD field from 0 to 2 s · 3D incompressible Navier-Stokes, CPU ventilated exterior · 21846 encoded bytes. Ventilation: inlet 3 m³/s, exhaust 3 m³/s; tracer in 0, out 5.923807 concentration-m³ this step.\n{\"neutrino_tool\":\"scene_flow_step\",\"seconds\":2}\n6. Restored CFD field at 2 s. 3D incompressible Navier-Stokes, CPU ventilated exterior. Probe concentration 0.130628098. RMS divergence 0.00959406769 s^-1. Mean speed 0.491800357 m/s. Ventilation: inlet 3 m³/s, exhaust 3 m³/s; tracer in 0, out 0 concentration-m³ this step.\n{\"neutrino_tool\":\"scene_flow\",\"probe\":[0.25,1.6875,1.125]}\n7. Reused CFD field. 3D incompressible Navier-Stokes, CPU ventilated exterior. Probe concentration 0.97525877. RMS divergence 0.00959406769 s^-1. Mean speed 0.491800357 m/s. Ventilation: inlet 3 m³/s, exhaust 3 m³/s; tracer in 0, out 0 concentration-m³ this step.\n{\"neutrino_tool\":\"scene_flow\",\"probe\":[3.75,1.6875,1.125]}\n{\"simulation\":\"ventilated relay room\",\"mode\":\"hypothetical\",\"status\":\"completed\",\"pending_commit\":false,\"steps\":7,\"consequences\":[{\"id\":\"sealed_tracer\",\"predicate\":\"fluid.concentration_exceeds\",\"step\":3,\"solver\":\"room medium\",\"boundary\":\"closed\",\"value\":0.999998460674957,\"threshold\":0.99,\"units\":\"relative tracer\",\"result\":\"TRUE\"},{\"id\":\"inlet_rate\",\"predicate\":\"flow.inflow_exceeds\",\"step\":6,\"solver\":\"balanced CFD ventilation\",\"value\":3,\"threshold\":2.99,\"units\":\"m³/s\",\"result\":\"TRUE\"},{\"id\":\"exhaust_rate\",\"predicate\":\"flow.outflow_exceeds\",\"step\":6,\"solver\":\"balanced CFD ventilation\",\"value\":3,\"threshold\":2.99,\"units\":\"m³/s\",\"result\":\"TRUE\"},{\"id\":\"inlet_tracer\",\"predicate\":\"fluid.concentration_exceeds\",\"step\":6,\"solver\":\"room medium\",\"boundary\":\"ventilated\",\"flow_time_s\":2,\"value\":0.13062809811700737,\"threshold\":0.5,\"units\":\"relative tracer\",\"result\":\"FALSE\"},{\"id\":\"exhaust_tracer\",\"predicate\":\"fluid.concentration_exceeds\",\"step\":7,\"solver\":\"room medium\",\"boundary\":\"ventilated\",\"flow_time_s\":2,\"value\":0.975258770039044,\"threshold\":0.9,\"units\":\"relative tracer\",\"result\":\"TRUE\"},{\"id\":\"field_time\",\"predicate\":\"flow.time_exceeds\",\"step\":7,\"solver\":\"saved CFD field\",\"value\":2,\"threshold\":1.99,\"units\":\"s\",\"result\":\"TRUE\"}]}\n"
+    }
+  ]
+}

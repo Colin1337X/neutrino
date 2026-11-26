@@ -10,9 +10,10 @@
 #include <windows.h>
 #endif
 
-enum { FLOW_STEPS = 96, PRESSURE_SWEEPS = 32 };
+enum { FLOW_STEPS = 96, PRESSURE_SWEEPS = 32, VENT_SWEEPS = 96, FACE_CELLS = FLOW_MAX_RESOLUTION * FLOW_MAX_RESOLUTION };
 static const char frame_alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 static_assert(sizeof(double) == sizeof(uint64_t) && DBL_MANT_DIG == 53 && DBL_MAX_EXP == 1024);
+static_assert(FLOW_MAX_CELLS <= UINT16_MAX);
 
 size_t flow_frame_bytes(int resolution)
 {
@@ -72,6 +73,76 @@ bool physics_optional(const Json *args, const char *key, double low, double high
     return !at(args, key) || physics_scalar(args, key, low, high, value);
 }
 
+static bool face_limits(const Json *face, const char *key, double limits[2])
+{
+    const Json *array = at(face, key);
+    if (!cJSON_IsArray(array) || cJSON_GetArraySize(array) != 2) return false;
+    for (int i = 0; i < 2; ++i) {
+        const Json *item = cJSON_GetArrayItem(array, i);
+        if (!cJSON_IsNumber(item) || !isfinite(item->valuedouble)) return false;
+        limits[i] = item->valuedouble;
+    }
+    return true;
+}
+
+static bool flow_boundaries(const Json *args, FlowConfig *c)
+{
+    const Json *faces = at(args, "boundaries");
+    const char *boundary = js(args, "boundary");
+    c->no_slip = !strcmp(boundary, "no_slip");
+    c->closed = c->no_slip || !strcmp(boundary, "closed") || faces;
+    if ((at(args, "boundary") && strcmp(boundary, "periodic") && strcmp(boundary, "closed") && !c->no_slip) ||
+        ((at(args, "boundary") || faces) && !c->cfd) ||
+        (faces && (!cJSON_IsObject(faces) || !faces->child || !strcmp(boundary, "periodic")))) return false;
+    const char *const names[6] = {"x_min","x_max","y_min","y_max","z_min","z_max"};
+    const char *const types[] = {"free_slip","no_slip","inflow","outflow"};
+    const Json *entry;
+    cJSON_ArrayForEach(entry, faces) {
+        int face = 0;
+        while (face < 6 && (!entry->string || strcmp(entry->string, names[face]))) ++face;
+        if (face == 6 || at(faces, names[face]) != entry || !cJSON_IsObject(entry)) return false;
+        int type = 0;
+        while (type < 4 && strcmp(js(entry, "type"), types[type])) ++type;
+        if (type == 4) return false;
+        FlowFace *f = &c->faces[face];
+        f->type = (FlowBoundary)type;
+        c->ventilated |= type >= FLOW_INFLOW;
+        const Json *field;
+        cJSON_ArrayForEach(field, entry) {
+            const char *key = field->string;
+            if (!key || at(entry, key) != field ||
+                (strcmp(key, "type") && (type < FLOW_INFLOW || (strcmp(key, "min_m") && strcmp(key, "max_m") &&
+                  strcmp(key, "speed_m_s") && (type != FLOW_INFLOW || strcmp(key, "tracer")))))) return false;
+        }
+        if (type < FLOW_INFLOW) continue;
+        if (type == FLOW_INFLOW) {
+            if (!physics_scalar(entry, "speed_m_s", .000001, 25, &f->speed) ||
+                !physics_optional(entry, "tracer", 0, 1000, 0, &f->tracer)) return false;
+        } else if (at(entry, "speed_m_s") && !physics_scalar(entry, "speed_m_s", .000001, 25, &f->speed)) return false;
+        int j = 0;
+        for (int axis = 0; axis < 3; ++axis)
+            if (axis != face / 2) f->max[j++] = c->length[axis];
+        if (at(entry, "min_m") || at(entry, "max_m")) {
+            if (!face_limits(entry, "min_m", f->min) || !face_limits(entry, "max_m", f->max)) return false;
+        }
+        for (int axis = 0, k = 0; axis < 3; ++axis) {
+            if (axis == face / 2) continue;
+            if (f->min[k] < 0 || f->min[k] >= f->max[k] || f->max[k] > c->length[axis]) return false;
+            ++k;
+        }
+    }
+    /* An absent override is distinguished by initializing its wall type below. */
+    bool inlet = false, outlet = false, sticky = c->no_slip;
+    for (int face = 0; face < 6; ++face) {
+        if (!at(faces, names[face])) c->faces[face].type = c->no_slip ? FLOW_NO_SLIP : FLOW_FREE_SLIP;
+        const FlowBoundary type = c->faces[face].type;
+        inlet |= type == FLOW_INFLOW;
+        outlet |= type == FLOW_OUTFLOW;
+        sticky |= type == FLOW_NO_SLIP;
+    }
+    return inlet == outlet && (!sticky || c->viscosity > 0);
+}
+
 bool flow_parse(const Json *args, const double length[3], FlowConfig *config)
 {
     *config = (FlowConfig){0};
@@ -79,17 +150,14 @@ bool flow_parse(const Json *args, const double length[3], FlowConfig *config)
     const char *method = js(args, "method"), *memory = js(args, "memory");
     const char *backend = js(args,"backend");
     const char *raster = js(args, "raster");
-    const char *boundary = js(args, "boundary");
     config->cfd = !strcmp(method, "navier_stokes") || !strcmp(method, "cfd");
     config->mapped = !strcmp(memory, "mapped");
     config->gpu = !strcmp(backend,"gpu");
     config->conservative = !strcmp(raster, "conservative");
-    config->closed = !strcmp(boundary, "closed");
     if ((at(args, "method") && !config->cfd && strcmp(method, "reduced")) ||
         (at(args, "memory") && !config->mapped && strcmp(memory, "auto")) ||
         (at(args, "backend") && !config->gpu && strcmp(backend,"cpu") && strcmp(backend,"auto")) ||
         (at(args, "raster") && (!config->cfd || (!config->conservative && strcmp(raster, "center")))) ||
-        (at(args, "boundary") && (!config->cfd || (!config->closed && strcmp(boundary, "periodic")))) ||
         !physics_optional(args, "seconds", 0, 600, 1, &config->seconds) ||
         !physics_optional(args, "sigma_m", .001, 1000, .5, &config->sigma) ||
         !physics_optional(args, "concentration", 0, 1000, 1, &config->density) ||
@@ -109,6 +177,7 @@ bool flow_parse(const Json *args, const double length[3], FlowConfig *config)
         config->length[axis] = length[axis];
         config->porous_max[axis] = length[axis];
     }
+    if (!flow_boundaries(args, config)) return false;
     const Json *porous = at(args, "porous");
     if (!porous) return true;
     if (!config->cfd || config->viscosity <= 0 || !cJSON_IsObject(porous) ||
@@ -273,40 +342,166 @@ static void neighbors(int n, int x, int y, int z, size_t low[3], size_t high[3],
     high[2] = index3(n, x, y, z < n-1 ? z+1 : closed ? n-1 : 0);
 }
 
-static double divergence_at(double *const v[3], size_t i, const size_t high[3], const double inv[3])
+typedef struct {
+    const FlowConfig *config;
+    const unsigned char *solid;
+    unsigned char mode[6][FACE_CELLS];
+    double inward[6];
+} FlowDomain;
+
+static int face_cell(int n, int axis, int x, int y, int z)
 {
-    return ((high[0] == i ? 0 : v[0][high[0]])-v[0][i])*inv[0] +
-           ((high[1] == i ? 0 : v[1][high[1]])-v[1][i])*inv[1] +
-           ((high[2] == i ? 0 : v[2][high[2]])-v[2][i])*inv[2];
+    return axis == 0 ? y*n + z : axis == 1 ? x*n + z : x*n + y;
+}
+
+static double wall_velocity(const FlowDomain *d, int face, int x, int y, int z)
+{
+    if (!d->config->ventilated) return 0;
+    const int cell = face_cell(d->config->resolution, face/2, x, y, z);
+    return d->mode[face][cell] >= FLOW_INFLOW ? (face % 2 ? -d->inward[face] : d->inward[face]) : 0;
+}
+
+static bool build_faces(FlowDomain *d, const double inv[3], FlowField *field)
+{
+    const FlowConfig *c = d->config;
+    const int n = c->resolution;
+    double out_auto_area = 0, area[6] = {0};
+    for (int face = 0; face < 6; ++face) {
+        const FlowFace *f = &c->faces[face];
+        const int axis = face/2;
+        int tangent[2], count = 0;
+        for (int j = 0; j < 3; ++j) if (j != axis) tangent[count++] = j;
+        int p[3];
+        p[axis] = face % 2 ? n-1 : 0;
+        const double cell_area = 1 / (inv[tangent[0]] * inv[tangent[1]]);
+        for (int j = 0; j < n; ++j) for (int k = 0; k < n; ++k) {
+            p[tangent[0]] = j;
+            p[tangent[1]] = k;
+            FlowBoundary mode = f->type;
+            if (mode >= FLOW_INFLOW) {
+                const double s = (j+.5)/inv[tangent[0]], t = (k+.5)/inv[tangent[1]];
+                if (s < f->min[0] || s >= f->max[0] || t < f->min[1] || t >= f->max[1] ||
+                    (d->solid && d->solid[index3(n,p[0],p[1],p[2])]))
+                    mode = c->no_slip ? FLOW_NO_SLIP : FLOW_FREE_SLIP;
+                else area[face] += cell_area;
+            }
+            d->mode[face][j*n+k] = (unsigned char)mode;
+        }
+        if (f->type < FLOW_INFLOW) continue;
+        if (area[face] == 0) {
+            field->fallback = "A CFD vent has no uncovered face cells at this resolution";
+            return false;
+        }
+        if (f->type == FLOW_INFLOW) {
+            d->inward[face] = f->speed;
+            field->inflow_m3_s += area[face] * f->speed;
+        } else if (f->speed) {
+            d->inward[face] = -f->speed;
+            field->outflow_m3_s += area[face] * f->speed;
+        } else out_auto_area += area[face];
+    }
+    const double scale = fmax(field->inflow_m3_s, field->outflow_m3_s);
+    const double remaining = field->inflow_m3_s - field->outflow_m3_s;
+    const double speed = out_auto_area ? remaining / out_auto_area : 0;
+    if ((out_auto_area && (speed <= 0 || speed > 25)) ||
+        (!out_auto_area && fabs(remaining) > 1e-10 * scale)) {
+        field->fallback = "CFD inlet and exhaust rates cannot be balanced on the resolved grid";
+        return false;
+    }
+    for (int face = 0; face < 6; ++face)
+        if (c->faces[face].type == FLOW_OUTFLOW && !c->faces[face].speed) {
+            d->inward[face] = -speed;
+            field->outflow_m3_s += area[face] * speed;
+        }
+    return true;
+}
+
+static double divergence_at(const FlowDomain *d, double *const v[3], size_t i, const size_t high[3],
+                            const double inv[3], int x, int y, int z)
+{
+    double divergence = 0;
+    for (int axis = 0; axis < 3; ++axis) {
+        const double upper = high[axis] == i ? wall_velocity(d, 2*axis+1, x, y, z) : v[axis][high[axis]];
+        divergence += (upper - v[axis][i])*inv[axis];
+    }
+    return divergence;
+}
+
+static bool balanced_components(const FlowDomain *d, const double inv[3])
+{
+    if (!d->solid) return true;
+    const int n = d->config->resolution;
+    const size_t cells = (size_t)n*n*n;
+    unsigned char seen[FLOW_MAX_CELLS] = {0};
+    uint16_t queue[FLOW_MAX_CELLS];
+    for (size_t initial = 0; initial < cells; ++initial) {
+        if (seen[initial] || d->solid[initial]) continue;
+        size_t count = 0;
+        seen[initial] = 1;
+        queue[count++] = (uint16_t)initial;
+        double net = 0, total = 0;
+        for (size_t k = 0; k < count; ++k) {
+            const size_t i = queue[k];
+            const int x = i%n, y = (i/n)%n, z = i/(n*n);
+            size_t lo[3], hi[3];
+            neighbors(n,x,y,z,lo,hi,true);
+            for (int axis = 0; axis < 3; ++axis) {
+                const size_t adjacent[] = {lo[axis], hi[axis]};
+                const double area = inv[axis] / (inv[0]*inv[1]*inv[2]);
+                for (int side = 0; side < 2; ++side) {
+                    const size_t neighbor = adjacent[side];
+                    if (neighbor == i) {
+                        const double flux = (side ? -1 : 1) * area * wall_velocity(d,2*axis+side,x,y,z);
+                        net += flux;
+                        total += fabs(flux);
+                    } else if (!seen[neighbor] && !d->solid[neighbor]) {
+                        seen[neighbor] = 1;
+                        queue[count++] = (uint16_t)neighbor;
+                    }
+                }
+            }
+        }
+        if (fabs(net) > 1e-10 * total) return false;
+    }
+    return true;
 }
 
 /* Compatible forward/backward difference pair gives a seven-point Poisson stencil. */
-static void close_faces(int n, const unsigned char *solid, double *const v[3], bool closed)
+static void close_faces(const FlowDomain *d, double *const v[3])
 {
+    const int n = d->config->resolution;
+    const bool closed = d->config->closed;
+    const unsigned char *solid = d->solid;
     if (!solid && !closed) return;
     for (int z=0; z<n; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
         size_t i=index3(n,x,y,z), lo[3], hi[3];
         neighbors(n,x,y,z,lo,hi,closed);
-        for (int axis=0; axis<3; ++axis)
-            if (lo[axis] == i || (solid && (solid[i] || solid[lo[axis]]))) v[axis][i] = 0;
+        for (int axis=0; axis<3; ++axis) {
+            if (solid && (solid[i] || solid[lo[axis]])) v[axis][i] = 0;
+            else if (lo[axis] == i) v[axis][i] = wall_velocity(d, 2*axis, x,y,z);
+        }
     }
 }
 
-static bool project(int n, const unsigned char *solid, const double inv[3], double *const v[3],
-                    double *rhs, double *a, double *b, bool hardware, bool closed)
+static bool project(const FlowDomain *d, const double inv[3], double *const v[3],
+                    double *rhs, double *a, double *b, bool hardware)
 {
+    const int n = d->config->resolution;
+    const bool closed = d->config->closed;
+    const unsigned char *solid = d->solid;
     const size_t cells = (size_t)n*n*n;
     const double w[3] = {inv[0]*inv[0], inv[1]*inv[1], inv[2]*inv[2]};
     const double diagonal = 2 * (w[0]+w[1]+w[2]);
-    close_faces(n, solid, v, closed);
+    close_faces(d, v);
     for (int z=0; z<n; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
         size_t i=index3(n,x,y,z), lo[3], hi[3];
         neighbors(n,x,y,z,lo,hi,closed);
-        rhs[i] = solid && solid[i] ? 0 : divergence_at(v, i, hi, inv);
+        rhs[i] = solid && solid[i] ? 0 : divergence_at(d, v, i, hi, inv, x,y,z);
     }
     const bool accelerated = hardware && !solid && !closed && flow_pressure_gpu(n,w,rhs,a,PRESSURE_SWEEPS);
     if (!accelerated) memset(a,0,cells*sizeof *a);
-    for (int pass=0; !accelerated && pass<PRESSURE_SWEEPS; ++pass) {
+    const int sweeps = d->config->ventilated ? VENT_SWEEPS : PRESSURE_SWEEPS;
+    for (int pass=0; !accelerated && pass<sweeps; ++pass) {
         for (int z=0; z<n; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
             size_t i=index3(n,x,y,z), lo[3], hi[3];
             neighbors(n,x,y,z,lo,hi,closed);
@@ -331,9 +526,22 @@ static bool project(int n, const unsigned char *solid, const double inv[3], doub
     return accelerated;
 }
 
-static void transport(int n, const unsigned char *solid, const double inv[3], double dt, double coefficient, const double *in,
-                      double *out, double *scratch, double *const velocity[3], bool closed)
+static double diffusion_value(const FlowDomain *d, const double *in, size_t i, size_t adjacent,
+                              int face, int component, int x, int y, int z)
 {
+    if (i != adjacent) return d->solid && d->solid[adjacent] ? in[i] : in[adjacent];
+    if (component >= 0 && component != face/2 &&
+        d->mode[face][face_cell(d->config->resolution, face/2, x,y,z)] == FLOW_NO_SLIP)
+        return -in[i]; /* The wall is midway between the adjacent value and its ghost. */
+    return in[i];
+}
+
+static void transport(const FlowDomain *d, const double inv[3], double dt, double coefficient, const double *in,
+                      double *out, double *scratch, double *const velocity[3], int component)
+{
+    const int n = d->config->resolution;
+    const bool closed = d->config->closed;
+    const unsigned char *solid = d->solid;
     if (coefficient) {
         for (int z=0; z<n; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
             size_t i=index3(n,x,y,z), lo[3], hi[3];
@@ -341,8 +549,8 @@ static void transport(int n, const unsigned char *solid, const double inv[3], do
             if (solid && solid[i]) { scratch[i] = 0; continue; }
             double laplacian = 0;
             for (int axis=0; axis<3; ++axis)
-                laplacian += ((solid && solid[lo[axis]] ? in[i] : in[lo[axis]]) +
-                              (solid && solid[hi[axis]] ? in[i] : in[hi[axis]]) - 2*in[i])*inv[axis]*inv[axis];
+                laplacian += (diffusion_value(d,in,i,lo[axis],2*axis,component,x,y,z) +
+                              diffusion_value(d,in,i,hi[axis],2*axis+1,component,x,y,z) - 2*in[i])*inv[axis]*inv[axis];
             scratch[i] = in[i] + dt*coefficient*laplacian;
         }
         in = scratch;
@@ -352,6 +560,40 @@ static void transport(int n, const unsigned char *solid, const double inv[3], do
         out[i] = solid && solid[i] ? 0 : sample_grid(in,solid,n,closed,x-dt*velocity[0][i]*inv[0],
                             y-dt*velocity[1][i]*inv[1],z-dt*velocity[2][i]*inv[2]);
     }
+}
+
+/* Conservative upwind tracer transport for rooms with prescribed ventilation. */
+static bool ventilate_tracer(const FlowDomain *d, const double inv[3], double dt, double diffusion,
+                             const double *in, double *out, double *const v[3], FlowField *field)
+{
+    const int n = d->config->resolution;
+    const double volume = 1 / (inv[0]*inv[1]*inv[2]);
+    for (int z=0; z<n; ++z) for (int y=0; y<n; ++y) for (int x=0; x<n; ++x) {
+        const size_t i = index3(n,x,y,z);
+        if (d->solid && d->solid[i]) { out[i] = 0; continue; }
+        size_t lo[3], hi[3];
+        neighbors(n,x,y,z,lo,hi,true);
+        double change = 0, loss = 0;
+        for (int axis=0; axis<3; ++axis) {
+            const size_t adjacent[] = {lo[axis],hi[axis]};
+            for (int side=0; side<2; ++side) {
+                const size_t j = adjacent[side];
+                if (d->solid && d->solid[j]) continue;
+                const int face = 2*axis+side;
+                const double velocity = side ? (j == i ? wall_velocity(d,face,x,y,z) : v[axis][j]) : -v[axis][i];
+                const double source = j == i ? d->config->faces[face].tracer : in[j];
+                const double flux = -velocity * inv[axis] * (velocity > 0 ? in[i] : source);
+                const double exchange = j == i ? 0 : diffusion * inv[axis]*inv[axis];
+                change += flux + exchange * (source - in[i]);
+                loss += fmax(0,velocity)*inv[axis] + exchange;
+                if (j == i && flux > 0) field->tracer_in += dt * volume * flux;
+                if (j == i && flux < 0) field->tracer_out -= dt * volume * flux;
+            }
+        }
+        if (!isfinite(change) || dt * loss > 1 + 1e-12) return false;
+        out[i] = fmax(0, in[i] + dt * change);
+    }
+    return true;
 }
 
 static double flow_drag(const FlowConfig *c)
@@ -371,7 +613,13 @@ static double flow_steps(const FlowConfig *c, double inv[3], const double *const
         if (c->porous) max_courant += fabs(c->porous_drive[axis])*
             (drag > 0 ? fmin(c->seconds, 1/drag) : c->seconds)*inv[axis];
     }
-    return ceil(c->seconds * fmax(2*max_courant, 4*fmax(c->viscosity,c->diffusivity)*inverse2));
+    const double transport = c->ventilated ? 2*max_courant + 4*c->diffusivity*inverse2 : 2*max_courant;
+    bool sticky = false;
+    for (int face = 0; face < 6; ++face)
+        sticky |= c->faces[face].type == FLOW_NO_SLIP ||
+            (c->no_slip && c->faces[face].type >= FLOW_INFLOW);
+    const double diffusion = fmax((sticky ? 6 : 4)*c->viscosity, 4*c->diffusivity) * inverse2;
+    return ceil(c->seconds * fmax(transport, diffusion));
 }
 
 PhysicsCost flow_cost(const FlowConfig *c)
@@ -382,6 +630,7 @@ PhysicsCost flow_cost(const FlowConfig *c)
     double steps = flow_steps(c, inv, nullptr);
     if (steps > FLOW_STEPS) return cost; /* The solver takes its analytical fallback. */
     if (c->seconds > 0) steps = fmax(1, steps);
+    if (c->ventilated && c->seconds > 0) steps = FLOW_STEPS;
     const int n = c->resolution;
     const double cells = n * n * n;
     cost.steps = steps;
@@ -389,7 +638,7 @@ PhysicsCost flow_cost(const FlowConfig *c)
     const int layers = c->seconds > 0 ? 11 : 4;
     cost.ram = cells * (layers * sizeof(double) + 2);
     cost.mapped = cells * layers * sizeof(double);
-    cost.work = cells * (1 + steps * (PRESSURE_SWEEPS + 8));
+    cost.work = cells * (1 + steps * ((c->ventilated ? VENT_SWEEPS : PRESSURE_SWEEPS) + 8));
     return cost;
 }
 
@@ -399,7 +648,7 @@ PhysicsCost flow_step_cost(const FlowConfig *c, bool resumed)
     if (!cost.cells) return cost;
     if (resumed) {
         cost.steps = FLOW_STEPS;
-        cost.work = cost.cells * (1 + FLOW_STEPS * (PRESSURE_SWEEPS + 8));
+        cost.work = cost.cells * (1 + FLOW_STEPS * ((c->ventilated ? VENT_SWEEPS : PRESSURE_SWEEPS) + 8));
     }
     cost.field_bytes = flow_frame_bytes(c->resolution);
     cost.ram += 2 * cost.field_bytes;
@@ -473,6 +722,16 @@ FlowField flow_resume_domain(const FlowConfig *c, const PhysicsBox *boxes, size_
         }
         field.unresolved_boxes = flow_rasterize(c, boxes, box_count, field.solid);
     }
+    FlowDomain domain = {.config = c, .solid = field.solid};
+    if (c->closed && !build_faces(&domain, inv, &field)) {
+        flow_release(&field);
+        return field;
+    }
+    if (c->ventilated && !balanced_components(&domain, inv)) {
+        flow_release(&field);
+        field.fallback = "Disconnected CFD compartments have unbalanced inlet or exhaust flux";
+        return field;
+    }
     unsigned char *porous = c->porous ? calloc(cells, 1) : nullptr;
     if (c->porous && !porous) {
         flow_release(&field);
@@ -519,31 +778,39 @@ FlowField flow_resume_domain(const FlowConfig *c, const PhysicsBox *boxes, size_
         field.memory = c->porous ? "none" : "analytic";
         return field;
     }
-    if (frame && c->seconds > 0) {
+    if ((frame || c->ventilated) && c->seconds > 0) {
+        for (int face = 0; face < 6; ++face) peak[face/2] = fmax(peak[face/2], fabs(domain.inward[face]));
         steps_needed = fmax(1, flow_steps(c, inv, peak));
         if (steps_needed > FLOW_STEPS) {
             free(porous);
             flow_release(&field);
-            field.fallback = "Saved CFD velocity exceeds the timestep budget";
+            field.fallback = "Saved CFD or vent velocity exceeds the timestep budget";
             return field;
         }
     }
-    close_faces(n, field.solid, velocity, c->closed);
+    close_faces(&domain, velocity);
     const double dt=c->seconds/steps_needed;
     const double drag = flow_drag(c);
     double decay = exp(-drag*dt), force_integral = drag > 0 ? -expm1(-drag*dt)/drag : dt;
     bool gpu = c->gpu, used_gpu = false;
     for (int step=0; dt>0 && step<(int)steps_needed; ++step) {
         for (int axis=0; axis<3; ++axis)
-            transport(n,field.solid,inv,dt,c->viscosity,velocity[axis],next[axis],rhs,velocity,c->closed);
+            transport(&domain,inv,dt,c->viscosity,velocity[axis],next[axis],rhs,velocity,axis);
         if (porous) {
             for (int axis = 0; axis < 3; ++axis)
                 for (size_t i = 0; i < cells; ++i)
                     if (porous[i]) next[axis][i] = next[axis][i]*decay + c->porous_drive[axis]*force_integral;
         }
-        gpu = project(n,field.solid,inv,next,rhs,p,q,gpu,c->closed);
+        gpu = project(&domain,inv,next,rhs,p,q,gpu);
         used_gpu |= gpu;
-        transport(n,field.solid,inv,dt,c->diffusivity,field.grid,dye_next,rhs,next,c->closed);
+        if (c->ventilated) {
+            if (!ventilate_tracer(&domain,inv,dt,c->diffusivity,field.grid,dye_next,next,&field)) {
+                free(porous);
+                flow_release(&field);
+                field.fallback = "Ventilated tracer exceeded the stable timestep; use a shorter step";
+                return field;
+            }
+        } else transport(&domain,inv,dt,c->diffusivity,field.grid,dye_next,rhs,next,-1);
         memcpy(field.grid,dye_next,cells*sizeof *field.grid);
         for (int axis=0; axis<3; ++axis) {
             double *swap=velocity[axis]; velocity[axis]=next[axis]; next[axis]=swap;
@@ -553,7 +820,7 @@ FlowField flow_resume_domain(const FlowConfig *c, const PhysicsBox *boxes, size_
         size_t i=index3(n,x,y,z), lo[3], hi[3];
         if (field.solid && field.solid[i]) continue;
         neighbors(n,x,y,z,lo,hi,c->closed);
-        double div=divergence_at(velocity,i,hi,inv);
+        double div=divergence_at(&domain,velocity,i,hi,inv,x,y,z);
         field.divergence += div*div;
         double speed = hypot(hypot(velocity[0][i],velocity[1][i]),velocity[2][i]);
         field.speed += speed;
@@ -578,7 +845,10 @@ FlowField flow_resume_domain(const FlowConfig *c, const PhysicsBox *boxes, size_
                 memcpy(field.grid + (axis + 1) * cells, velocity[axis], cells * sizeof(double));
         field.method = used_gpu ? "3D incompressible Navier-Stokes, OpenCL pressure projection" :
                                   "3D incompressible Navier-Stokes, CPU";
-        if (c->closed) {
+        if (c->ventilated) {
+            field.method = "3D incompressible Navier-Stokes, CPU ventilated exterior";
+            if (c->gpu) field.fallback = "OpenCL pressure uses periodic boundaries; used CPU for ventilation";
+        } else if (c->closed) {
             field.method = field.solid ? "3D incompressible Navier-Stokes, CPU voxel obstacles, closed exterior" :
                                         "3D incompressible Navier-Stokes, CPU closed exterior";
             if (c->gpu) field.fallback = "OpenCL pressure uses periodic boundaries; used CPU for closed exterior";
@@ -613,4 +883,11 @@ void flow_geometry_summary(const FlowField *field, Text *out)
     if (field->unresolved_boxes)
         format(out, " %zu CFD obstacle boxes occupy no cells. Use a finer grid or raster:conservative.",
                field->unresolved_boxes);
+}
+
+void flow_boundary_summary(const FlowField *field, Text *out)
+{
+    if (field->config.ventilated && field->grid)
+        format(out, " Ventilation: inlet %.8g m³/s, exhaust %.8g m³/s; tracer in %.8g, out %.8g concentration-m³ this step.",
+               field->inflow_m3_s, field->outflow_m3_s, field->tracer_in, field->tracer_out);
 }

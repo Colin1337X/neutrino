@@ -370,7 +370,7 @@ static bool edit_scene(Json *settings, const Json *op)
         Json *medium = cJSON_CreateObject();
         const char *const keys[] = {"method","seconds","sigma_m","concentration","viscosity","diffusivity","vortex_m_s",
                                     "resolution","center","wind","sound_loss","light_loss","memory","backend","solid_geometry",
-                                    "porous","raster","boundary"};
+                                    "porous","raster","boundary","boundaries"};
         for (size_t i = 0; i < sizeof keys / sizeof *keys; ++i)
             if (at(op,keys[i])) put(medium,keys[i],cJSON_Duplicate(at(op,keys[i]),true));
         put(room, "medium", medium);
@@ -550,6 +550,7 @@ Json *physics_prepare_flow_step(const Json *settings, const Json *op, Text *out)
            field.method, flow_frame_bytes(config.resolution));
     if (field.fallback) format(out, " %s.", field.fallback);
     flow_geometry_summary(&field, out);
+    flow_boundary_summary(&field, out);
     flow_release(&field);
     return result;
 }
@@ -1480,6 +1481,9 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
                 reading->stored_flow = physics_scalar(at(room, "flowFrame"), "seconds", 0, 1e12, &reading->flow_time_s);
                 reading->voxel_flow = field->solid != nullptr;
                 reading->closed_flow = config.closed;
+                reading->ventilated_flow = config.ventilated;
+                reading->inflow_m3_s = field->inflow_m3_s;
+                reading->outflow_m3_s = field->outflow_m3_s;
                 reading->unresolved_obstacles = (int)field->unresolved_boxes;
                 reading->porous_flow = config.porous;
                 reading->porous_speed = field->porous_speed;
@@ -1489,6 +1493,7 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
                    field->method, concentration, field->divergence, field->speed);
             if (field->fallback) format(out, " Fallback: %s.", field->fallback);
             flow_porous_summary(field, out);
+            flow_boundary_summary(field, out);
         }
         flow_geometry_summary(field, out);
         return true;

@@ -8,6 +8,12 @@ bool physics_vector(const Json *args, const char *key, double value[3]);
 bool physics_optional(const Json *args, const char *key, double low, double high, double initial, double *value);
 bool physics_model_tool(const char *name);
 bool physics_model_run(const char *name, const Json *args, double gravity, Text *out, bool *unavailable);
+typedef enum { FLOW_FREE_SLIP, FLOW_NO_SLIP, FLOW_INFLOW, FLOW_OUTFLOW } FlowBoundary;
+typedef struct {
+    FlowBoundary type;
+    double min[2], max[2], speed, tracer;
+} FlowFace;
+
 typedef struct {
     double work, steps, seconds, rays, cells, nodes, ram, mapped, field_bytes;
 } PhysicsCost;
@@ -34,7 +40,8 @@ typedef struct {
     double sound_loss, light_loss;
     double permeability, porosity, porous_min[3], porous_max[3], porous_drive[3];
     int resolution;
-    bool cfd, mapped, gpu, porous, conservative, closed;
+    FlowFace faces[6];
+    bool cfd, mapped, gpu, porous, conservative, closed, no_slip, ventilated;
 } FlowConfig;
 
 typedef struct { double lo[3], hi[3]; } PhysicsBox;
@@ -48,6 +55,7 @@ typedef struct {
     double *grid;
     unsigned char *solid;
     double divergence, speed, tracer_mean, porous_speed, pore_volume;
+    double inflow_m3_s, outflow_m3_s, tracer_in, tracer_out;
     size_t porous_cells, unresolved_boxes;
     const char *method;
     const char *memory;
@@ -77,4 +85,5 @@ double flow_column(const FlowField *field, const double a[3], const double b[3],
 void flow_release(FlowField *field);
 void flow_porous_summary(const FlowField *field, Text *out);
 void flow_geometry_summary(const FlowField *field, Text *out);
+void flow_boundary_summary(const FlowField *field, Text *out);
 #endif

@@ -326,6 +326,7 @@ static bool flow(const Json *args, Text *out, bool *unavailable)
                            config.resolution,field.speed,field.divergence,field.tracer_mean);
     if (field.fallback) format(out, " Fallback: %s.", field.fallback);
     flow_porous_summary(&field, out);
+    flow_boundary_summary(&field, out);
     flow_release(&field);
     return true;
 }

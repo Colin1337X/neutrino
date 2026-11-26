@@ -1286,6 +1286,102 @@ static bool closed_cfd(void)
     return ok;
 }
 
+static const char ventilated_room[] =
+    "{\"method\":\"cfd\",\"resolution\":8,\"seconds\":2,\"wind\":[0.5,0,0],"
+    "\"sigma_m\":1000,\"concentration\":1,\"viscosity\":0.04,\"diffusivity\":0.01,\"boundary\":\"no_slip\","
+    "\"boundaries\":{\"x_min\":{\"type\":\"inflow\",\"speed_m_s\":0.5,\"tracer\":0},"
+    "\"x_max\":{\"type\":\"outflow\"}}}";
+
+static bool ventilated_cfd(void)
+{
+    const double length[] = {4,3,2};
+    Json *args = cJSON_Parse(ventilated_room);
+    FlowConfig no_slip, free_slip;
+    if (!flow_parse(args, length, &no_slip)) { cJSON_Delete(args); return false; }
+    set(args, "boundary", "closed");
+    if (!flow_parse(args, length, &free_slip)) { cJSON_Delete(args); return false; }
+    FlowConfig initial = no_slip;
+    initial.seconds = 0;
+    FlowField start = flow_solve(&initial), vent = flow_solve(&no_slip), slip = flow_solve(&free_slip);
+    bool ok = start.grid && vent.grid && slip.grid && vent.inflow_m3_s == 3 &&
+        vent.outflow_m3_s == 3 && vent.tracer_in == 0 && vent.tracer_out > 5 &&
+        fabs(24 * (start.tracer_mean - vent.tracer_mean) - vent.tracer_out) < 1e-10 &&
+        vent.divergence < 0.1 && vent.grid[512 + (4*8)*8 + 4] < slip.grid[512 + (4*8)*8 + 4] &&
+        vent.grid[512 + (4*8+4)*8] == .5 && vent.grid[2*512 + (4*8)*8 + 4] == 0;
+    if (!ok && vent.grid && slip.grid)
+        fprintf(stderr, "Ventilation m³/s %g/%g, tracer out %g, balance error %g, divergence %g, wall velocity %g/%g\n",
+            vent.inflow_m3_s, vent.outflow_m3_s, vent.tracer_out,
+            24 * (start.tracer_mean - vent.tracer_mean) - vent.tracer_out, vent.divergence,
+            vent.grid[512 + (4*8)*8 + 4], slip.grid[512 + (4*8)*8 + 4]);
+    flow_release(&start);
+    flow_release(&vent);
+    flow_release(&slip);
+
+    put(args, "concentration", cJSON_CreateNumber(0));
+    Json *inlet = at(at(args, "boundaries"), "x_min"), *exhaust = at(at(args, "boundaries"), "x_max");
+    put(inlet, "tracer", cJSON_CreateNumber(1));
+    put(inlet, "min_m", cJSON_Parse("[0.75,0.5]"));
+    put(inlet, "max_m", cJSON_Parse("[2.25,1.5]"));
+    put(exhaust, "min_m", cJSON_Parse("[0.75,0.5]"));
+    put(exhaust, "max_m", cJSON_Parse("[2.25,1.5]"));
+    ok &= flow_parse(args, length, &no_slip);
+    vent = flow_solve(&no_slip);
+    ok &= vent.grid && vent.inflow_m3_s == .75 && vent.outflow_m3_s == .75 &&
+        fabs(vent.tracer_in - 1.5) < 1e-10 &&
+        fabs(24 * vent.tracer_mean - (vent.tracer_in - vent.tracer_out)) < 1e-10;
+    flow_release(&vent);
+    const PhysicsBox partition[] = {{{1.5,0,0},{2,3,2}}};
+    vent = flow_solve_domain(&no_slip, partition, 1);
+    ok &= !vent.grid && vent.fallback && strstr(vent.fallback, "Disconnected CFD compartments");
+    flow_release(&vent);
+    put(exhaust, "speed_m_s", cJSON_CreateNumber(1));
+    ok &= flow_parse(args, length, &no_slip);
+    vent = flow_solve(&no_slip);
+    ok &= !vent.grid && vent.fallback && strstr(vent.fallback, "cannot be balanced");
+    flow_release(&vent);
+    cJSON_DeleteItemFromObjectCaseSensitive(at(args, "boundaries"), "x_max");
+    ok &= !flow_parse(args, length, &no_slip);
+    cJSON_Delete(args);
+    return ok;
+}
+
+static int ventilation_timing(void)
+{
+    const double length[] = {4,3,2};
+    const int sizes[] = {8,12,24};
+    puts("resolution,wall,repetition,batches,mean_ms,tracer_out,divergence,wall_adjacent_velocity_m_s");
+    Json *args = cJSON_Parse(ventilated_room);
+    integer(args, "seconds", 1);
+    bool ok = true;
+    for (size_t i = 0; ok && i < sizeof sizes / sizeof *sizes; ++i) {
+        integer(args, "resolution", sizes[i]);
+        for (int slip = 0; ok && slip < 2; ++slip) {
+            set(args, "boundary", slip ? "no_slip" : "closed");
+            FlowConfig c;
+            ok = flow_parse(args, length, &c);
+            for (int rep = 0; ok && rep <= 5; ++rep) {
+                const int batches = sizes[i] == 24 ? 4 : 20;
+                double tracer = 0, divergence = 0, wall_velocity = 0;
+                const clock_t start = clock();
+                for (int j = 0; ok && j < batches; ++j) {
+                    FlowField field = flow_solve(&c);
+                    ok = field.grid && fabs(field.inflow_m3_s-3) < 1e-10 && fabs(field.outflow_m3_s-3) < 1e-10;
+                    tracer = field.tracer_out;
+                    divergence = field.divergence;
+                    const int n = sizes[i];
+                    if (ok) wall_velocity = field.grid[n*n*n + (n/2)*n*n + n/2];
+                    flow_release(&field);
+                }
+                const clock_t end = clock();
+                if (ok && rep) printf("%d,%s,%d,%d,%.6f,%.9g,%.9g,%.9g\n", sizes[i], slip ? "no-slip" : "free-slip",
+                    rep,batches,1000.0*(end-start)/(CLOCKS_PER_SEC*(double)batches),tracer,divergence,wall_velocity);
+            }
+        }
+    }
+    cJSON_Delete(args);
+    return !ok;
+}
+
 static void cell_scan_reference(const FlowConfig *c, const PhysicsBox *boxes, int count, unsigned char *solid)
 {
     const int n = c->resolution;
@@ -1880,6 +1976,7 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "--cfd-reuse-timing")) return cfd_reuse_timing();
     if (argc > 1 && !strcmp(argv[1], "--persistent-cfd-timing")) return persistent_cfd_timing();
     if (argc > 1 && !strcmp(argv[1], "--raster-timing")) return raster_timing();
+    if (argc > 1 && !strcmp(argv[1], "--ventilation-timing")) return ventilation_timing();
     if (argc > 1 && !strcmp(argv[1], "--propagation-timing")) return propagation_timing();
     if (argc > 1 && !strcmp(argv[1], "--cfd-timing")) return cfd_timing();
     const struct {
@@ -1998,6 +2095,7 @@ int main(int argc, char **argv)
     if (!solid_cfd()) { fputs("Voxel CFD boundary test failed.\n", stderr); failures++; }
     if (!geometry_aware_flow_frames()) { fputs("CFD raster or geometry-aware frame retention failed.\n", stderr); failures++; }
     if (!closed_cfd()) { fputs("Closed CFD exterior failed.\n", stderr); failures++; }
+    if (!ventilated_cfd()) { fputs("CFD ventilation or no-slip boundary failed.\n", stderr); failures++; }
     if (!material_transport()) { fputs("Material transport test failed.\n", stderr); failures++; }
     if (!scene_protocol("cpu")) { fputs("3D scene simulation protocol failed.\n", stderr); failures++; }
 #ifndef NEUTRINO_VULKAN_RT

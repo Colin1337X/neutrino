@@ -556,6 +556,13 @@ static const char scenario_help[] =
     "\"queries\":[{\"id\":\"spills\",\"predicate\":\"fluid.volume_exceeds\",\"step\":1,\"threshold\":80}]}. "
     "Use these exact field names and numeric values without unit suffixes. Send the tool object alone.\n";
 
+static const char ventilation_help[] =
+    "CFD ventilation: scene_medium boundary:no_slip sets stationary exterior walls. "
+    "Use boundaries keyed by x_min/x_max/y_min/y_max/z_min/z_max, with type "
+    "inflow (speed_m_s, optional tracer), outflow (optional speed_m_s), no_slip or free_slip. "
+    "Vent min_m and max_m are optional two-coordinate bounds in room-local tangent axes. "
+    "An outflow without speed balances the inlet on the resolved grid.\n";
+
 static const char physics_help[] =
     "tune: setting and numeric value. gravity (0.1–30 m/s²), outlet_coefficient (0.1–1), ambient_kelvin (150–400 K), wall_reflectivity (0–1).\n"
     "ray: origin, direction, min, max (three-number arrays in metres, min/max are box corners).\n"
@@ -637,6 +644,7 @@ void simulation_prompt(const Preview *p, Text *system)
         append(system, tool_help);
         append(system, physics_help);
         append(system, scenario_help);
+        append(system, ventilation_help);
     } else append(system, "\nWrite only in-world narrative or dialogue. Show what the character senses or does in the scene. "
                   "Keep implementation details out of the fiction.\n");
     if (p->tool_feedback.len)
@@ -1575,6 +1583,7 @@ void simulation_command(App *a, const char *verb, const char *arg)
             append(&a->info,tool_help);
             append(&a->info,physics_help);
             append(&a->info,scenario_help);
+            append(&a->info,ventilation_help);
             format(&a->info, "\n/sim checkpoint on|off|EVENTS · interval %d (0 disables)\n",
                    checkpoint_interval(a->story));
             append(&a->info, "/sim budget [KEY VALUE|reset] · view or edit resource ceilings\n");
