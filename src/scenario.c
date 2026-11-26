@@ -228,6 +228,8 @@ static const char *evaluate(const Json *query, const Json *settings, const Physi
         value = reading->tracer_concentration;
         unit = "relative tracer";
         set(evidence, "solver", reading->voxel_flow ? "voxel-obstacle CFD" : "room medium");
+        if (reading->closed_flow) set(evidence, "boundary", "closed");
+        if (reading->voxel_flow) integer(evidence, "unresolved_obstacles", reading->unresolved_obstacles);
         if (reading->stored_flow)
             put(evidence, "flow_time_s", cJSON_CreateNumber(reading->flow_time_s));
     } else if (kind == FLUID_DRAINED || kind == FLUID_LEVEL) {

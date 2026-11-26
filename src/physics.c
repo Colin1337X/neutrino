@@ -140,23 +140,29 @@ static bool room_flow(const Json *args, const Box *room, FlowConfig *config)
         (!cJSON_IsTrue(at(args, "solid_geometry")) || config->cfd)));
 }
 
-static FlowField room_flow_solve(const Json *room, const Box *bounds, const FlowConfig *config, const char *frame)
+enum { CFD_MAX_BOXES = 128 };
+static bool room_obstacles(const Json *room, const Box *bounds, Box solids[CFD_MAX_BOXES], size_t *count)
 {
-    if (!cJSON_IsTrue(at(at(room, "medium"), "solid_geometry")))
-        return flow_resume_domain(config, nullptr, 0, frame);
-    Box solids[128];
-    size_t count = 0;
+    *count = 0;
+    if (!cJSON_IsTrue(at(at(room, "medium"), "solid_geometry"))) return true;
     const Json *item;
     cJSON_ArrayForEach(item, at(room, "objects")) {
-        if (count == sizeof solids / sizeof *solids || !read_box(item, &solids[count])) {
-            return (FlowField){.fallback = "CFD requires at most 128 valid obstacle boxes"};
-        }
+        if (*count == CFD_MAX_BOXES || !read_box(item, &solids[*count])) return false;
         for (int axis = 0; axis < 3; ++axis) {
-            solids[count].lo[axis] -= bounds->lo[axis];
-            solids[count].hi[axis] -= bounds->lo[axis];
+            solids[*count].lo[axis] -= bounds->lo[axis];
+            solids[*count].hi[axis] -= bounds->lo[axis];
         }
-        ++count;
+        ++*count;
     }
+    return true;
+}
+
+static FlowField room_flow_solve(const Json *room, const Box *bounds, const FlowConfig *config, const char *frame)
+{
+    Box solids[CFD_MAX_BOXES];
+    size_t count;
+    if (!room_obstacles(room, bounds, solids, &count))
+        return (FlowField){.fallback = "CFD requires at most 128 valid obstacle boxes"};
     return flow_resume_domain(config, solids, count, frame);
 }
 
@@ -364,7 +370,7 @@ static bool edit_scene(Json *settings, const Json *op)
         Json *medium = cJSON_CreateObject();
         const char *const keys[] = {"method","seconds","sigma_m","concentration","viscosity","diffusivity","vortex_m_s",
                                     "resolution","center","wind","sound_loss","light_loss","memory","backend","solid_geometry",
-                                    "porous"};
+                                    "porous","raster","boundary"};
         for (size_t i = 0; i < sizeof keys / sizeof *keys; ++i)
             if (at(op,keys[i])) put(medium,keys[i],cJSON_Duplicate(at(op,keys[i]),true));
         put(room, "medium", medium);
@@ -449,19 +455,54 @@ static bool edit_scene(Json *settings, const Json *op)
     return true;
 }
 
+typedef struct {
+    Box bounds;
+    size_t cells;
+    unsigned char solid[FLOW_MAX_CELLS];
+} RoomGrid;
+
+static bool read_room_grid(const Json *room, RoomGrid *grid)
+{
+    FlowConfig config;
+    Box obstacles[CFD_MAX_BOXES];
+    size_t count;
+    if (!read_box(room, &grid->bounds) || !room_flow(at(room, "medium"), &grid->bounds, &config) ||
+        !config.cfd || !room_obstacles(room, &grid->bounds, obstacles, &count)) return false;
+    const size_t n = (size_t)config.resolution;
+    grid->cells = n * n * n;
+    const size_t unresolved = flow_rasterize(&config, obstacles, count, grid->solid);
+    return !count || unresolved < count;
+}
+
+static bool edit_field_geometry(Json *settings, const Json *op, Json *room)
+{
+    RoomGrid before, after;
+    const bool had_grid = read_room_grid(room, &before);
+    if (!edit_scene(settings, op)) return false;
+    bool same = had_grid && read_room_grid(room, &after) && before.cells == after.cells;
+    for (int axis = 0; same && axis < 3; ++axis)
+        same = before.bounds.lo[axis] == after.bounds.lo[axis] && before.bounds.hi[axis] == after.bounds.hi[axis];
+    if (!same || memcmp(before.solid, after.solid, before.cells))
+        cJSON_DeleteItemFromObjectCaseSensitive(room, "flowFrame");
+    return true;
+}
+
 bool physics_scene_edit(Json *settings, const Json *op)
 {
-    if (!edit_scene(settings, op)) return false;
     const char *tool = js(op, "neutrino_tool");
     Json *room = active_room(settings);
-    if (!strcmp(tool, "scene_room")) {
+    const bool room_edit = !strcmp(tool, "scene_room");
+    if (room_edit) {
         const char *name = js(op, "name");
         room = *name ? scene_object(at(settings, "rooms3d"), name) : at(settings, "room3d");
     }
     const bool boundary_edit = !strcmp(tool, "scene_place") || !strcmp(tool, "scene_remove") ||
         !strcmp(tool, "scene_translate") || !strcmp(tool, "scene_step");
-    if (at(room, "flowFrame") && (!strcmp(tool, "scene_room") || !strcmp(tool, "scene_medium") ||
-        (boundary_edit && cJSON_IsTrue(at(at(room, "medium"), "solid_geometry")))))
+    if (!at(room, "flowFrame")) return edit_scene(settings, op);
+    if (room_edit || (boundary_edit && cJSON_IsTrue(at(at(room, "medium"), "solid_geometry"))))
+        return edit_field_geometry(settings, op, room);
+    if (!edit_scene(settings, op)) return false;
+    if (!strcmp(tool, "scene_medium"))
         cJSON_DeleteItemFromObjectCaseSensitive(room, "flowFrame");
     return true;
 }
@@ -492,6 +533,7 @@ Json *physics_prepare_flow_step(const Json *settings, const Json *op, Text *out)
     char *encoded = flow_encode(&field);
     if (!encoded) {
         format(out, "CFD step rejected. %s.", field.fallback ? field.fallback : "Cannot serialize the field");
+        flow_geometry_summary(&field, out);
         flow_release(&field);
         return nullptr;
     }
@@ -507,6 +549,7 @@ Json *physics_prepare_flow_step(const Json *settings, const Json *op, Text *out)
            frame ? "Advanced saved" : "Initialized and advanced", elapsed, elapsed + config.seconds,
            field.method, flow_frame_bytes(config.resolution));
     if (field.fallback) format(out, " %s.", field.fallback);
+    flow_geometry_summary(&field, out);
     flow_release(&field);
     return result;
 }
@@ -1139,6 +1182,7 @@ static bool acoustic(const Json *args, const Json *settings, const FlowField *fi
            tested ? engine : material_mode ? "CPU material" : "no blocker tests", speed);
     if (field_loss) format(out, " Gas attenuation: %s.", field->method);
     if (field && field->fallback) format(out, " Fallback: %s.", field->fallback);
+    if (field) flow_geometry_summary(field, out);
     if (material_mode)
         format(out, " Audibility is the margin above the modeled cutoff of %+.4g dB.", floor_db);
     if (reading) {
@@ -1248,6 +1292,7 @@ static bool light(const Json *args, const Json *scene, const Box *room, const Fl
     const double field_loss = field ? field->config.light_loss : 0;
     if (field_loss) format(out, " Gas extinction: %s.", field->method);
     if (field && field->fallback) format(out, " Fallback: %s.", field->fallback);
+    if (field) flow_geometry_summary(field, out);
     const double floor_db = 10 * log10(min_power);
     for (int i = 0; i < count; ++i) {
         const AcousticPath *path = &paths[i];
@@ -1420,10 +1465,11 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
         if (!at(room, "medium") || !room_flow(at(room, "medium"), &bounds, &config) ||
             !physics_vector(args, "probe", point) || !strictly_inside(&bounds, point)) return false;
         const FlowField *field = scene_field(cache, room, &bounds, &config, out);
-        if (!field->grid && (at(room, "flowFrame") || config.porous ||
+        if (!field->grid && (at(room, "flowFrame") || config.porous || config.closed ||
                             cJSON_IsTrue(at(at(room, "medium"), "solid_geometry")))) {
             if (reading) reading->unavailable = true;
-            format(out, "%s unavailable. %s.", at(room, "flowFrame") ? "Saved CFD" : config.porous ? "Porous CFD" : "Geometry-aware CFD",
+            format(out, "%s unavailable. %s.", at(room, "flowFrame") ? "Saved CFD" : config.porous ? "Porous CFD" :
+                   config.closed ? "Closed CFD" : "Geometry-aware CFD",
                    field->fallback ? field->fallback : "No grid");
         } else {
             for (int axis = 0; axis < 3; ++axis) point[axis] -= bounds.lo[axis];
@@ -1433,6 +1479,8 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
                 reading->tracer_concentration = concentration;
                 reading->stored_flow = physics_scalar(at(room, "flowFrame"), "seconds", 0, 1e12, &reading->flow_time_s);
                 reading->voxel_flow = field->solid != nullptr;
+                reading->closed_flow = config.closed;
+                reading->unresolved_obstacles = (int)field->unresolved_boxes;
                 reading->porous_flow = config.porous;
                 reading->porous_speed = field->porous_speed;
                 reading->pore_volume = field->pore_volume;
@@ -1442,6 +1490,7 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
             if (field->fallback) format(out, " Fallback: %s.", field->fallback);
             flow_porous_summary(field, out);
         }
+        flow_geometry_summary(field, out);
         return true;
     }
     const bool optical = !strcmp(tool,"scene_light");
@@ -1499,11 +1548,13 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
     if (at(room,"medium") && room_flow(at(room,"medium"),&bounds,&config) &&
         (optical ? config.light_loss : config.sound_loss) > 0) {
         gas = scene_field(cache, room, &bounds, &config, out);
-        if (!gas->grid && (at(room, "flowFrame") || config.porous ||
+        if (!gas->grid && (at(room, "flowFrame") || config.porous || config.closed ||
                            cJSON_IsTrue(at(at(room, "medium"), "solid_geometry")))) {
             if (reading) reading->unavailable = true;
-            format(out, "%s unavailable. %s.", at(room, "flowFrame") ? "Saved CFD" : config.porous ? "Porous CFD" : "Geometry-aware CFD",
+            format(out, "%s unavailable. %s.", at(room, "flowFrame") ? "Saved CFD" : config.porous ? "Porous CFD" :
+                   config.closed ? "Closed CFD" : "Geometry-aware CFD",
                    gas->fallback ? gas->fallback : "No grid");
+            flow_geometry_summary(gas, out);
             cJSON_Delete(filtered);
             return true;
         }

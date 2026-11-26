@@ -1201,6 +1201,139 @@ static bool solid_cfd(void)
     return ok;
 }
 
+static bool geometry_aware_flow_frames(void)
+{
+    App a = {.roleplay = true, .story = cJSON_Parse("{\"nodes\":[],\"simCheckpointInterval\":1}")};
+    simulation_command(&a, "sim", "{\"actions\":["
+        "{\"neutrino_tool\":\"scene_room\",\"name\":\"Hall\",\"min\":[0,0,0],\"max\":[8,8,8]},"
+        "{\"neutrino_tool\":\"scene_place\",\"name\":\"Baffle\",\"kind\":\"wall\",\"min\":[2.1,0,0],\"max\":[2.2,8,8]},"
+        "{\"neutrino_tool\":\"scene_medium\",\"method\":\"cfd\",\"resolution\":8,\"seconds\":0,"
+        "\"solid_geometry\":true,\"raster\":\"conservative\",\"boundary\":\"closed\",\"center\":[4.5,4.5,4.5]},"
+        "{\"neutrino_tool\":\"scene_flow_step\",\"seconds\":0.25}]}");
+    int fork = story_push(&a.ws, a.story, 0, "assistant", "The baffle separates the fog.");
+    int nearby = story_push(&a.ws, a.story, fork, "assistant", "The baffle shifts slightly.");
+    simulation_command(&a, "sim", "{\"neutrino_tool\":\"scene_translate\",\"name\":\"Baffle\",\"offset\":[0.3,0,0]}");
+    simulation_command(&a, "sim", "{\"neutrino_tool\":\"scene_room\",\"name\":\"Hall\",\"min\":[0,0,0],\"max\":[8,8,8]}");
+    int moved = story_push(&a.ws, a.story, fork, "assistant", "The baffle slides to the next cell.");
+    simulation_command(&a, "sim", "{\"neutrino_tool\":\"scene_translate\",\"name\":\"Baffle\",\"offset\":[1,0,0]}");
+    char *snapshot = cJSON_PrintUnformatted(a.story);
+    Json *loaded = cJSON_Parse(snapshot);
+    cJSON_free(snapshot);
+    Json *probe = cJSON_Parse("{\"probe\":[2.5,4.5,4.5]}");
+    const int heads[] = {fork, nearby, moved};
+    bool ok = true;
+    for (int i = 0; i < 3; ++i) {
+        Json *state = simulation_state(loaded, heads[i]);
+        PhysicsReading reading = {0};
+        Text out = {0};
+        ok &= physics_run_reading("scene_flow", probe, at(state, "physics"), &out, &reading) &&
+            !reading.unavailable && reading.closed_flow && !reading.unresolved_obstacles && reading.stored_flow == (i < 2) &&
+            (i < 2 ? reading.flow_time_s == 0.25 && reading.tracer_concentration == 0 :
+                     reading.tracer_concentration > 0);
+        release(&out);
+        cJSON_Delete(state);
+    }
+    cJSON_Delete(probe);
+    cJSON_Delete(loaded);
+    cJSON_Delete(a.story);
+    release(&a.info);
+
+    const PhysicsBox boxes[] = {{{2.1,0,0},{2.2,8,8}},{{6,0,0},{7,8,8}}};
+    FlowConfig c = {.length={8,8,8}, .center={4.5,4.5,4.5}, .sigma=.3, .density=1, .resolution=8,
+                    .cfd=true, .seconds=10, .diffusivity=.1};
+    const double thin_wall[] = {2.5,4.5,4.5}, behind[] = {1.5,4.5,4.5};
+    FlowField center = flow_solve_domain(&c, boxes, 2);
+    c.conservative = true;
+    FlowField conservative = flow_solve_domain(&c, boxes, 2);
+    ok &= center.grid && conservative.grid && center.unresolved_boxes == 1 && conservative.unresolved_boxes == 0 &&
+        flow_sample(&center, thin_wall) > 0 && flow_sample(&conservative, thin_wall) == 0 &&
+        flow_sample(&center, behind) > 1e-4 && flow_sample(&conservative, behind) < 1e-12;
+    flow_release(&center);
+    flow_release(&conservative);
+    return ok;
+}
+
+static bool closed_cfd(void)
+{
+    const double dimensions[] = {8,8,8}, beyond[] = {7.5,4.5,4.5};
+    Json *args = cJSON_Parse("{\"method\":\"cfd\",\"resolution\":8,\"seconds\":2,\"center\":[0.5,4.5,4.5],"
+                            "\"diffusivity\":0.1,\"boundary\":\"closed\",\"backend\":\"gpu\"}");
+    FlowConfig closed;
+    if (!flow_parse(args, dimensions, &closed)) { cJSON_Delete(args); return false; }
+    cJSON_Delete(args);
+    FlowConfig initial = closed, periodic = closed;
+    initial.seconds = 0;
+    periodic.closed = periodic.gpu = false;
+    FlowField start = flow_solve(&initial), sealed = flow_solve(&closed), wrapped = flow_solve(&periodic);
+    bool ok = start.grid && sealed.grid && wrapped.grid &&
+        flow_sample(&sealed, beyond) < 1e-15 && flow_sample(&wrapped, beyond) > 0.01 &&
+        fabs(start.tracer_mean - sealed.tracer_mean) < 1e-14 &&
+        sealed.fallback && strstr(sealed.fallback, "used CPU for closed exterior");
+    flow_release(&wrapped);
+    flow_release(&sealed);
+    flow_release(&start);
+    closed.gpu = false;
+    closed.wind[0] = 1;
+    initial = closed;
+    initial.seconds = 0;
+    start = flow_solve(&initial);
+    sealed = flow_solve(&closed);
+    const size_t cells = 8 * 8 * 8;
+    ok &= start.grid && sealed.grid && sealed.divergence < start.divergence &&
+        sealed.grid[cells] == 0 && sealed.grid[cells + 8 * (4 * 8 + 4)] == 0;
+    flow_release(&sealed);
+    flow_release(&start);
+    return ok;
+}
+
+static void cell_scan_reference(const FlowConfig *c, const PhysicsBox *boxes, int count, unsigned char *solid)
+{
+    const int n = c->resolution;
+    const double inv[] = {n/c->length[0], n/c->length[1], n/c->length[2]};
+    for (int z = 0; z < n; ++z) for (int y = 0; y < n; ++y) for (int x = 0; x < n; ++x) {
+        const double point[] = {(x+.5)/inv[0], (y+.5)/inv[1], (z+.5)/inv[2]};
+        bool occupied = false;
+        for (int j = 0; j < count && !occupied; ++j) {
+            occupied = true;
+            for (int axis = 0; axis < 3; ++axis)
+                occupied &= point[axis] >= boxes[j].lo[axis] && point[axis] < boxes[j].hi[axis];
+        }
+        solid[(z*n+y)*n+x] = occupied;
+    }
+}
+
+static int raster_timing(void)
+{
+    PhysicsBox boxes[128];
+    for (int i = 0; i < 128; ++i) {
+        double x = 1 + (i % 8)*2.5, y = 1 + ((i/8) % 8)*2.5, z = 1 + (i/64)*5;
+        boxes[i] = (PhysicsBox){{x,y,z},{x+1.1,y+1.1,z+1.1}};
+    }
+    FlowConfig c = {.length={24,24,24}, .resolution=24};
+    unsigned char actual[FLOW_MAX_CELLS], expected[FLOW_MAX_CELLS];
+    puts("boxes,method,repetition,batches,mean_us");
+    for (int count = 8; count <= 128; count *= 4) {
+        cell_scan_reference(&c, boxes, count, expected);
+        flow_rasterize(&c, boxes, count, actual);
+        if (memcmp(expected, actual, sizeof expected)) return 1;
+        for (int raster = 0; raster < 2; ++raster) {
+            const int batches = raster ? 10000 : 100;
+            for (int rep = 0; rep <= 5; ++rep) {
+                const clock_t start = clock();
+                for (int j = 0; j < batches; ++j) {
+                    if (raster) flow_rasterize(&c, boxes, count, actual);
+                    else cell_scan_reference(&c, boxes, count, actual);
+                    if (!actual[601]) return 1;
+                }
+                const clock_t end = clock();
+                if (rep) printf("%d,%s,%d,%d,%.6f\n", count, raster ? "box-ranges" : "cell-scan",
+                    rep, batches, 1e6 * (end - start) / (CLOCKS_PER_SEC * (double)batches));
+            }
+        }
+    }
+    return 0;
+}
+
 static int cfd_timing(void)
 {
     const PhysicsBox walls[] = {{{2,0,0},{3,8,8}},{{6,0,0},{7,8,8}}};
@@ -1746,6 +1879,7 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "--checkpoint-timing")) return checkpoint_timing();
     if (argc > 1 && !strcmp(argv[1], "--cfd-reuse-timing")) return cfd_reuse_timing();
     if (argc > 1 && !strcmp(argv[1], "--persistent-cfd-timing")) return persistent_cfd_timing();
+    if (argc > 1 && !strcmp(argv[1], "--raster-timing")) return raster_timing();
     if (argc > 1 && !strcmp(argv[1], "--propagation-timing")) return propagation_timing();
     if (argc > 1 && !strcmp(argv[1], "--cfd-timing")) return cfd_timing();
     const struct {
@@ -1862,6 +1996,8 @@ int main(int argc, char **argv)
     if (!sensory_branch_state()) { fputs("Sensory observations escaped their transaction or branch.\n", stderr); failures++; }
     if (!attached_rigid_plan()) { fputs("Attached rigid plan test failed.\n", stderr); failures++; }
     if (!solid_cfd()) { fputs("Voxel CFD boundary test failed.\n", stderr); failures++; }
+    if (!geometry_aware_flow_frames()) { fputs("CFD raster or geometry-aware frame retention failed.\n", stderr); failures++; }
+    if (!closed_cfd()) { fputs("Closed CFD exterior failed.\n", stderr); failures++; }
     if (!material_transport()) { fputs("Material transport test failed.\n", stderr); failures++; }
     if (!scene_protocol("cpu")) { fputs("3D scene simulation protocol failed.\n", stderr); failures++; }
 #ifndef NEUTRINO_VULKAN_RT

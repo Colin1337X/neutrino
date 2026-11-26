@@ -41,9 +41,15 @@ Consecutive flow, light and acoustic queries in the same ordered plan can reuse 
 
 Configure a CFD medium with `scene_medium` and advance it with `scene_flow_step`, for example `{"neutrino_tool":"scene_flow_step","seconds":0.25}`. The first advance starts at the medium's initial conditions at zero seconds. Each later advance starts with the saved tracer and velocity grid for that layout on the active branch. `scene_flow`, acoustic attenuation, and optical extinction read the latest grid without advancing it. The story clock and field clock advance independently.
 
-Before a field has been saved, queries still use the configured `scene_medium.seconds` lookahead. Use `scene_flow_reset` to return to that behavior. Replacing the medium or editing the room bounds resets the saved field. When voxel obstacles are enabled, changes to object geometry also reset the field. Switching layouts preserves each layout's field.
+Before a field has been saved, queries still use the configured `scene_medium.seconds` lookahead. Use `scene_flow_reset` to return to that behavior. Replacing the medium or changing the room bounds resets the saved field. Voxel obstacle edits retain the field when the resolved occupancy mask is identical. Geometry that changes that mask invalidates the field. Switching layouts preserves each layout's field.
 
 Hypothetical or rejected plans leave the saved field unchanged. Accepted frames persist through a restart and follow rewinds and sibling branches. `scene_inspect` reports `flow_time_s`, and `/trace` lists the advance interval and solver backend. Use `/sim budget field_bytes VALUE` to bound encoded frame data per plan. The default is 8 MiB. Each accepted advance stores a lossless binary64 frame in the workspace event log. A 24³ frame adds about 576 KiB before JSON metadata. Long runs grow the log, and a frame larger than the general checkpoint limit restores through event replay.
+
+### CFD boundaries and thin geometry
+
+Set `"boundary":"closed"` on a CFD medium to seal the outer domain. This sets normal velocity to zero at the exterior faces, applies zero normal diffusion flux, and keeps interpolation within the grid. The default `"boundary":"periodic"` wraps the domain. The periodic OpenCL pressure kernel remains available for eligible calculations. A closed exterior uses CPU pressure projection, including when the requested backend is GPU.
+
+With `solid_geometry:true`, the default `"raster":"center"` marks cells whose centers fall inside geometry and reports any boxes that occupy zero cells. Select `"raster":"conservative"` to mark every cell with positive-volume overlap. This resolves thin walls at coarse resolution and can widen a wall or close a sub-cell opening. The [sealed-room fixture](../benchmarks/closed-cfd.json) exercises both exterior modes and both raster rules.
 
 ### Character conversations
 

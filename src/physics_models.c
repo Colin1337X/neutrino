@@ -314,9 +314,9 @@ static bool flow(const Json *args, Text *out, bool *unavailable)
     if (at(args, "probe") && !physics_vector(args,"probe",probe)) return false;
     for(int axis=0; axis<3; ++axis) if(probe[axis]<0 || probe[axis]>size[axis]) return false;
     FlowField field = flow_solve(&config);
-    if (config.porous && !field.grid) {
+    if ((config.porous || config.closed) && !field.grid) {
         if (unavailable) *unavailable = true;
-        format(out, "Porous CFD unavailable. %s.", field.fallback ? field.fallback : "No grid");
+        format(out, "%s CFD unavailable. %s.", config.porous ? "Porous" : "Closed", field.fallback ? field.fallback : "No grid");
         flow_release(&field);
         return true;
     }

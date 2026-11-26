@@ -34,10 +34,11 @@ typedef struct {
     double sound_loss, light_loss;
     double permeability, porosity, porous_min[3], porous_max[3], porous_drive[3];
     int resolution;
-    bool cfd, mapped, gpu, porous;
+    bool cfd, mapped, gpu, porous, conservative, closed;
 } FlowConfig;
 
 typedef struct { double lo[3], hi[3]; } PhysicsBox;
+enum { FLOW_MAX_RESOLUTION = 24, FLOW_MAX_CELLS = 24 * 24 * 24 };
 bool rigid_edit(Json *room, Json *object, const Json *materials, const PhysicsBox *bounds,
                 const Json *op, double gravity);
 bool rigid_tool(const char *name);
@@ -47,7 +48,7 @@ typedef struct {
     double *grid;
     unsigned char *solid;
     double divergence, speed, tracer_mean, porous_speed, pore_volume;
-    size_t porous_cells;
+    size_t porous_cells, unresolved_boxes;
     const char *method;
     const char *memory;
     const char *fallback;
@@ -62,6 +63,7 @@ typedef struct PhysicsCache {
 void physics_cache_release(PhysicsCache *cache);
 
 bool flow_parse(const Json *args, const double length[3], FlowConfig *config);
+size_t flow_rasterize(const FlowConfig *config, const PhysicsBox *boxes, size_t count, unsigned char *solid);
 PhysicsCost flow_cost(const FlowConfig *config);
 PhysicsCost flow_step_cost(const FlowConfig *config, bool resumed);
 size_t flow_frame_bytes(int resolution);
@@ -74,4 +76,5 @@ double flow_column(const FlowField *field, const double a[3], const double b[3],
                    double start, double end);
 void flow_release(FlowField *field);
 void flow_porous_summary(const FlowField *field, Text *out);
+void flow_geometry_summary(const FlowField *field, Text *out);
 #endif
