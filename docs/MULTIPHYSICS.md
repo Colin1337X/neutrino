@@ -39,7 +39,27 @@ Consecutive flow, light and acoustic queries in the same ordered plan can reuse 
 
 ### Character conversations
 
-`/talk CHARACTER | MESSAGE` and `@CHARACTER: MESSAGE` send the addressed character a separate inference request. Share branch-local knowledge using `/knowledge CHARACTER | FACT`. The request receives the addressed conversation and that character's grants. The narrator keeps its broader view. Character requests have no tools. Grants represent hearsay and retain their source and story time. Automatic sensory observations require additional work.
+`/talk CHARACTER | MESSAGE` and `@CHARACTER: MESSAGE` send the addressed character a separate inference request. Share branch-local knowledge using `/knowledge CHARACTER | FACT`. The request receives the addressed conversation, that character's grants and their recorded observations. The narrator keeps its broader view. Character requests have no tools. Grants represent hearsay and retain their source and story time.
+
+### Recursive sound and light
+
+`scene_acoustic`, `acoustic` and `scene_light` accept `max_bounces` from 0 to 4. The default is 1 for measurement tools. The recursive solver mirrors the source across candidate face sequences and checks the reconstructed path against the finite room and object faces. Each segment accounts for distance, air and field loss, transmissive material and occlusion. Each bounce applies the surface's reflectivity. Audio levels and optical power are relative to the source at one metre.
+
+Use `wall_reflectivity` on `scene_light` to set wall power reflectivity, or use `/sim` with a `tune` action to set acoustic wall amplitude reflectivity. `min_level_db` controls the acoustic cutoff and `min_power` controls the optical cutoff. Recursive paths use the CPU. Direct and legacy room paths can still use supported GPU backends. The search considers up to 8,192 recursive candidates and the trace reports when it reaches that limit. This is specular geometry with planar box faces. It models neither diffraction nor diffuse scattering.
+
+Define a receiver for an existing character in the current room.
+
+```json
+{"neutrino_tool":"scene_sensor","name":"Mara","listener":[8,2,2],"min_level_db":-45,"min_power":0.00001}
+```
+
+To simulate an actual fictional event, use `scene_emit` with a coordinate or `source_entity`.
+
+```json
+{"neutrino_tool":"scene_emit","source":[2,2,2],"sound":true,"light":true,"max_bounces":2,"wall_reflectivity":0.8}
+```
+
+Emission checks the configured receivers belonging to characters still in the current room. The default is three bounces. Only a detected signal produces a record. Each record retains its branch, recipient, story time, first qualifying arrival and strength. The character learns that they heard a sound or saw light, and whether the arrival was reflected. The character receives no source identity or geometry. `/knowledge CHARACTER` lists their observations with timing. A hypothetical plan can preview detections, and an accepted emission saves them with the turn. A cancelled or failed plan leaves the records untouched. Receiver positions are fixed until changed with `scene_sensor`, and `off:true` removes one.
 
 | Predicate | Operands |
 | --- | --- |
@@ -60,6 +80,8 @@ Consecutive flow, light and acoustic queries in the same ordered plan can reuse 
 | signal.reaches_receiver | step with a supported acoustic or optical path above cutoff |
 | signal.arrival_before | step and threshold in milliseconds |
 | signal.power_exceeds | step and threshold as strongest received optical power relative to a source at 1 m |
+| signal.direct_blocked | step of a sound or light query. Tests geometric blockage of the direct path |
+| signal.recursive_reaches_receiver | step of a sound or light query. Tests whether any received path uses at least two reflections |
 | flow.porous_speed_exceeds | step with scene_flow, threshold in m/s. Reports mean speed across resolved porous cells and the modeled pore volume |
 | mass_transfer.transferred_exceeds | step with a mass-transfer tool, threshold in kg. Positive is uptake, negative is release |
 | mass_transfer.final_exceeds | step with a mass-transfer tool, threshold in kg. Reports final target mass |

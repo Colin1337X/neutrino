@@ -61,7 +61,7 @@ const Command commands[] = {
     {"give", " ITEM | CHARACTER", "Hand a carried item to a party member here"},
     {"use", " ITEM [| TARGET]", "Use an available item in a narrated action"},
     {"talk", " CHARACTER | MESSAGE", "Speak to a character in the current room"},
-    {"knowledge", " CHARACTER | FACT", "Share a fact privately with a character on this branch"},
+    {"knowledge", " CHARACTER [| FACT]", "View sensory observations or share a fact privately"},
     {"wear", " ITEM", "Put on an item you carry"},
     {"remove", " ITEM", "Take off a worn item and keep carrying it"},
     {"npc", " NAME | DESCRIPTION", "Add a character in this room"},

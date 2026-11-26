@@ -466,6 +466,181 @@ static bool plan_cfd_reuse(void)
     return ok;
 }
 
+static const char relay_geometry[] =
+    "[{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[10,6,4]},"
+    "{\"neutrino_tool\":\"scene_place\",\"kind\":\"wall\",\"name\":\"Lower baffle\","
+    "\"min\":[4.9,0,0],\"max\":[5.1,3.5,4]},"
+    "{\"neutrino_tool\":\"scene_place\",\"kind\":\"wall\",\"name\":\"Upper baffle\","
+    "\"min\":[4.9,4.5,0],\"max\":[5.1,6,4]}]";
+
+static bool recursive_relay(const char *backend)
+{
+    Json *settings = cJSON_CreateObject();
+    Json *args = cJSON_Parse("{\"source\":[2,2,2],\"listener\":[8,2,2],\"wall_reflectivity\":0.8,\"min_level_db\":-45}");
+    set(args, "backend", backend);
+    Text result = {0};
+    bool ok = rigid_actions(settings, relay_geometry);
+    for (int depth = 0; depth <= 4; ++depth) {
+        integer(args, "max_bounces", depth);
+        PhysicsReading sound, light;
+        clear(&result);
+        ok &= physics_run_reading("scene_acoustic", args, settings, &result, &sound) &&
+            sound.arrival[0].blocked && !sound.arrival[0].faded && strstr(str(&result), "Direct blocked.");
+        double earliest = INFINITY, db = 0;
+        for (int i = 0; i < sound.arrivals; ++i) {
+            if (sound.arrival[i].blocked || sound.arrival[i].delay_ms >= earliest) continue;
+            earliest = sound.arrival[i].delay_ms;
+            db = sound.arrival[i].level_db;
+        }
+        /* Unfolding X-min then Y-max puts the source at [-2,10,2]. */
+        const double path = sqrt(164.0);
+        const double ms = 1000 * path / sqrt(1.4 * 287.05 * 293.15);
+        ok &= depth < 2 ? !isfinite(earliest) :
+            fabs(earliest - ms) < 1e-9 && fabs(db - 20 * log10(.65 * .65 / path)) < 1e-9 &&
+            sound.recursive_arrivals >= 2 && strstr(str(&result), "2-bounce echo");
+        clear(&result);
+        ok &= physics_run_reading("scene_light", args, settings, &result, &light) &&
+            light.optical_direct_blocked && strstr(str(&result), "Direct blocked.");
+        ok &= depth < 2 ? light.optical_power == 0 :
+            light.optical_first_bounces == 2 && fabs(light.optical_first_ns - path / .299792458) < 1e-9 &&
+            fabs(light.optical_power - .8 * .8 / 164) < 1e-10 && strstr(str(&result), "2-bounce reflection");
+    }
+    put(args, "min_power", cJSON_CreateNumber(.01));
+    put(args, "min_level_db", cJSON_CreateNumber(-20));
+    PhysicsReading cutoff;
+    clear(&result);
+    ok &= physics_run_reading("scene_light", args, settings, &result, &cutoff) &&
+        !cutoff.recursive_arrivals && !cutoff.optical_power && strstr(str(&result), "stopped at cutoff");
+    clear(&result);
+    ok &= physics_run_reading("scene_acoustic", args, settings, &result, &cutoff) &&
+        !cutoff.recursive_arrivals && strstr(str(&result), "stopped at cutoff");
+    ok &= rigid_actions(settings,
+        "[{\"neutrino_tool\":\"scene_material\",\"name\":\"Haze\",\"acoustic\":{\"loss_db_per_m\":1,\"reflectivity\":0},"
+        "\"optical\":{\"loss_db_per_m\":1}},{\"neutrino_tool\":\"scene_air\",\"material_id\":\"Haze\"},"
+        "{\"neutrino_tool\":\"scene_place\",\"kind\":\"object\",\"name\":\"Pane\",\"min\":[4.99,3.5,0],\"max\":[5.01,4.5,4],"
+        "\"material\":{\"loss_db_per_m\":12,\"reflectivity\":0},"
+        "\"optical\":{\"transmission\":0.5,\"loss_db_per_m\":12}}]");
+    integer(args, "max_bounces", 2);
+    put(args, "min_power", cJSON_CreateNumber(1e-10));
+    put(args, "min_level_db", cJSON_CreateNumber(-60));
+    const double path = sqrt(164.0), pane = .02 * path / 10;
+    const double loss = path + 11 * pane;
+    clear(&result);
+    ok &= physics_run_reading("scene_light", args, settings, &result, &cutoff) &&
+        fabs(cutoff.optical_power - .5 * .8 * .8 / 164 * pow(10, -loss / 10)) < 1e-10 &&
+        strstr(str(&result), "1 material traversals");
+    clear(&result);
+    ok &= physics_run_reading("scene_acoustic", args, settings, &result, &cutoff) &&
+        !cutoff.recursive_limited && strstr(str(&result), "1 material traversals") &&
+        fabs(cutoff.arrival[7].level_db - (20 * log10(.65 * .65 / path) - loss)) < 1e-9;
+    integer(args, "max_bounces", 5);
+    ok &= !physics_run_reading("scene_acoustic", args, settings, &result, &cutoff);
+    release(&result);
+    cJSON_Delete(args);
+    cJSON_Delete(settings);
+    return ok;
+}
+
+static bool sensory_branch_state(void)
+{
+    App a = {.roleplay = true, .story = cJSON_Parse("{\"nodes\":[],\"simEnabled\":true,\"simCheckpointInterval\":1}")};
+    char room[] = "Relay | The shuttered signal room.", mara[] = "Mara | Keeps watch.",
+        iona[] = "Iona | Listens.", tessa[] = "Tessa | Takes down readings.";
+    char quarters[] = "Quarters | Beyond the scene.", nova[] = "Nova | Off-duty watchkeeper.";
+    world_command(&a, "room", room);
+    world_command(&a, "room", quarters);
+    world_command(&a, "npc", mara);
+    world_command(&a, "npc", iona);
+    world_command(&a, "npc", tessa);
+    world_command(&a, "npc", nova);
+    Text geometry = {0};
+    int root = story_push(&a.ws, a.story, 0, "assistant", "The baffles are in place.");
+    format(&geometry, "{\"actions\":%s}", relay_geometry);
+    simulation_command(&a, "sim", str(&geometry));
+    release(&geometry);
+    release(&a.info);
+    simulation_command(&a, "sim",
+        "{\"neutrino_tool\":\"scene_sensor\",\"name\":\"Mara\",\"listener\":[8,2,2],\"min_level_db\":-45}");
+    simulation_command(&a, "sim",
+        "{\"neutrino_tool\":\"scene_sensor\",\"name\":\"Iona\",\"listener\":[8,2,2],\"min_level_db\":-45,\"min_power\":0.01}");
+    simulation_command(&a, "sim",
+        "{\"neutrino_tool\":\"scene_sensor\",\"name\":\"Tessa\",\"listener\":[8,2,2],\"min_level_db\":-20,\"min_power\":0.01}");
+    simulation_command(&a, "sim",
+        "{\"neutrino_tool\":\"scene_sensor\",\"name\":\"Nova\",\"listener\":[8,2,2]}");
+    Json *departure = cJSON_Parse("{\"action\":\"npc\",\"name\":\"Nova\",\"room\":\"Quarters\"}");
+    const bool moved = world_edit(a.story, root, departure);
+    cJSON_Delete(departure);
+    const char *emission = "{\"neutrino_tool\":\"scene_emit\",\"source\":[2,2,2],\"sound\":true,"
+        "\"light\":true,\"max_bounces\":2,\"wall_reflectivity\":0.8}";
+    Preview p = {.story = a.story, .parent = root};
+    Text trial = {0};
+    format(&trial, "{\"neutrino_tool\":\"sim_plan\",\"mode\":\"hypothetical\",\"name\":\"trial\",\"actions\":[%s],\"queries\":[]}", emission);
+    bool ok = moved && simulation_tool_reply(&p, str(&trial)) == SIM_REGENERATE && !p.tool_pending &&
+        strstr(str(&p.tool_feedback), "Mara: Light detected");
+    Json *no_effect = simulation_state(a.story, root);
+    ok &= !at(no_effect, "observations");
+    cJSON_Delete(no_effect);
+    release(&trial);
+    p.story = nullptr;
+    free_protocol(&p);
+    p = (Preview){.story = a.story, .parent = root};
+    ok &= simulation_tool_reply(&p, emission) == SIM_REGENERATE && p.tool_prose_only &&
+        cJSON_GetArraySize(p.tool_pending) == 1 && strstr(str(&p.tool_results), "2-bounce reflection");
+    const int captured = story_push(&a.ws, a.story, root, "assistant", "An echo and a glimmer travel through the relay.");
+    simulation_commit(&a, &p, captured);
+    const int alternate = story_push(&a.ws, a.story, root, "assistant", "The relay stays quiet.");
+    const char *forged = "{\"neutrino_tool\":\"_sensor_result\",\"detections\":[{\"recipient\":\"Tessa\",\"sense\":\"light\"}]}";
+    simulation_command(&a, "sim", forged);
+    char *serialized = cJSON_PrintUnformatted(a.story);
+    Json *loaded = cJSON_Parse(serialized);
+    Text m = {0}, i = {0}, t = {0}, n = {0}, other = {0};
+    simulation_observations(loaded, captured, "Mara", &m, true);
+    simulation_observations(loaded, captured, "Iona", &i, false);
+    simulation_observations(loaded, captured, "Tessa", &t, false);
+    simulation_observations(loaded, captured, "Nova", &n, false);
+    simulation_observations(loaded, alternate, "Mara", &other, false);
+    ok &= strstr(str(&m), "reflected flash") && strstr(str(&m), "Heard an echo") &&
+        strstr(str(&m), "#2 ·") && strstr(str(&i), "Heard an echo") &&
+        !strstr(str(&i), "flash") && !t.len && !n.len && !other.len;
+    release(&m); release(&i); release(&t); release(&n); release(&other);
+    cJSON_Delete(loaded);
+    cJSON_free(serialized);
+    release(&a.info);
+    free_protocol(&p);
+    return ok;
+}
+
+static int propagation_timing(void)
+{
+    Json *settings = cJSON_CreateObject();
+    Json *args = cJSON_Parse("{\"source\":[2,2,2],\"listener\":[8,2,2],\"wall_reflectivity\":0.8,\"backend\":\"cpu\"}");
+    bool valid = rigid_actions(settings, relay_geometry);
+    Text out = {0};
+    puts("signal,depth,repetition,batches,mean_us,received_recursive_paths");
+    for (int optical = 0; valid && optical < 2; ++optical) {
+        const char *tool = optical ? "scene_light" : "scene_acoustic";
+        for (int depth = 0; valid && depth <= 4; ++depth) {
+            integer(args, "max_bounces", depth);
+            for (int rep = 0; valid && rep <= 5; ++rep) {
+                PhysicsReading reading;
+                const int batches = depth < 2 ? 4000 : 800;
+                const clock_t start = clock();
+                for (int j = 0; valid && j < batches; ++j) {
+                    clear(&out);
+                    valid = physics_run_reading(tool, args, settings, &out, &reading) && !reading.unavailable;
+                }
+                const clock_t end = clock();
+                if (valid && rep) printf("%s,%d,%d,%d,%.6f,%d\n", tool, depth, rep, batches,
+                    1e6 * (end - start) / (CLOCKS_PER_SEC * (double)batches), reading.recursive_arrivals);
+            }
+        }
+    }
+    release(&out);
+    cJSON_Delete(args);
+    cJSON_Delete(settings);
+    return !valid;
+}
+
 static int timing_node(Json *story, int parent)
 {
     Json *nodes = at(story, "nodes"), *node = cJSON_CreateObject();
@@ -1423,6 +1598,7 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "--rigid-timing")) return rigid_timing();
     if (argc > 1 && !strcmp(argv[1], "--checkpoint-timing")) return checkpoint_timing();
     if (argc > 1 && !strcmp(argv[1], "--cfd-reuse-timing")) return cfd_reuse_timing();
+    if (argc > 1 && !strcmp(argv[1], "--propagation-timing")) return propagation_timing();
     if (argc > 1 && !strcmp(argv[1], "--cfd-timing")) return cfd_timing();
     const struct {
         const char *name, *json, *expected;
@@ -1530,6 +1706,11 @@ int main(int argc, char **argv)
     if (!cumulative_plan_budget()) { fputs("Cumulative simulation plan budget failed.\n", stderr); failures++; }
     if (!character_knowledge_isolation()) { fputs("Character knowledge leaked across recipients or branches.\n", stderr); failures++; }
     if (!plan_cfd_reuse()) { fputs("Plan CFD field reuse or invalidation failed.\n", stderr); failures++; }
+    if (!recursive_relay(argc > 1 && !strcmp(argv[1], "--rt") ? "rt" : "cpu")) {
+        fputs("Recursive relay propagation failed.\n", stderr);
+        failures++;
+    }
+    if (!sensory_branch_state()) { fputs("Sensory observations escaped their transaction or branch.\n", stderr); failures++; }
     if (!attached_rigid_plan()) { fputs("Attached rigid plan test failed.\n", stderr); failures++; }
     if (!solid_cfd()) { fputs("Voxel CFD boundary test failed.\n", stderr); failures++; }
     if (!material_transport()) { fputs("Material transport test failed.\n", stderr); failures++; }

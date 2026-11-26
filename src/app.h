@@ -24,16 +24,20 @@ typedef struct {
     bool finished;
 } Candidate;
 enum { SIM_TOOL_LIMIT = 12, ACOUSTIC_BLOCKERS = 16, ACOUSTIC_ROOM_PATHS = 7,
-       PHYSICS_ACOUSTIC_PATHS = ACOUSTIC_ROOM_PATHS + 6 * ACOUSTIC_BLOCKERS };
+       PHYSICS_ACOUSTIC_PATHS = ACOUSTIC_ROOM_PATHS + 6 * ACOUSTIC_BLOCKERS,
+       PHYSICS_RECURSIVE_ARRIVALS = 24 };
 typedef enum { READING_NONE, READING_FLUID, READING_ACOUSTIC, READING_OPTICAL, READING_FLOW,
                READING_MASS_TRANSFER } ReadingKind;
 typedef struct {
     ReadingKind kind;
     double seconds, level_m, drained_l, remaining_l, flow_lps, initial_flow_lps;
-    struct { bool blocked, faded; double delay_ms, level_db; } arrival[PHYSICS_ACOUSTIC_PATHS];
-    int arrivals;
+    struct { bool blocked, faded; int bounces; double delay_ms, level_db; }
+        arrival[PHYSICS_ACOUSTIC_PATHS + PHYSICS_RECURSIVE_ARRIVALS];
+    int arrivals, recursive_arrivals;
     bool material_acoustics, unavailable;
-    double optical_power, optical_first_ns;
+    double optical_power, optical_first_ns, optical_first_power;
+    int optical_first_bounces;
+    bool recursive_limited, optical_direct_blocked;
     double tracer_concentration;
     double porous_speed, pore_volume;
     bool voxel_flow, porous_flow;
@@ -165,6 +169,7 @@ void memory_binding(App *app, const char *binding);
 Inference *memory_start_recall(const App *app, const Json *story, const Json *messages);
 void world_command(App *app, const char *verb, char *argument);
 void world_character_messages(const Preview *p, Json *messages);
+Json *world_local_cast(const Json *story, int head);
 void world_context(const Json *story, int head, Text *out);
 const char *world_room(const Json *story, int head, Text *out);
 bool world_address(const Json *story, const char *line, Text *speaker, const char **message);
@@ -187,6 +192,7 @@ bool physics_tune(Json *settings, const Json *op);
 void physics_describe(const Json *settings, Text *out);
 bool simulation_enabled(const Json *story);
 Json *simulation_state(const Json *story, int head);
+void simulation_observations(const Json *story, int head, const char *character, Text *out, bool details);
 void simulation_command(App *a, const char *verb, const char *arg);
 void simulation_prompt(const Preview *p, Text *system);
 void simulation_player_reference(Text *out, const char *action);

@@ -14,6 +14,7 @@ enum { SIM_COMMAND_LIMIT = 512 * 1024 };
 static const double largest_exact_minute = 9007199254740991.0;
 static const char *const meters[] = {"hunger", "thirst", "bladder", "bowels", "mood"};
 static const double hourly[] = {4, 7, 9, 3};
+static const char observation_event[] = "_sensor_result";
 
 enum {
     BUDGET_WORK, BUDGET_STEPS, BUDGET_SECONDS, BUDGET_RAYS, BUDGET_CELLS, BUDGET_NODES,
@@ -117,11 +118,23 @@ static bool apply_stat(Json *state, const Json *op)
     const char *tool = js(op, "neutrino_tool"), *actor = js(op, "actor");
     const char *metric = js(op, "metric"), *part = js(op, "part"), *kind = js(op, "kind");
     int value;
+    if (!strcmp(tool, observation_event)) {
+        const Json *detections = at(op, "detections"), *detection;
+        if (!cJSON_IsArray(detections)) return false;
+        Json *entries = at(state, "observations");
+        if (!entries && detections->child) put(state, "observations", entries = cJSON_CreateArray());
+        cJSON_ArrayForEach(detection, detections) {
+            Json *copy = cJSON_Duplicate(detection, true);
+            integer(copy, "anchor", number(op, "anchor"));
+            cJSON_AddItemToArray(entries, copy);
+        }
+        return true;
+    }
     if (!strcmp(tool, "tune")) return physics_tune(at(state, "physics"), op);
     if (!strcmp(tool, "scene_room") || !strcmp(tool, "scene_place") || !strcmp(tool, "scene_remove") ||
         !strcmp(tool, "scene_medium") || !strcmp(tool,"scene_select") || !strcmp(tool, "scene_material") ||
         !strcmp(tool, "scene_air") || !strcmp(tool, "scene_translate") ||
-        !strcmp(tool, "scene_runoff") || rigid_tool(tool))
+        !strcmp(tool, "scene_runoff") || !strcmp(tool, "scene_sensor") || rigid_tool(tool))
         return physics_scene_edit(at(state, "physics"), op);
     if (!strcmp(tool, "set_time") || !strcmp(tool, "auto_time") || !strcmp(tool, "advance")) {
         const bool step = !strcmp(tool, "auto_time"), advancing = !strcmp(tool, "advance");
@@ -368,6 +381,31 @@ Json *simulation_state(const Json *story, int head)
     cJSON_Delete(path);
     return state;
 }
+
+void simulation_observations(const Json *story, int head, const char *character, Text *out, bool details)
+{
+    if (!cJSON_IsTrue(at(story, "simHasObservations"))) return;
+    Json *state = simulation_state(story, head);
+    const Json *observations = at(state, "observations");
+    const Json *row = tail(observations);
+    int shown = 0;
+    for (; row && shown < 24; row = row == observations->child ? nullptr : row->prev) {
+        const unsigned char *a = (const unsigned char *)character, *b = (const unsigned char *)js(row, "recipient");
+        while (*a && tolower(*a) == tolower(*b)) { ++a; ++b; }
+        if (*a || *b) continue;
+        const bool sound = !strcmp(js(row, "sense"), "sound");
+        const int bounces = number(row, "bounces");
+        const char *description = sound ? (bounces ? "Heard an echo. Its source was unclear." :
+            "Heard a sound. Its source was unclear.") : (bounces ? "Saw a reflected flash. Its source was unclear." :
+            "Saw a flash. Its source was unclear.");
+        ++shown;
+        if (details) format(out, "#%d · story minute %.0f · %s (%d reflections, %.6g %s)\n",
+            number(row, "anchor"), clock_value(row, "minute"), description, bounces,
+            clock_value(row, "delay"), sound ? "ms" : "ns");
+        else format(out, "\nYou observed: %s", description);
+    }
+    cJSON_Delete(state);
+}
 static Json *preview_state(const Preview *p)
 {
     Json *state = simulation_state(p->story, p->parent), *pending;
@@ -474,7 +512,14 @@ static const char tool_help[] =
 static const char scenario_help[] =
     "scene_material registers a name with acoustic and/or optical property objects; scene_place can reference it with material_id.\n"
     "scene_air selects a material_id for room-medium attenuation. scene_translate moves a named box by an offset vector. "
-    "Scene acoustic and light endpoints can use source_entity and receiver_entity instead of coordinates.\n"
+    "Scene acoustic and light endpoints can use source_entity and receiver_entity instead of coordinates. "
+    "Set max_bounces (0–4) to include recursive specular reflections.\n"
+    "scene_sensor attaches a receiver for name (a character in the room), listener [x,y,z], "
+    "optional min_level_db and min_power. off:true removes the sensor. "
+    "When a real sound or flash occurs, use scene_emit with source or source_entity, sound:true and/or light:true, "
+    "optional max_bounces and wall_reflectivity for light. The simulator checks all present receivers and records "
+    "only positive detections on acceptance. Narrate only the senses each character detected and leave the source unidentified. "
+    "Use scene_acoustic or scene_light for measurements that should leave knowledge unchanged.\n"
     "For voxel CFD, add solid_geometry:true with method:cfd to scene_medium. scene_flow reads concentration at a probe point.\n"
     "Rigid bodies: scene_body attaches mass_kg (dry mass), optional liquid_l, restitution and velocity to a named object. "
     "scene_constraint takes name and mode fixed/free/rail; rail uses axis x/y/z. scene_step advances the room by seconds. "
@@ -601,6 +646,18 @@ static bool apply_tool(Json *story, int head, Json *state, const Json *op)
     if (!strcmp(tool, "inventory")) return world_inventory_tool(story, head, op);
     if (!strcmp(tool,"world")) return world_edit(story,head,op);
     if (!strcmp(tool,"character")) return world_character_tool(story,head,op);
+    if (!strcmp(tool, observation_event)) {
+        Json *accepted = cJSON_Duplicate(op, true);
+        integer(accepted, "anchor", head);
+        bool saved = apply_stat(state, accepted);
+        if (saved) {
+            const Json *detections = at(accepted, "detections");
+            if (detections->child) put(story, "simHasObservations", cJSON_CreateTrue());
+            log_stat(story, head, accepted);
+        }
+        cJSON_Delete(accepted);
+        return saved;
+    }
     if (!apply_stat(state, op)) return false;
     log_stat(story, head, op);
     return true;
@@ -865,6 +922,137 @@ static void trace_acoustic_selection(Preview *p, const Json *expanded, const cha
 
 static bool stage_scenario_edit(Json **scratch, Json *story, int head, Json *state, const Json *op);
 
+static bool detect_signal(const Json *op, const Json *sensor, const char *recipient, bool sound,
+                          Json *detections, const Json *state, PlanBudget *budget, PhysicsCache *cache,
+                          Text *summary, Text *trace)
+{
+    const char *tool = sound ? "scene_acoustic" : "scene_light";
+    Json *args = cJSON_Duplicate(op, true);
+    set(args, "neutrino_tool", tool);
+    put(args, "listener", cJSON_Duplicate(at(sensor, "listener"), true));
+    const char *threshold = sound ? "min_level_db" : "min_power";
+    put(args, threshold, cJSON_Duplicate(at(sensor, threshold), false));
+    const bool admitted = budget_action(budget, args, state, summary);
+    PhysicsReading reading;
+    Text detail = {0};
+    bool valid = admitted && physics_run_cached(tool, args, at(state, "physics"), &detail, &reading, cache) &&
+        !reading.unavailable && !reading.recursive_limited;
+    bool fits = reserve_budget(budget, &(PhysicsCost){0}, detail.len, summary);
+    cJSON_Delete(args);
+    if (trace && fits) format(trace, "\n%s · %s\n%s\n", recipient, sound ? "sound" : "light", str(&detail));
+    release(&detail);
+    if (!fits) return false;
+    if (!valid) {
+        if (admitted) format(summary, "\n%s measurement incomplete for %s. Emission discarded.",
+                             sound ? "Sound" : "Light", recipient);
+        return false;
+    }
+    double delay = reading.optical_first_ns, strength = reading.optical_first_power;
+    bool detected = strength > 0;
+    int bounces = reading.optical_first_bounces;
+    if (sound) {
+        delay = INFINITY;
+        for (int i = 0; i < reading.arrivals; ++i) {
+            if (reading.arrival[i].blocked || reading.arrival[i].delay_ms >= delay) continue;
+            delay = reading.arrival[i].delay_ms;
+            strength = reading.arrival[i].level_db;
+            bounces = reading.arrival[i].bounces;
+        }
+        detected = isfinite(delay);
+    }
+    if (!detected) {
+        format(summary, "\n%s: %s below the receiver cutoff or blocked. No observation.",
+               recipient, sound ? "Sound" : "Light");
+        return true;
+    }
+    Json *row = cJSON_CreateObject();
+    set(row, "recipient", recipient);
+    set(row, "sense", sound ? "sound" : "light");
+    integer(row, "bounces", bounces);
+    put(row, "delay", cJSON_CreateNumber(delay));
+    put(row, "strength", cJSON_CreateNumber(strength));
+    put(row, "minute", cJSON_CreateNumber(clock_value(state, "clock")));
+    cJSON_AddItemToArray(detections, row);
+    format(summary, "\n%s: %s detected via %s (%d reflections). Source unidentified.", recipient,
+           sound ? "Sound" : "Light", bounces ? "reflection" : "direct path", bounces);
+    return true;
+}
+
+static Json *resolve_emission(const Json *op, const Json *story, int head, const Json *state,
+                              PlanBudget *budget, Text *summary, Text *trace)
+{
+    const Json *member;
+    cJSON_ArrayForEach(member, op) {
+        const char *key = member->string;
+        if (!key || at(op, key) != member ||
+            (strcmp(key, "neutrino_tool") && strcmp(key, "source") && strcmp(key, "source_entity") &&
+             strcmp(key, "sound") && strcmp(key, "light") && strcmp(key, "max_bounces") &&
+             strcmp(key, "wall_reflectivity") && strcmp(key, "backend"))) return nullptr;
+    }
+    const Json *sound = at(op, "sound"), *light = at(op, "light"), *physics = at(state, "physics");
+    const char *backend = js(op, "backend");
+    double source[3], depth, wall;
+    if ((sound && !cJSON_IsBool(sound)) || (light && !cJSON_IsBool(light)) ||
+        (!cJSON_IsTrue(sound) && !cJSON_IsTrue(light)) ||
+        !physics_emitter(physics, op, source) ||
+        !physics_optional(op, "max_bounces", 0, 4, 3, &depth) || floor(depth) != depth ||
+        !physics_optional(op, "wall_reflectivity", 0, 1, 0.5, &wall) ||
+        (at(op, "backend") && strcmp(backend, "auto") && strcmp(backend, "cpu") &&
+         strcmp(backend, "gpu") && strcmp(backend, "vulkan") && strcmp(backend, "rt"))) return nullptr;
+
+    Json *args = cJSON_CreateObject();
+    if (at(op, "source_entity")) set(args, "source_entity", js(op, "source_entity"));
+    else put(args, "source", cJSON_CreateDoubleArray(source, 3));
+    if (*backend) set(args, "backend", backend);
+    integer(args, "max_bounces", (int)depth);
+    put(args, "wall_reflectivity", cJSON_CreateNumber(wall));
+    Json *cast = world_local_cast(story, head), *detections = cJSON_CreateArray(), *signal = nullptr;
+    const Json *sensor;
+    PhysicsCache cache = {0};
+    bool valid = true;
+    append(summary, "Sensory measurements:");
+    int receivers = 0;
+    cJSON_ArrayForEach(sensor, physics_sensors(physics)) {
+        const Json *receiver = at(cast, js(sensor, "name"));
+        if (!cJSON_IsString(receiver)) continue;
+        ++receivers;
+        const char *recipient = receiver->valuestring;
+        if ((cJSON_IsTrue(sound) && !detect_signal(args, sensor, recipient, true, detections, state, budget,
+                                                  &cache, summary, trace)) ||
+            (cJSON_IsTrue(light) && !detect_signal(args, sensor, recipient, false, detections, state, budget,
+                                                  &cache, summary, trace))) {
+            valid = false;
+            break;
+        }
+    }
+    if (!receivers) append(summary, "\nNo registered receivers present in the current room.");
+    if (valid) {
+        signal = cJSON_CreateObject();
+        set(signal, "neutrino_tool", observation_event);
+        put(signal, "detections", detections);
+    } else cJSON_Delete(detections);
+    physics_cache_release(&cache);
+    cJSON_Delete(args);
+    cJSON_Delete(cast);
+    return signal;
+}
+
+static const Json *prepare_edit(const Json *op, const Json *story, int head, const Json *state,
+                                PlanBudget *budget, Text *summary, Text *trace, Json **owned)
+{
+    const char *tool = js(op, "neutrino_tool");
+    if (!strcmp(tool, observation_event)) return nullptr;
+    if (!strcmp(tool, "scene_emit")) return *owned = resolve_emission(op, story, head, state, budget, summary, trace);
+    if (!strcmp(tool, "scene_sensor") && !cJSON_IsTrue(at(op, "off"))) {
+        Json *cast = world_local_cast(story, head);
+        const bool valid = at(cast, js(op, "name")) != nullptr;
+        cJSON_Delete(cast);
+        if (!valid) append(summary, "Place the named character in the current room before attaching a sensor.");
+        if (!valid) return nullptr;
+    }
+    return op;
+}
+
 static void execute_tool(Preview *p, const Json *op, const char *json, PlanBudget *budget)
 {
     const char *tool = js(op, "neutrino_tool");
@@ -873,7 +1061,7 @@ static void execute_tool(Preview *p, const Json *op, const char *json, PlanBudge
         if (!p->tool_requests) p->tool_requests = cJSON_CreateArray();
         cJSON_AddItemToArray(p->tool_requests, cJSON_Duplicate(op, true));
     }
-    Text result = {0};
+    Text result = {0}, detail = {0};
     if (read_only_tool(tool)) {
         Json *state = preview_state(p);
         PhysicsReading reading;
@@ -896,20 +1084,26 @@ static void execute_tool(Preview *p, const Json *op, const char *json, PlanBudge
                 valid = false;
                 break;
             }
-        if (valid && budget_action(budget, op, state, &result) &&
-            stage_scenario_edit(&scratch, p->story, p->parent, state, op)) {
+        Json *owned = nullptr;
+        const Json *edit = valid && budget_action(budget, op, state, &result) ?
+            prepare_edit(op, scratch ? scratch : p->story, p->parent, state, budget, &result, &detail, &owned) : nullptr;
+        if (edit && stage_scenario_edit(&scratch, p->story, p->parent, state, edit)) {
             if (!p->tool_pending) p->tool_pending = cJSON_CreateArray();
-            cJSON_AddItemToArray(p->tool_pending, cJSON_Duplicate(op, true));
-            append(&result, "Change staged for this reply.");
+            cJSON_AddItemToArray(p->tool_pending, cJSON_Duplicate(edit, true));
+            append(&result, owned ? "\nSensory records staged for this reply." : "Change staged for this reply.");
+            if (owned) p->tool_prose_only = true;
         } else if (!result.len) append(&result, "Unknown tool, invalid arguments, or unavailable item.");
+        cJSON_Delete(owned);
         cJSON_Delete(state);
         cJSON_Delete(scratch);
     } else append(&result, "Malformed tool request. Use one JSON object or a bounded array of read-only physics objects, each with a neutrino_tool key.");
     format(&p->tool_feedback, "%d. %s\n", p->tool_rounds, str(&result));
     format(&p->tool_results, "%d. %s\n", p->tool_rounds, str(&result));
     if (*json) format(&p->tool_results, "%s\n", json);
+    append(&p->tool_results, str(&detail));
     if (p->tool_rounds >= SIM_TOOL_LIMIT) p->tool_prose_only = true;
     release(&result);
+    release(&detail);
 }
 
 static bool execute_read_only_batch(Preview *p, const Json *batch, const char *json)
@@ -963,7 +1157,7 @@ static bool execute_action_order(Preview *p, const Json *plan)
     }
     const Json *continuation = at(plan, "continue");
     int count = cJSON_GetArraySize(actions), index = 0;
-    Text results = {0}, feedback = {0}, failure = {0}, report = {0};
+    Text results = {0}, feedback = {0}, failure = {0}, report = {0}, senses = {0};
     Json *pending = cJSON_CreateArray(), *accepted = cJSON_CreateArray();
     Json *scratch = nullptr, *state = simulation_state(p->story, p->parent), *op;
     PhysicsReading readings[SIM_TOOL_LIMIT];
@@ -1007,7 +1201,7 @@ static bool execute_action_order(Preview *p, const Json *plan)
         const char *tool = js(effective, "neutrino_tool");
         if (strcmp(tool, "scene_flow") && strcmp(tool, "scene_light") && strcmp(tool, "scene_acoustic"))
             physics_cache_release(&cache);
-        Text result = {0};
+        Text result = {0}, detail = {0};
         if (!budget_action(&budget, effective, state, &failure)) valid = false;
         else if (read_only_tool(tool)) {
             PhysicsReading reading;
@@ -1023,20 +1217,33 @@ static bool execute_action_order(Preview *p, const Json *plan)
                     append(&failure,"Finish this reply before collecting more narration readings.");
                 }
             }
-        } else if (*tool && stage_scenario_edit(&scratch, p->story, p->parent, state, effective)) {
-            cJSON_AddItemToArray(pending, cJSON_Duplicate(effective, true));
-            append(&result, "Change staged for this reply.");
-        } else valid = false;
+        } else {
+            Json *owned = nullptr;
+            const Json *edit = *tool ? prepare_edit(effective, scratch ? scratch : p->story, p->parent, state,
+                                                     &budget, &result, &detail, &owned) : nullptr;
+            valid = edit && stage_scenario_edit(&scratch, p->story, p->parent, state, edit);
+            if (valid) {
+                cJSON_AddItemToArray(pending, cJSON_Duplicate(edit, true));
+                if (owned) format(&senses, "\n%s\n", str(&result));
+                else append(&result, "Change staged for this reply.");
+            } else {
+                append(&failure, str(&result));
+                append(&failure, str(&detail));
+            }
+            cJSON_Delete(owned);
+        }
         if (valid) {
             char *json = cJSON_PrintUnformatted(effective);
             if (!json) abort();
             format(&results, "%d. %s\n%s\n", p->tool_rounds + index, str(&result), json);
+            append(&results, str(&detail));
             format(&feedback, "%d. %s\n", p->tool_rounds + index, str(&result));
             valid = reserve_budget(&budget, &(PhysicsCost){0}, result.len + strlen(json), &failure);
             cJSON_free(json);
             cJSON_AddItemToArray(accepted, cJSON_Duplicate(effective, true));
         }
         release(&result);
+        release(&detail);
         cJSON_Delete(expanded);
         cJSON_Delete(conditional_op);
     }
@@ -1058,6 +1265,7 @@ static bool execute_action_order(Preview *p, const Json *plan)
         if (!typed) append(&p->tool_feedback, str(&feedback));
         else {
             append(&p->tool_feedback, str(&report));
+            append(&p->tool_feedback, str(&senses));
             append(&p->tool_results, str(&report));
         }
         p->tool_rounds += count;
@@ -1091,6 +1299,7 @@ static bool execute_action_order(Preview *p, const Json *plan)
     release(&feedback);
     release(&failure);
     release(&report);
+    release(&senses);
     return true;
 }
 
@@ -1401,7 +1610,7 @@ void simulation_command(App *a, const char *verb, const char *arg)
     }
     const char *tool = js(op, "neutrino_tool");
     Json *state = simulation_state(a->story, head);
-    Text result = {0};
+    Text result = {0}, detail = {0};
     PlanBudget budget = plan_budget(a->story);
     if (!budget_action(&budget, op, state, &result)) {
         app_info(a, "Simulation budget");
@@ -1409,12 +1618,24 @@ void simulation_command(App *a, const char *verb, const char *arg)
     } else if (*tool && run_sim_read(tool,op,a->story,head,state,&result,nullptr,nullptr)) {
         app_info(a, "Physics result");
         append(&a->info, str(&result));
-    } else if (*tool && apply_tool(a->story, head, state, op)) {
-        checkpoint_commit(a->story, head, state);
-        a->ws.dirty = true;
-        app_status(a, "Scene state saved");
-    } else app_status(a, clock ? "Use /time set DAY HH:MM, auto MINUTES|off, or advance MINUTES." :
-                      "Tool rejected. Use /sim to view tool arguments.");
+    } else {
+        Json *owned = nullptr;
+        const Json *edit = *tool ? prepare_edit(op, a->story, head, state, &budget, &result, &detail, &owned) : nullptr;
+        bool saved = edit && apply_tool(a->story, head, state, edit);
+        if (saved) {
+            checkpoint_commit(a->story, head, state);
+            a->ws.dirty = true;
+            app_status(a, "Scene state saved");
+        }
+        if (result.len) {
+            app_info(a, saved ? "Scene state saved" : "Simulation rejected");
+            append(&a->info, str(&result));
+            append(&a->info, str(&detail));
+        } else if (!saved) app_status(a, clock ? "Use /time set DAY HH:MM, auto MINUTES|off, or advance MINUTES." :
+                                      "Tool rejected. Use /sim to view tool arguments.");
+        cJSON_Delete(owned);
+    }
+    release(&detail);
     release(&result);
     cJSON_Delete(state);
     cJSON_Delete(op);

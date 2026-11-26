@@ -12,6 +12,8 @@ typedef struct {
     double work, steps, seconds, rays, cells, nodes, ram, mapped;
 } PhysicsCost;
 PhysicsCost physics_cost(const Json *op, const Json *settings);
+const Json *physics_sensors(const Json *settings);
+bool physics_emitter(const Json *settings, const Json *args, double source[3]);
 PhysicsCost softbody_cost(const Json *args);
 PhysicsCost rigid_cost(const Json *op, const Json *room);
 typedef struct {

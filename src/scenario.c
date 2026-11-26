@@ -69,7 +69,7 @@ bool simulation_plan_parse(const Json *plan, SimulationPlan *parsed)
 typedef enum { ENTITY_EXISTS, ENTITY_OVERLAPS, ENTITY_MOVED, ENTITY_ROTATED, ENTITY_CONTACTS,
                ENTITY_FRACTURED, FLUID_RELEASED, FLUID_DEPOSITED, FLUID_SURFACE, FLUID_POOL, FLUID_DEPTH,
                FLUID_DRAINED, FLUID_LEVEL, FLOW_TRACER, FLOW_POROUS_SPEED, MASS_TRANSFERRED, MASS_FINAL,
-               SIGNAL_REACHES, SIGNAL_ARRIVES, SIGNAL_POWER } Predicate;
+               SIGNAL_REACHES, SIGNAL_ARRIVES, SIGNAL_POWER, SIGNAL_DIRECT_BLOCKED, SIGNAL_RECURSIVE } Predicate;
 static const struct { const char *name; Predicate kind; } predicates[] = {
     {"entity.exists", ENTITY_EXISTS}, {"entity.overlaps", ENTITY_OVERLAPS},
     {"entity.moved", ENTITY_MOVED}, {"entity.contacts", ENTITY_CONTACTS},
@@ -82,7 +82,8 @@ static const struct { const char *name; Predicate kind; } predicates[] = {
     {"flow.porous_speed_exceeds", FLOW_POROUS_SPEED},
     {"mass_transfer.transferred_exceeds", MASS_TRANSFERRED}, {"mass_transfer.final_exceeds", MASS_FINAL},
     {"signal.reaches_receiver", SIGNAL_REACHES}, {"signal.arrival_before", SIGNAL_ARRIVES},
-    {"signal.power_exceeds", SIGNAL_POWER}
+    {"signal.power_exceeds", SIGNAL_POWER}, {"signal.direct_blocked", SIGNAL_DIRECT_BLOCKED},
+    {"signal.recursive_reaches_receiver", SIGNAL_RECURSIVE}
 };
 
 static void field_evidence(Json *evidence, const Json *body, const char *key)
@@ -177,6 +178,19 @@ static const char *evaluate(const Json *query, const Json *settings, const Physi
     const PhysicsReading *reading = &readings[(int)step - 1];
     integer(evidence, "step", (int)step);
     if (reading->unavailable) return "SIMULATION_FAILED";
+    if ((reading->kind == READING_ACOUSTIC || reading->kind == READING_OPTICAL) &&
+        kind == SIGNAL_DIRECT_BLOCKED) {
+        const bool blocked = reading->kind == READING_OPTICAL ? reading->optical_direct_blocked :
+            reading->arrivals && reading->arrival[0].blocked && !reading->arrival[0].faded;
+        return blocked ? "TRUE" : "FALSE";
+    }
+    if (kind == SIGNAL_RECURSIVE) {
+        if (reading->kind != READING_ACOUSTIC && reading->kind != READING_OPTICAL) return "INSUFFICIENT_DATA";
+        integer(evidence, "recursive_paths", reading->recursive_arrivals);
+        if (reading->recursive_arrivals) return "TRUE";
+        return reading->recursive_limited ? "INSUFFICIENT_DATA" : "FALSE";
+    }
+    if (reading->recursive_limited) return "INSUFFICIENT_DATA";
     double value, threshold;
     const char *unit;
     if (kind == SIGNAL_POWER) {

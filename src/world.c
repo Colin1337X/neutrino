@@ -330,6 +330,23 @@ const char *world_character_room(const Json *story, int head, const char *name, 
     return str(out);
 }
 
+Json *world_local_cast(const Json *story, int head)
+{
+    Json *state = world_state(story, head), *cast = cJSON_CreateObject();
+    const char *here = js(state, "room");
+    const char *const groups[] = {"npc", "party"};
+    for (size_t group = 0; *here && group < sizeof groups / sizeof *groups; ++group) {
+        const Json *member;
+        cJSON_ArrayForEach(member, at(state, groups[group])) {
+            const char *name = js(member, "name");
+            const char *room = group ? actor_room(state, name) : js(member, "room");
+            if (equal_name(room, here)) set(cast, name, name);
+        }
+    }
+    cJSON_Delete(state);
+    return cast;
+}
+
 void world_active_character(const Json *story, int head, Text *out)
 {
     Json *state = world_state(story,head);
@@ -556,7 +573,10 @@ void world_character_messages(const Preview *p, Json *messages)
     format(&rules, "Speak as %s. Give a short in-character reply based on this conversation and the "
         "information shared with you below. Treat it as potentially mistaken or outdated. Express "
         "uncertainty when needed. Return dialogue or a visible reaction in prose. No tools are available.\n", speaker);
+    append(&rules, "For recent events, report only the sensations listed as your observations. "
+                   "If none are listed, say you noticed nothing about the event. Do not guess what made a signal.\n");
     if (p->completion_retry) append(&rules, "Reply in one complete sentence and end with punctuation.\n");
+    simulation_observations(p->story, p->parent, speaker, &rules, false);
 
     const Json *grants = at(p->story, "characterKnowledge");
     const Json *node = path->child, *grant;
@@ -831,7 +851,14 @@ static void knowledge_command(App *a, char *argument)
 {
     char *separator = strchr(argument, '|');
     if (!separator) {
-        app_status(a, "Use /knowledge CHARACTER | FACT to share a belief with that character.");
+        const char *name = trim(argument);
+        if (!*name) {
+            app_status(a, "Use /knowledge CHARACTER to see observations, or /knowledge CHARACTER | FACT to share a belief.");
+            return;
+        }
+        app_info(a, "Sensory observations");
+        simulation_observations(a->story, number(a->story, "head"), name, &a->info, true);
+        if (!a->info.len) append(&a->info, "No sensory observations on this branch.");
         return;
     }
     *separator++ = 0;

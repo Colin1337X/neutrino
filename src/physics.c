@@ -130,6 +130,7 @@ static bool contained_box(const Box *outer, const Box *inner)
         if (inner->lo[axis] < outer->lo[axis] || inner->hi[axis] > outer->hi[axis]) return false;
     return true;
 }
+static bool strictly_inside(const Box *room, const double position[3]);
 static bool room_flow(const Json *args, const Box *room, FlowConfig *config)
 {
     double length[3];
@@ -170,6 +171,11 @@ static Json *active_room(const Json *settings)
 {
     const char *name = js(settings,"active3d");
     return *name ? scene_object(at(settings,"rooms3d"),name) : at(settings,"room3d");
+}
+
+const Json *physics_sensors(const Json *settings)
+{
+    return at(active_room(settings), "sensors");
 }
 
 static bool scene_name(const char *name)
@@ -272,6 +278,10 @@ bool physics_scene_edit(Json *settings, const Json *op)
         Json *item;
         cJSON_ArrayForEach(item, objects)
             if (!read_box(item, &shape) || !contained_box(&bounds, &shape)) return false;
+        cJSON_ArrayForEach(item, at(room, "sensors")) {
+            double position[3];
+            if (!physics_vector(item, "listener", position) || !strictly_inside(&bounds, position)) return false;
+        }
         FlowConfig config;
         if (at(room, "medium") && !room_flow(at(room, "medium"), &bounds, &config)) return false;
         if (!room) {
@@ -289,6 +299,31 @@ bool physics_scene_edit(Json *settings, const Json *op)
         return true;
     }
     if (!room || !read_box(room, &bounds)) return false;
+    if (!strcmp(tool, "scene_sensor")) {
+        const char *name = js(op, "name");
+        if (!scene_name(name) || (at(op, "off") && !cJSON_IsBool(at(op, "off")))) return false;
+        Json *sensors = at(room, "sensors");
+        Json *sensor = scene_object(sensors, name);
+        if (cJSON_IsTrue(at(op, "off"))) {
+            if (sensor) cJSON_Delete(cJSON_DetachItemViaPointer(sensors, sensor));
+            return true;
+        }
+        double position[3], hearing, vision;
+        if (!physics_vector(op, "listener", position) || !strictly_inside(&bounds, position) ||
+            !physics_optional(op, "min_level_db", -300, 120, -60, &hearing) ||
+            !physics_optional(op, "min_power", 1e-30, 1e12, 1e-5, &vision)) return false;
+        if (!sensor) {
+            if (cJSON_GetArraySize(sensors) >= 16) return false;
+            if (!sensors) put(room, "sensors", sensors = cJSON_CreateArray());
+            sensor = cJSON_CreateObject();
+            set(sensor, "name", name);
+            cJSON_AddItemToArray(sensors, sensor);
+        }
+        put(sensor, "listener", cJSON_CreateDoubleArray(position, 3));
+        put(sensor, "min_level_db", cJSON_CreateNumber(hearing));
+        put(sensor, "min_power", cJSON_CreateNumber(vision));
+        return true;
+    }
     if (!strcmp(tool, "scene_runoff")) return runoff_configure(room, &bounds, op);
     if (!strcmp(tool, "scene_step"))
         return rigid_edit(room, nullptr, at(settings, "materials3d"), &bounds, op, setting(settings, GRAVITY));
@@ -734,6 +769,164 @@ static bool attenuate_path(const AcousticObject *objects, int count, int reflect
     }
     return true;
 }
+
+enum { MAX_BOUNCES = 4, REFLECTION_CANDIDATE_LIMIT = 8192, REFLECTION_TRACE_LIMIT = 8 };
+static const char *const face_name[] = {"X-min", "X-max", "Y-min", "Y-max", "Z-min", "Z-max"};
+
+typedef struct {
+    const Box *box;
+    double amplitude;
+    int face, object;
+} Reflector;
+
+typedef struct {
+    const AcousticObject *objects;
+    const Box *room;
+    const FlowField *field;
+    const double *listener;
+    PhysicsReading *reading;
+    Text *out;
+    Reflector faces[6 * (1 + ACOUSTIC_BLOCKERS)];
+    const Reflector *sequence[MAX_BOUNCES];
+    double images[MAX_BOUNCES + 1][3];
+    double air_loss, field_loss, cutoff_db, speed;
+    int count, objects_count, max_depth, tested, received, faded, retained_start;
+    bool optical, limited;
+} ReflectionSearch;
+
+static bool reflection_depth(const Json *args, int *depth)
+{
+    double value;
+    if (!physics_optional(args, "max_bounces", 0, MAX_BOUNCES, 1, &value) || floor(value) != value)
+        return false;
+    *depth = (int)value;
+    return true;
+}
+
+static void record_light(PhysicsReading *reading, double power, double delay, int bounces)
+{
+    if (!reading) return;
+    if (!reading->optical_power || delay < reading->optical_first_ns) {
+        reading->optical_first_ns = delay;
+        reading->optical_first_power = power;
+        reading->optical_first_bounces = bounces;
+    }
+    reading->optical_power = fmax(reading->optical_power, power);
+}
+
+static void record_echo(ReflectionSearch *search, double delay, double level, int depth)
+{
+    PhysicsReading *r = search->reading;
+    if (!r) return;
+    int slot = r->arrivals;
+    if (slot == search->retained_start + PHYSICS_RECURSIVE_ARRIVALS) {
+        slot = search->retained_start;
+        for (int i = slot + 1; i < r->arrivals; ++i)
+            if (r->arrival[i].delay_ms > r->arrival[slot].delay_ms) slot = i;
+        if (delay >= r->arrival[slot].delay_ms) return;
+    } else ++r->arrivals;
+    r->arrival[slot].bounces = depth;
+    r->arrival[slot].delay_ms = delay;
+    r->arrival[slot].level_db = level;
+}
+
+static double plane(const Reflector *face)
+{
+    int axis = face->face / 2;
+    return face->face % 2 ? face->box->hi[axis] : face->box->lo[axis];
+}
+
+static void receive_reflection(ReflectionSearch *search, int depth, double reflection_db)
+{
+    double points[MAX_BOUNCES + 2][3];
+    memcpy(points[0], search->images[0], sizeof points[0]);
+    memcpy(points[depth + 1], search->listener, sizeof points[0]);
+    for (int i = depth; i > 0; --i) {
+        const Reflector *face = search->sequence[i - 1];
+        int axis = face->face / 2;
+        const double wall = plane(face), *after = points[i + 1], *image = search->images[i];
+        const int side = (face->face % 2 ? 1 : -1) * (face->object < 0 ? -1 : 1);
+        const double from_wall = after[axis] - wall, image_offset = image[axis] - wall;
+        if (side * from_wall <= 1e-9 || side * image_offset >= -1e-9) return;
+        const double fraction = from_wall / (from_wall - image_offset);
+        for (int k = 0; k < 3; ++k) {
+            points[i][k] = k == axis ? wall : after[k] + fraction * (image[k] - after[k]);
+            if (k != axis && (points[i][k] <= face->box->lo[k] + 1e-9 ||
+                              points[i][k] >= face->box->hi[k] - 1e-9)) return;
+        }
+    }
+    double distance = 0;
+    for (int i = 0; i <= depth; ++i) {
+        for (int j = 0; j < search->objects_count; ++j) {
+            double enter, exit;
+            if (!search->objects[j].has_material &&
+                segment_interval(&search->objects[j].box, points[i], points[i+1], &enter, &exit)) return;
+        }
+        distance += separation(points[i], points[i + 1]);
+    }
+    double budget = reflection_db - 20 * log10(distance) - search->cutoff_db;
+    int crossings = 0;
+    for (int i = 0; budget > 0 && i <= depth; ++i)
+        if (!attenuate_path(search->objects, search->objects_count, -1, points[i], points[i + 1],
+                            search->air_loss, search->room, search->field, search->field_loss, &budget, &crossings))
+            break;
+    if (budget <= 0) { ++search->faded; return; }
+    const double level = budget + search->cutoff_db;
+    const double delay = distance / search->speed;
+    if (search->optical) record_light(search->reading, pow(10, level / 10), delay, depth);
+    else record_echo(search, delay, level, depth);
+    if (++search->received > REFLECTION_TRACE_LIMIT) return;
+    format(search->out, "\n%d-bounce %s [", depth, search->optical ? "reflection" : "echo");
+    for (int i = 0; i < depth; ++i) {
+        const Reflector *face = search->sequence[i];
+        if (i) append(search->out, " → ");
+        if (face->object >= 0) format(search->out, "object %d ", face->object + 1);
+        append(search->out, face_name[face->face]);
+    }
+    format(search->out, "] %.5g m · %.5g %s · %+.4g dB · %d material traversals.",
+           distance, delay, search->optical ? "ns" : "ms", level, crossings);
+}
+
+static void find_reflections(ReflectionSearch *search, int depth, int target, double reflection_db)
+{
+    if (depth == target) {
+        if (search->tested == REFLECTION_CANDIDATE_LIMIT) { search->limited = true; return; }
+        ++search->tested;
+        receive_reflection(search, depth, reflection_db);
+        return;
+    }
+    for (int i = 0; i < search->count && !search->limited; ++i) {
+        const Reflector *face = &search->faces[i];
+        if (depth && search->sequence[depth - 1] == face) continue;
+        search->sequence[depth] = face;
+        memcpy(search->images[depth + 1], search->images[depth], sizeof search->images[0]);
+        const int axis = face->face / 2;
+        search->images[depth + 1][axis] = 2 * plane(face) - search->images[depth][axis];
+        find_reflections(search, depth + 1, target, reflection_db + 20 * log10(face->amplitude));
+    }
+}
+
+static void recursive_reflections(ReflectionSearch *search, const double source[3], double wall)
+{
+    memcpy(search->images[0], source, sizeof search->images[0]);
+    if (search->reading) search->retained_start = search->reading->arrivals;
+    for (int i = -1; i < search->objects_count; ++i) {
+        const double amplitude = i < 0 ? wall : search->objects[i].reflection;
+        if (amplitude <= 0) continue;
+        for (int face = 0; face < 6; ++face)
+            search->faces[search->count++] = (Reflector){i < 0 ? search->room : &search->objects[i].box,
+                                                       amplitude, face, i};
+    }
+    for (int target = 2; target <= search->max_depth && !search->limited; ++target)
+        find_reflections(search, 0, target, 0);
+    if (search->reading) {
+        search->reading->recursive_arrivals = search->received;
+        search->reading->recursive_limited = search->limited;
+    }
+    format(search->out, "\nRecursive CPU paths (depth ≤ %d): %d candidates, %d received, %d stopped at cutoff%s.",
+           search->max_depth, search->tested, search->received, search->faded,
+           search->limited ? "; candidate budget reached" : "");
+}
 static const char *opaque_visibility(const AcousticObject *blockers, int obstacles, const AcousticPath *paths,
                                      int path_count, const Box *room, const double source[3], const double listener[3],
                                      Backend selected, bool blocked[PHYSICS_ACOUSTIC_PATHS], bool *tested)
@@ -815,7 +1008,9 @@ static bool acoustic(const Json *args, const Json *settings, const FlowField *fi
     double source[3], listener[3], gas_loss = 0, floor_db = -120;
     double speed = sqrt(1.4 * 287.05 * setting(settings, AMBIENT_KELVIN));
     const double field_loss = field ? field->config.sound_loss : 0;
-    bool material_mode = medium || at(args, "min_level_db") || field_loss;
+    int depth;
+    if (!reflection_depth(args, &depth)) return false;
+    bool material_mode = medium || at(args, "min_level_db") || field_loss || depth > 1;
     Backend selected = backend(args);
     if (selected == BACKEND_INVALID || obstacles > ACOUSTIC_BLOCKERS ||
         (boxes && !cJSON_IsArray(boxes)) || !read_box(args, &room) ||
@@ -840,7 +1035,7 @@ static bool acoustic(const Json *args, const Json *settings, const FlowField *fi
     const double reflection = setting(settings, WALL_REFLECTIVITY);
     AcousticPath paths[PHYSICS_ACOUSTIC_PATHS] = {{.reflection = 1, .object = -1}};
     int path_count = 1;
-    for (int obj = -1; obj < obstacles; ++obj) {
+    for (int obj = -1; depth && obj < obstacles; ++obj) {
         double ratio = obj < 0 ? reflection : blockers[obj].reflection;
         if (ratio == 0) continue;
         const Box *box = obj < 0 ? &room : &blockers[obj].box;
@@ -888,6 +1083,7 @@ static bool acoustic(const Json *args, const Json *settings, const FlowField *fi
             reading->arrivals++;
             reading->arrival[path].blocked = blocked[path] || faded;
             reading->arrival[path].faded = faded;
+            reading->arrival[path].bounces = path != 0;
             reading->arrival[path].delay_ms = delay;
             reading->arrival[path].level_db = level;
         }
@@ -901,17 +1097,27 @@ static bool acoustic(const Json *args, const Json *settings, const FlowField *fi
             if (material_mode) format(out, " · audibility %.4g dB · %d material traversals", budget, transmissions);
         }
     }
+    if (depth > 1) {
+        ReflectionSearch search = {.objects = blockers, .room = &room, .field = field,
+            .listener = listener, .reading = reading, .out = out, .air_loss = gas_loss,
+            .field_loss = field_loss, .cutoff_db = floor_db, .speed = speed / 1000,
+            .objects_count = obstacles, .max_depth = depth};
+        recursive_reflections(&search, source, reflection);
+    }
     return true;
 }
 static bool light(const Json *args, const Json *scene, const Box *room, const FlowField *field, double air_loss,
                   Text *out, PhysicsReading *reading)
 {
     const Backend selected = backend(args);
-    double source[3], listener[3], wall;
+    double source[3], listener[3], wall, min_power;
+    int depth;
     if (selected == BACKEND_INVALID || !physics_vector(args,"source",source) ||
         !physics_vector(args,"listener",listener) || !strictly_inside(room,source) ||
         !strictly_inside(room,listener) || separation(source,listener) < 1e-6 ||
-        !physics_optional(args,"wall_reflectivity",0,1,0,&wall)) return false;
+        !physics_optional(args,"wall_reflectivity",0,1,0,&wall) ||
+        !physics_optional(args,"min_power",1e-30,1e12,1e-30,&min_power) ||
+        !reflection_depth(args, &depth)) return false;
     AcousticObject optics[ACOUSTIC_BLOCKERS] = {0};
     const char *names[ACOUSTIC_BLOCKERS];
     const char *const faces[] = {"X-min","X-max","Y-min","Y-max","Z-min","Z-max"};
@@ -932,7 +1138,7 @@ static bool light(const Json *args, const Json *scene, const Box *room, const Fl
     }
     AcousticPath paths[PHYSICS_ACOUSTIC_PATHS] = {{.reflection=1,.object=-1}};
     int count = 1, room_paths = 1;
-    for (int object = -1; object < objects; ++object) {
+    for (int object = -1; depth && object < objects; ++object) {
         const Box *box = object < 0 ? room : &optics[object].box;
         double reflectivity = object < 0 ? sqrt(wall) : optics[object].reflection;
         if (reflectivity == 0) continue;
@@ -951,12 +1157,16 @@ static bool light(const Json *args, const Json *scene, const Box *room, const Fl
         return true;
     }
     format(out,"3D geometric light (%s direct/room visibility", tested ? engine : "no opaque blockers");
-    if (reading) reading->kind = READING_OPTICAL;
+    if (reading) {
+        reading->kind = READING_OPTICAL;
+        reading->optical_direct_blocked = blocked[0];
+    }
     if (count > room_paths) append(out,", CPU object reflections");
     append(out,"). Relative power at 1 m.");
     const double field_loss = field ? field->config.light_loss : 0;
     if (field_loss) format(out, " Gas extinction: %s.", field->method);
     if (field && field->fallback) format(out, " Fallback: %s.", field->fallback);
+    const double floor_db = 10 * log10(min_power);
     for (int i = 0; i < count; ++i) {
         const AcousticPath *path = &paths[i];
         const double *end = i ? path->bounce : listener;
@@ -978,8 +1188,7 @@ static bool light(const Json *args, const Json *scene, const Box *room, const Fl
             continue;
         }
         const double path_length = separation(source,end) + (i ? separation(end,listener) : 0);
-        const double floor_db = -300;
-        double budget = 20*log10(path->reflection/path_length) - floor_db;
+        double budget = 20*(log10(path->reflection) - log10(path_length)) - floor_db;
         int crossings = 0;
         if (budget <= 0 || !attenuate_path(optics,objects,path->object,source,end,air_loss,room,field,field_loss,&budget,&crossings) ||
             (i && !attenuate_path(optics,objects,path->object,end,listener,air_loss,room,field,field_loss,&budget,&crossings))) {
@@ -988,12 +1197,15 @@ static bool light(const Json *args, const Json *scene, const Box *room, const Fl
         }
         const double level = floor_db + budget;
         double power = pow(10, level / 10), delay = path_length / 0.299792458;
-        if (reading) {
-            if (!reading->optical_power || delay < reading->optical_first_ns) reading->optical_first_ns = delay;
-            reading->optical_power = fmax(reading->optical_power, power);
-        }
+        record_light(reading, power, delay, i != 0);
         format(out," %.7g m · %.7g ns · %+.7g dB · relative power %.7g.",
                path_length,delay,level,power);
+    }
+    if (depth > 1) {
+        ReflectionSearch search = {.objects = optics, .room = room, .field = field, .listener = listener,
+            .reading = reading, .out = out, .air_loss = air_loss, .field_loss = field_loss, .cutoff_db = floor_db,
+            .speed = 0.299792458, .objects_count = objects, .max_depth = depth, .optical = true};
+        recursive_reflections(&search, source, sqrt(wall));
     }
     return true;
 }
@@ -1007,6 +1219,14 @@ static bool endpoint(const Json *args, const Json *objects, const char *id_key, 
         !read_box(scene_object(objects, js(args, id_key)), &box)) return false;
     for (int axis = 0; axis < 3; ++axis) center[axis] = (box.lo[axis] + box.hi[axis]) / 2;
     return true;
+}
+
+bool physics_emitter(const Json *settings, const Json *args, double source[3])
+{
+    const Json *room = active_room(settings);
+    Box bounds;
+    return read_box(room, &bounds) && endpoint(args, at(room, "objects"), "source_entity", "source", source) &&
+        strictly_inside(&bounds, source);
 }
 
 void physics_cache_release(PhysicsCache *cache)
@@ -1064,6 +1284,7 @@ static bool scene_query(const char *tool, const Json *args, const Json *settings
         put(page,"max",cJSON_Duplicate(at(room,"max"),true));
         if (at(room,"medium")) put(page,"medium",cJSON_Duplicate(at(room,"medium"),true));
         if (*js(room, "air")) set(page, "air", js(room, "air"));
+        if (at(room, "sensors")) put(page, "sensors", cJSON_Duplicate(at(room, "sensors"), true));
         put(page,"objects",entries);
         int index = 0, shown = 0;
         cJSON_ArrayForEach(item,objects) {
@@ -1290,9 +1511,34 @@ PhysicsCost physics_cost(const Json *op, const Json *settings)
         cost.rays = !strcmp(tool, "ray") ? 1 : cJSON_GetArraySize(at(op, "rays"));
         cost.work += cost.rays;
     } else if (acoustic_query || optical_query || !strcmp(tool, "acoustic")) {
-        const double blockers = !strcmp(tool, "acoustic") ? cJSON_GetArraySize(at(op, "blockers")) : shapes;
+        const bool standalone = !strcmp(tool, "acoustic");
+        const Json *objects = at(standalone ? op : room, standalone ? "blockers" : "objects");
+        const double blockers = cJSON_GetArraySize(objects);
         cost.rays = ACOUSTIC_ROOM_PATHS + 6 * fmin(ACOUSTIC_BLOCKERS, blockers);
         cost.work += cost.rays * (1 + 2 * blockers);
+        int depth;
+        if (reflection_depth(op, &depth) && depth > 1) {
+            double wall = setting(settings, WALL_REFLECTIVITY);
+            if (optical_query) physics_optional(op, "wall_reflectivity", 0, 1, 0, &wall);
+            int reflectors = wall > 0;
+            const char *channel = optical_query ? "optical" : "material";
+            const Json *object;
+            cJSON_ArrayForEach(object, objects) {
+                const Json *profile = at(at(settings, "materials3d"), js(object, "material_id"));
+                const Json *properties = at(profile ? profile : object, channel);
+                double ratio;
+                if (physics_scalar(properties, "reflectivity", 0, 1, &ratio) && ratio > 0) ++reflectors;
+            }
+            double candidates = 0, combinations = 1;
+            const double surfaces = 6 * reflectors;
+            for (int i = 1; i <= depth; ++i) {
+                combinations *= i == 1 ? surfaces : fmax(0, surfaces - 1);
+                if (i > 1) candidates += combinations;
+            }
+            candidates = fmin(candidates, REFLECTION_CANDIDATE_LIMIT);
+            cost.rays += candidates;
+            cost.work += candidates * (depth + 1) * (1 + 2 * blockers);
+        }
     }
     return cost;
 }
