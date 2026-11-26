@@ -718,20 +718,32 @@ static bool sensory_branch_state(void)
     return ok;
 }
 
-static int propagation_timing(void)
+static int propagation_timing(bool dense)
 {
     Json *settings = cJSON_CreateObject();
     Json *args = cJSON_Parse("{\"source\":[2,2,2],\"listener\":[8,2,2],\"wall_reflectivity\":0.8,\"backend\":\"cpu\"}");
     bool valid = rigid_actions(settings, relay_geometry);
     Text out = {0};
+    if (dense) {
+        valid &= rigid_actions(settings, "[{\"neutrino_tool\":\"scene_material\",\"name\":\"reflector\","
+            "\"acoustic\":{\"reflectivity\":0.9,\"loss_db_per_m\":0},\"optical\":{\"reflectivity\":0.9}}]");
+        for (int i = 0; valid && i < 12; ++i) {
+            clear(&out);
+            const double x = 1 + 1.25*(i%6), y = .25 + 3*(i/6);
+            format(&out, "[{\"neutrino_tool\":\"scene_place\",\"name\":\"reflector%d\",\"kind\":\"object\","
+                "\"material_id\":\"reflector\",\"min\":[%.2f,%.2f,0],\"max\":[%.2f,%.2f,0.5]}]",
+                i,x,y,x+.5,y+.5);
+            valid = rigid_actions(settings, str(&out));
+        }
+    }
     puts("signal,depth,repetition,batches,mean_us,received_recursive_paths");
     for (int optical = 0; valid && optical < 2; ++optical) {
         const char *tool = optical ? "scene_light" : "scene_acoustic";
-        for (int depth = 0; valid && depth <= 4; ++depth) {
+        for (int depth = dense ? 4 : 0; valid && depth <= 4; ++depth) {
             integer(args, "max_bounces", depth);
             for (int rep = 0; valid && rep <= 5; ++rep) {
                 PhysicsReading reading;
-                const int batches = depth < 2 ? 4000 : 800;
+                const int batches = dense ? 120 : depth < 2 ? 4000 : 800;
                 const clock_t start = clock();
                 for (int j = 0; valid && j < batches; ++j) {
                     clear(&out);
@@ -2088,6 +2100,8 @@ static int parallel_fixture(void)
     ok &= rigid_actions(settings, "[{\"neutrino_tool\":\"scene_room\",\"min\":[0,0,0],\"max\":[12,8,4]},"
         "{\"neutrino_tool\":\"scene_runoff\",\"min_xy\":[0,0],\"max_xy\":[12,8],\"cells\":[64,48]},"
         "{\"neutrino_tool\":\"scene_material\",\"name\":\"ceramic\",\"mechanical\":{\"fracture_j\":5}},"
+        "{\"neutrino_tool\":\"scene_material\",\"name\":\"reflector\","
+        "\"acoustic\":{\"reflectivity\":0.9,\"loss_db_per_m\":0},\"optical\":{\"reflectivity\":0.9}},"
         "{\"neutrino_tool\":\"scene_place\",\"name\":\"jug\",\"kind\":\"object\","
         "\"min\":[1,1,1],\"max\":[1.5,1.5,1.5],\"material_id\":\"ceramic\"},"
         "{\"neutrino_tool\":\"scene_body\",\"name\":\"jug\",\"mass_kg\":2,\"liquid_l\":1},"
@@ -2099,7 +2113,7 @@ static int parallel_fixture(void)
         const int x = 2 + i%10, y = 2 + i/10;
         clear(&edit);
         format(&edit, "[{\"neutrino_tool\":\"scene_place\",\"name\":\"prop%d\",\"kind\":\"object\","
-               "\"min\":[%d,%d,0],\"max\":[%.1f,%.1f,0.5]}]",i,x,y,x+.5,y+.5);
+               "\"material_id\":\"reflector\",\"min\":[%d,%d,0],\"max\":[%.1f,%.1f,0.5]}]",i,x,y,x+.5,y+.5);
         ok = rigid_actions(settings, str(&edit));
     }
     ok &= rigid_actions(settings, "[{\"neutrino_tool\":\"scene_step\",\"seconds\":0.7}]");
@@ -2115,11 +2129,14 @@ static int parallel_fixture(void)
     clear(&result);
     cJSON_Delete(rays);
     Json *sound = cJSON_Parse("{\"backend\":\"cpu\",\"source\":[1,1,3],\"listener\":[4,3,2],"
-                              "\"max_bounces\":4,\"include\":[\"jug\",\"cup\",\"prop0\",\"prop12\"]}");
+                              "\"max_bounces\":4,\"include\":[\"prop0\",\"prop10\",\"prop12\",\"prop13\","
+                              "\"prop14\",\"prop15\",\"prop20\",\"prop21\",\"prop22\",\"prop23\"]}");
     ok &= physics_run("scene_acoustic",sound,settings,&result) &&
-          strstr(str(&result), "Recursive CPU paths");
+          strstr(str(&result), "8192 candidates");
     puts(str(&result));
     clear(&result);
+    ok &= physics_run("scene_light",sound,settings,&result) && strstr(str(&result), "8192 candidates");
+    puts(str(&result));
     cJSON_Delete(sound);
     cJSON_Delete(settings);
 
@@ -2143,7 +2160,8 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "--ventilation-timing")) return ventilation_timing();
     if (argc > 1 && !strcmp(argv[1], "--pressure-timing")) return pressure_timing();
     if (argc > 1 && !strcmp(argv[1], "--parallel-fixture")) return parallel_fixture();
-    if (argc > 1 && !strcmp(argv[1], "--propagation-timing")) return propagation_timing();
+    if (argc > 1 && !strcmp(argv[1], "--propagation-timing"))
+        return propagation_timing(argc > 2 && !strcmp(argv[2], "dense"));
     if (argc > 1 && !strcmp(argv[1], "--cfd-timing")) return cfd_timing();
     const struct {
         const char *name, *json, *expected;

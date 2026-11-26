@@ -595,15 +595,7 @@ static RtRay rt_ray(const double origin[3], const double direction[3], const dou
     return result;
 }
 #endif
-typedef struct { const float *rows; float *hits; } CpuRayBatch;
-
-static void trace_cpu_range(void *context, size_t first, size_t end)
-{
-    const CpuRayBatch *batch = context;
-    for (size_t i = first; i < end; ++i) batch->hits[i] = trace_cpu(batch->rows + i * RAY_VALUES);
-}
-
-static const char *trace_batch(Backend selected, const float *rays, size_t count, float *hits, Parallel *workers)
+static const char *trace_batch(Backend selected, const float *rays, size_t count, float *hits)
 {
     if (!count) return "CPU";
 #ifdef NEUTRINO_VULKAN
@@ -616,8 +608,7 @@ static const char *trace_batch(Backend selected, const float *rays, size_t count
     if ((selected == BACKEND_GPU || (selected == BACKEND_AUTO && count >= 32)) &&
         ray_gpu(rays, count, hits)) return "OpenCL GPU";
     if (selected == BACKEND_GPU && count) return nullptr;
-    CpuRayBatch batch = {rays, hits};
-    parallel_run(workers, count, trace_cpu_range, &batch);
+    for (size_t i = 0; i < count; ++i) hits[i] = trace_cpu(rays + i * RAY_VALUES);
     return "CPU";
 }
 
@@ -664,12 +655,7 @@ static bool rays(const Json *args, Text *out, PhysicsReading *reading)
         }
     } else
 #endif
-    {
-        Parallel *workers = selected == BACKEND_CPU || selected == BACKEND_AUTO ?
-                            parallel_open((size_t)count, 1024) : nullptr;
-        engine = trace_batch(selected, rows, (size_t)count, hits, workers);
-        parallel_close(workers);
-    }
+        engine = trace_batch(selected, rows, (size_t)count, hits);
     if (!engine) {
         if (reading) reading->unavailable = true;
         append(out, backend_unavailable(selected));
@@ -693,6 +679,35 @@ static bool strictly_inside(const Box *room, const double position[3])
     for (int k = 0; k < 3; ++k)
         if (position[k] <= room->lo[k] || position[k] >= room->hi[k]) return false;
     return true;
+}
+
+typedef struct {
+    const float (*boxes)[6];
+    const double (*vectors)[3];
+    float *nearest;
+    unsigned int *winner;
+    int count;
+} SceneRayBatch;
+
+static void trace_scene_range(void *context, size_t first, size_t end)
+{
+    const SceneRayBatch *batch = context;
+    for (size_t i = first; i < end; ++i) {
+        float nearest = batch->nearest[i];
+        unsigned int winner = 0;
+        const double *direction = batch->vectors[i];
+        float row[RAY_VALUES] = {0,0,0,(float)direction[0],(float)direction[1],(float)direction[2]};
+        for (int object = 0; object < batch->count; ++object) {
+            memcpy(row+6,batch->boxes[object],sizeof batch->boxes[object]);
+            float distance = trace_cpu(row);
+            if (distance >= 0 && (distance < nearest || (!winner && distance == nearest))) {
+                nearest = distance;
+                winner = (unsigned int)object + 1;
+            }
+        }
+        batch->nearest[i] = nearest;
+        batch->winner[i] = winner;
+    }
 }
 
 static bool scene_rays(const Json *args, const Json *scene, const Box *bounds,
@@ -737,14 +752,42 @@ static bool scene_rays(const Json *args, const Json *scene, const Box *bounds,
     const Json *objects = at(scene,"objects");
     const char *engine = nullptr;
     unsigned int base = 1;
-    Parallel *workers = objects && objects->child && (selected == BACKEND_CPU || selected == BACKEND_AUTO) ?
-                        parallel_open((size_t)count, 1024) : nullptr;
+    const int box_count = cJSON_GetArraySize(objects);
+    const Json *first_object = objects ? objects->child : nullptr;
+    if (selected == BACKEND_CPU && box_count > 0) {
+        const size_t minimum = (32768 + (size_t)box_count - 1) / (size_t)box_count;
+        Parallel *workers = parallel_open_batch((size_t)count, minimum > 256 ? minimum : 256);
+        if (workers) {
+            float (*boxes)[6] = calloc((size_t)box_count, sizeof *boxes);
+            if (boxes) {
+                int i = 0;
+                for (const Json *object = first_object; object; object = object->next, ++i) {
+                    Box box;
+                    if (!read_box(object,&box)) {
+                        parallel_close(workers);
+                        free(boxes);
+                        return false;
+                    }
+                    for (int axis = 0; axis < 3; ++axis) {
+                        boxes[i][axis] = (float)(box.lo[axis]-origin[axis]);
+                        boxes[i][axis+3] = (float)(box.hi[axis]-origin[axis]);
+                    }
+                }
+                SceneRayBatch batch = {boxes,vectors,nearest,winner,box_count};
+                parallel_run(workers,(size_t)count,trace_scene_range,&batch);
+                free(boxes);
+                engine = "CPU";
+                first_object = nullptr;
+            }
+            parallel_close(workers);
+        }
+    }
 #ifdef NEUTRINO_VULKAN_RT
     RtRay rt_rays[RAY_BATCH_MAX];
     if (selected == BACKEND_RT)
         for (int i=0; i<count; ++i) rt_rays[i] = rt_ray(origin,vectors[i],bounds->lo);
 #endif
-    for (const Json *object = objects ? objects->child : nullptr; object;) {
+    for (const Json *object = first_object; object;) {
         if (selected == BACKEND_RT) {
 #ifdef NEUTRINO_VULKAN_RT
             RtHit rt_hits[RAY_BATCH_MAX];
@@ -771,9 +814,9 @@ static bool scene_rays(const Json *args, const Json *scene, const Box *bounds,
 #endif
         } else {
             Box shape;
-            if (!read_box(object,&shape)) { parallel_close(workers); return false; }
+            if (!read_box(object,&shape)) return false;
             for (int i=0; i<count; ++i) pack_ray(rows+i*RAY_VALUES,origin,vectors[i],&shape);
-            engine = trace_batch(selected,rows,count,hits,workers);
+            engine = trace_batch(selected,rows,count,hits);
             if (!engine) goto unavailable;
             for (int i=0; i<count; ++i) {
                 if (hits[i] >= 0 && (hits[i] < nearest[i] || (!winner[i] && hits[i] == nearest[i]))) {
@@ -785,7 +828,6 @@ static bool scene_rays(const Json *args, const Json *scene, const Box *bounds,
             object = object->next;
         }
     }
-    parallel_close(workers);
     unsigned int sample[12];
     memcpy(sample,winner,(size_t)(count<12 ? count : 12)*sizeof *sample);
     format(out,"3D scene raycast (%s): %d rays. First contacts:",engine ? engine : "analytic room boundary",count);
@@ -810,7 +852,6 @@ static bool scene_rays(const Json *args, const Json *scene, const Box *bounds,
     return true;
 
 unavailable:
-    parallel_close(workers);
     if (reading) reading->unavailable = true;
     append(out,backend_unavailable(selected));
     return true;
@@ -922,7 +963,7 @@ static const char *const face_name[] = {"X-min", "X-max", "Y-min", "Y-max", "Z-m
 
 typedef struct {
     const Box *box;
-    double amplitude;
+    double reflection_db;
     int face, object;
 } Reflector;
 
@@ -983,41 +1024,43 @@ static double plane(const Reflector *face)
     return face->face % 2 ? face->box->hi[axis] : face->box->lo[axis];
 }
 
-enum { REFLECTION_BATCH_SIZE = 256 };
+enum { REFLECTION_PARALLEL_MIN = 4096 };
+
+typedef struct {
+    double distance, level;
+    int crossings;
+    bool faded;
+} ReflectionResult;
 
 typedef struct {
     const Reflector *sequence[MAX_BOUNCES];
-    double images[MAX_BOUNCES + 1][3];
-    double reflection_db, distance, level;
-    int depth, crossings;
-    bool faded;
+    ReflectionResult result;
 } ReflectionCandidate;
 
 typedef struct {
-    ReflectionSearch *search;
-    Parallel *workers;
-    ReflectionCandidate candidates[REFLECTION_BATCH_SIZE];
-    size_t count;
+    const ReflectionSearch *search;
+    ReflectionCandidate *candidates;
+    int depth;
 } ReflectionBatch;
 
-static void evaluate_reflection(const ReflectionSearch *search, ReflectionCandidate *candidate)
+static ReflectionResult evaluate_reflection(const ReflectionSearch *search, int depth, double reflection_db,
+                                            const Reflector *const *sequence, const double images[][3])
 {
-    const int depth = candidate->depth;
     double points[MAX_BOUNCES + 2][3];
-    memcpy(points[0], candidate->images[0], sizeof points[0]);
+    memcpy(points[0], images[0], sizeof points[0]);
     memcpy(points[depth + 1], search->listener, sizeof points[0]);
     for (int i = depth; i > 0; --i) {
-        const Reflector *face = candidate->sequence[i - 1];
+        const Reflector *face = sequence[i - 1];
         int axis = face->face / 2;
-        const double wall = plane(face), *after = points[i + 1], *image = candidate->images[i];
+        const double wall = plane(face), *after = points[i + 1], *image = images[i];
         const int side = (face->face % 2 ? 1 : -1) * (face->object < 0 ? -1 : 1);
         const double from_wall = after[axis] - wall, image_offset = image[axis] - wall;
-        if (side * from_wall <= 1e-9 || side * image_offset >= -1e-9) return;
+        if (side * from_wall <= 1e-9 || side * image_offset >= -1e-9) return (ReflectionResult){0};
         const double fraction = from_wall / (from_wall - image_offset);
         for (int k = 0; k < 3; ++k) {
             points[i][k] = k == axis ? wall : after[k] + fraction * (image[k] - after[k]);
             if (k != axis && (points[i][k] <= face->box->lo[k] + 1e-9 ||
-                              points[i][k] >= face->box->hi[k] - 1e-9)) return;
+                              points[i][k] >= face->box->hi[k] - 1e-9)) return (ReflectionResult){0};
         }
     }
     double distance = 0;
@@ -1025,78 +1068,121 @@ static void evaluate_reflection(const ReflectionSearch *search, ReflectionCandid
         for (int j = 0; j < search->objects_count; ++j) {
             double enter, exit;
             if (!search->objects[j].has_material &&
-                segment_interval(&search->objects[j].box, points[i], points[i+1], &enter, &exit)) return;
+                segment_interval(&search->objects[j].box, points[i], points[i+1], &enter, &exit)) return (ReflectionResult){0};
         }
         distance += separation(points[i], points[i + 1]);
     }
-    double budget = candidate->reflection_db - 20 * log10(distance) - search->cutoff_db;
+    double budget = reflection_db - 20 * log10(distance) - search->cutoff_db;
     int crossings = 0;
     for (int i = 0; budget > 0 && i <= depth; ++i)
         if (!attenuate_path(search->objects, search->objects_count, -1, points[i], points[i + 1],
                             search->air_loss, search->room, search->field, search->field_loss, &budget, &crossings))
             break;
-    if (budget <= 0) { candidate->faded = true; return; }
-    candidate->distance = distance;
-    candidate->level = budget + search->cutoff_db;
-    candidate->crossings = crossings;
+    if (budget <= 0) return (ReflectionResult){.faded=true};
+    return (ReflectionResult){.distance=distance, .level=budget+search->cutoff_db, .crossings=crossings};
+}
+
+typedef struct {
+    const Reflector *sequence[MAX_BOUNCES];
+    double images[MAX_BOUNCES+1][3];
+} PartialReflection;
+
+static void reflect_image(double images[][3], int depth, const Reflector *face)
+{
+    memcpy(images[depth+1],images[depth],sizeof images[0]);
+    const int axis = face->face / 2;
+    images[depth+1][axis] = 2 * plane(face) - images[depth][axis];
+}
+
+static void evaluate_subtree(const ReflectionBatch *batch, PartialReflection *path,
+                             int depth, double reflection_db, size_t first, size_t end,
+                             size_t ordinal, size_t span)
+{
+    const ReflectionSearch *search = batch->search;
+    if (depth == batch->depth) {
+        ReflectionCandidate *candidate = &batch->candidates[ordinal];
+        candidate->result = evaluate_reflection(search,depth,reflection_db,path->sequence,path->images);
+        if (candidate->result.distance)
+            memcpy(candidate->sequence,path->sequence,(size_t)depth*sizeof path->sequence[0]);
+        return;
+    }
+    size_t child_span = span / (size_t)(search->count - (depth > 0));
+    for (int i = 0; i < search->count && ordinal < end; ++i) {
+        const Reflector *face = &search->faces[i];
+        if (depth && face == path->sequence[depth-1]) continue;
+        if (ordinal + child_span > first) {
+            path->sequence[depth] = face;
+            reflect_image(path->images,depth,face);
+            evaluate_subtree(batch,path,depth+1,reflection_db+face->reflection_db,
+                             first,end,ordinal,child_span);
+        }
+        ordinal += child_span;
+    }
 }
 
 static void evaluate_reflections(void *context, size_t first, size_t end)
 {
-    ReflectionBatch *batch = context;
-    for (size_t i = first; i < end; ++i)
-        evaluate_reflection(batch->search, &batch->candidates[i]);
+    const ReflectionBatch *batch = context;
+    const ReflectionSearch *search = batch->search;
+    size_t span = (size_t)search->count;
+    for (int depth = 1; depth < batch->depth; ++depth) span *= (size_t)(search->count-1);
+    PartialReflection path;
+    memcpy(path.images[0],search->images[0],sizeof path.images[0]);
+    evaluate_subtree(batch,&path,0,0,first,end,0,span);
 }
 
-static void record_reflection(ReflectionSearch *search, const ReflectionCandidate *candidate)
+static void record_reflection(ReflectionSearch *search, int depth, const Reflector *const *sequence, ReflectionResult result)
 {
-    if (candidate->faded) { ++search->faded; return; }
-    if (!candidate->distance) return;
-    const int depth = candidate->depth, crossings = candidate->crossings;
-    const double distance = candidate->distance, level = candidate->level;
+    if (result.faded) { ++search->faded; return; }
+    if (!result.distance) return;
+    const double distance = result.distance, level = result.level;
     const double delay = distance / search->speed;
     if (search->optical) record_light(search->reading, pow(10, level / 10), delay, depth);
     else record_echo(search, delay, level, depth);
     if (++search->received > REFLECTION_TRACE_LIMIT) return;
     format(search->out, "\n%d-bounce %s [", depth, search->optical ? "reflection" : "echo");
     for (int i = 0; i < depth; ++i) {
-        const Reflector *face = candidate->sequence[i];
+        const Reflector *face = sequence[i];
         if (i) append(search->out, " → ");
         if (face->object >= 0) format(search->out, "object %d ", face->object + 1);
         append(search->out, face_name[face->face]);
     }
     format(search->out, "] %.5g m · %.5g %s · %+.4g dB · %d material traversals.",
-           distance, delay, search->optical ? "ns" : "ms", level, crossings);
+           distance, delay, search->optical ? "ns" : "ms", level, result.crossings);
 }
 
-static void flush_reflections(ReflectionBatch *batch)
+static void find_reflections(ReflectionSearch *search, int depth, int target, double reflection_db)
 {
-    parallel_run(batch->workers, batch->count, evaluate_reflections, batch);
-    for (size_t i = 0; i < batch->count; ++i) record_reflection(batch->search, &batch->candidates[i]);
-    batch->count = 0;
-}
-
-static void find_reflections(ReflectionBatch *batch, int depth, int target, double reflection_db)
-{
-    ReflectionSearch *search = batch->search;
     if (depth == target) {
         if (search->tested == REFLECTION_CANDIDATE_LIMIT) { search->limited = true; return; }
         ++search->tested;
-        ReflectionCandidate *candidate = &batch->candidates[batch->count++];
-        *candidate = (ReflectionCandidate){.depth=depth, .reflection_db=reflection_db};
-        memcpy(candidate->sequence, search->sequence, (size_t)depth * sizeof candidate->sequence[0]);
-        memcpy(candidate->images, search->images, (size_t)(depth+1) * sizeof candidate->images[0]);
-        if (batch->count == REFLECTION_BATCH_SIZE) flush_reflections(batch);
+        ReflectionResult result = evaluate_reflection(search,depth,reflection_db,search->sequence,search->images);
+        record_reflection(search,depth,search->sequence,result);
         return;
     }
     for (int i = 0; i < search->count && !search->limited; ++i) {
         const Reflector *face = &search->faces[i];
         if (depth && search->sequence[depth - 1] == face) continue;
         search->sequence[depth] = face;
-        memcpy(search->images[depth + 1], search->images[depth], sizeof search->images[0]);
-        const int axis = face->face / 2;
-        search->images[depth + 1][axis] = 2 * plane(face) - search->images[depth][axis];
-        find_reflections(batch, depth + 1, target, reflection_db + 20 * log10(face->amplitude));
+        reflect_image(search->images,depth,face);
+        find_reflections(search,depth+1,target,reflection_db+face->reflection_db);
+    }
+}
+
+static void find_parallel_reflections(ReflectionSearch *search, Parallel *workers, ReflectionCandidate *candidates)
+{
+    const size_t radix = (size_t)search->count - 1;
+    size_t combinations = (size_t)search->count;
+    for (int depth = 2; depth <= search->max_depth && !search->limited; ++depth) {
+        combinations *= radix;
+        const size_t remaining = REFLECTION_CANDIDATE_LIMIT - (size_t)search->tested;
+        const size_t count = combinations < remaining ? combinations : remaining;
+        ReflectionBatch batch = {search,candidates,depth};
+        parallel_run(workers,count,evaluate_reflections,&batch);
+        /* Consume candidates in depth-first order to keep arrival selection and trace stable. */
+        for (size_t i = 0; i < count; ++i) record_reflection(search,depth,candidates[i].sequence,candidates[i].result);
+        search->tested += (int)count;
+        search->limited = combinations > remaining;
     }
 }
 
@@ -1107,19 +1193,22 @@ static void recursive_reflections(ReflectionSearch *search, const double source[
     for (int i = -1; i < search->objects_count; ++i) {
         const double amplitude = i < 0 ? wall : search->objects[i].reflection;
         if (amplitude <= 0) continue;
+        const double reflection_db = 20 * log10(amplitude);
         for (int face = 0; face < 6; ++face)
             search->faces[search->count++] = (Reflector){i < 0 ? search->room : &search->objects[i].box,
-                                                       amplitude, face, i};
+                                                       reflection_db, face, i};
     }
     size_t combinations = (size_t)search->count;
-    for (int depth = 2; depth <= search->max_depth && combinations < REFLECTION_BATCH_SIZE; ++depth)
+    for (int depth = 2; depth <= search->max_depth && combinations < REFLECTION_CANDIDATE_LIMIT; ++depth)
         combinations *= search->count > 1 ? (size_t)search->count - 1 : 0;
-    const size_t work = combinations > REFLECTION_BATCH_SIZE ? REFLECTION_BATCH_SIZE : combinations;
-    ReflectionBatch batch = {.search=search, .workers=parallel_open(work,64)};
-    for (int target = 2; target <= search->max_depth && !search->limited; ++target)
-        find_reflections(&batch, 0, target, 0);
-    flush_reflections(&batch);
-    parallel_close(batch.workers);
+    const size_t work = combinations < REFLECTION_CANDIDATE_LIMIT ? combinations : REFLECTION_CANDIDATE_LIMIT;
+    Parallel *workers = work >= REFLECTION_PARALLEL_MIN ? parallel_open_batch(work,1024) : nullptr;
+    ReflectionCandidate *candidates = workers ? malloc(work * sizeof *candidates) : nullptr;
+    if (candidates) find_parallel_reflections(search,workers,candidates);
+    else for (int target = 2; target <= search->max_depth && !search->limited; ++target)
+        find_reflections(search,0,target,0);
+    parallel_close(workers);
+    free(candidates);
     if (search->reading) {
         search->reading->recursive_arrivals = search->received;
         search->reading->recursive_limited = search->limited;
@@ -1190,12 +1279,7 @@ static const char *opaque_visibility(const AcousticObject *blockers, int obstacl
                 }
             }
         }
-        if (total) {
-            Parallel *workers = selected == BACKEND_CPU || selected == BACKEND_AUTO ?
-                                parallel_open(total,1024) : nullptr;
-            engine = trace_batch(selected, rows, total, hits, workers);
-            parallel_close(workers);
-        }
+        if (total) engine = trace_batch(selected, rows, total, hits);
         if (engine)
             for (size_t j = 0; j < total; ++j)
                 if (hits[j] >= 0 && hits[j] < 1.0f) blocked[path_of[j]] = true;

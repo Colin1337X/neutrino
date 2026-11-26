@@ -17,10 +17,27 @@ The web-command fixtures run two hypothetical plans. The prescribed-inlet case r
 
 `timing.csv` contains individual batches. `web-traces.json` contains the ordered action traces, typed readings, and individual request times.
 
+## v0.17.1 follow-up
+
+The patch keeps small recursive sound and light queries on the caller. Larger CPU raycasts process multiple shapes per dispatch. On Windows, short batches use the system pool and CFD keeps dedicated workers for its repeated solver barriers.
+
+| Workload | One worker | Up to four workers |
+| --- | ---: | ---: |
+| 24³ prescribed exhaust | 444.94 ms | 502.54 ms |
+| 24³ pressure opening | 724.26 ms | 673.44 ms |
+| Four-bounce relay sound | 45.00 µs | 43.75 µs |
+| Four-bounce relay light | 41.25 µs | 41.25 µs |
+| Four-bounce sound, 12 added reflectors | 150.00 µs | 266.67 µs |
+| Four-bounce light, 12 added reflectors | 141.67 µs | 208.33 µs |
+
+The small relay sound and light cases ran on the caller. In the scene with added reflectors, most candidate paths were rejected cheaply, and scheduling cost outweighed the additional CPU work. The prescribed exhaust timings were also sensitive to run conditions. All recorded flow values and path counts matched across worker limits.
+
 ```powershell
 $env:NEUTRINO_PHYSICS_WORKERS = '1'
 ./build/scene_physics_test.exe --pressure-timing
 $env:NEUTRINO_PHYSICS_WORKERS = '4'
 ./build/scene_physics_test.exe --pressure-timing
 python benchmarks/multiphysics.py ./build/neutrino.exe --fixtures benchmarks/pressure-openings.json --out pressure-web.json --reps 7
+./build/scene_physics_test.exe --propagation-timing
+./build/scene_physics_test.exe --propagation-timing dense
 ```

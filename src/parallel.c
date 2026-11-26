@@ -3,6 +3,7 @@
 #include <stdlib.h>
 
 #ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
 #include <process.h>
 #include <windows.h>
 typedef HANDLE Thread;
@@ -37,6 +38,9 @@ typedef struct {
     Parallel *group;
     unsigned lane;
     Thread thread;
+#ifdef _WIN32
+    PTP_WORK work;
+#endif
 } Worker;
 
 struct Parallel {
@@ -47,6 +51,9 @@ struct Parallel {
     unsigned lanes, pending;
     size_t epoch;
     bool stopping;
+#ifdef _WIN32
+    bool shared;
+#endif
     size_t count;
     ParallelRange range;
     void *context;
@@ -80,6 +87,16 @@ static WORKER worker_main(void *argument)
     return THREAD_RETURN;
 }
 
+#ifdef _WIN32
+static void CALLBACK shared_worker(PTP_CALLBACK_INSTANCE instance, void *argument, PTP_WORK work)
+{
+    (void)instance;
+    (void)work;
+    const Worker *worker = argument;
+    run_lane(worker->group, worker->lane);
+}
+#endif
+
 static unsigned worker_limit(void)
 {
 #ifdef _WIN32
@@ -98,7 +115,7 @@ static unsigned worker_limit(void)
     return available < limit ? available : limit;
 }
 
-Parallel *parallel_open(size_t work, size_t minimum_per_worker)
+static Parallel *open_group(size_t work, size_t minimum_per_worker, bool shared)
 {
     size_t lanes = work / minimum_per_worker;
     if (lanes < 2) return nullptr;
@@ -108,10 +125,14 @@ Parallel *parallel_open(size_t work, size_t minimum_per_worker)
     Parallel *group = calloc(1, sizeof *group);
     if (!group) return nullptr;
 #ifdef _WIN32
-    InitializeSRWLock(&group->mutex);
-    InitializeConditionVariable(&group->changed);
-    InitializeConditionVariable(&group->finished);
+    group->shared = shared;
+    if (!shared) {
+        InitializeSRWLock(&group->mutex);
+        InitializeConditionVariable(&group->changed);
+        InitializeConditionVariable(&group->finished);
+    }
 #else
+    (void)shared;
     if (pthread_mutex_init(&group->mutex, nullptr)) { free(group); return nullptr; }
     if (pthread_cond_init(&group->changed, nullptr)) {
         pthread_mutex_destroy(&group->mutex);
@@ -130,8 +151,13 @@ Parallel *parallel_open(size_t work, size_t minimum_per_worker)
         worker->lane = group->lanes;
         worker->group = group;
 #ifdef _WIN32
-        worker->thread = (HANDLE)_beginthreadex(nullptr, 0, worker_main, worker, 0, nullptr);
-        if (!worker->thread) break;
+        if (shared) {
+            worker->work = CreateThreadpoolWork(shared_worker, worker, nullptr);
+            if (!worker->work) break;
+        } else {
+            worker->thread = (HANDLE)_beginthreadex(nullptr, 0, worker_main, worker, 0, nullptr);
+            if (!worker->thread) break;
+        }
 #else
         if (pthread_create(&worker->thread, nullptr, worker_main, worker)) break;
 #endif
@@ -141,12 +167,34 @@ Parallel *parallel_open(size_t work, size_t minimum_per_worker)
     return nullptr;
 }
 
+Parallel *parallel_open(size_t work, size_t minimum_per_worker)
+{
+    return open_group(work,minimum_per_worker,false);
+}
+
+Parallel *parallel_open_batch(size_t work, size_t minimum_per_worker)
+{
+    return open_group(work,minimum_per_worker,true);
+}
+
 void parallel_run(Parallel *group, size_t count, ParallelRange range, void *context)
 {
     if (!group || count < group->lanes) {
         if (count) range(context, 0, count);
         return;
     }
+#ifdef _WIN32
+    if (group->shared) {
+        group->count = count;
+        group->range = range;
+        group->context = context;
+        for (unsigned i = 0; i < group->lanes - 1; ++i) SubmitThreadpoolWork(group->workers[i].work);
+        run_lane(group,0);
+        for (unsigned i = 0; i < group->lanes - 1; ++i)
+            WaitForThreadpoolWorkCallbacks(group->workers[i].work,FALSE);
+        return;
+    }
+#endif
     lock(&group->mutex);
     group->count = count;
     group->range = range;
@@ -164,6 +212,13 @@ void parallel_run(Parallel *group, size_t count, ParallelRange range, void *cont
 void parallel_close(Parallel *group)
 {
     if (!group) return;
+#ifdef _WIN32
+    if (group->shared) {
+        for (unsigned i = 0; i < group->lanes - 1; ++i) CloseThreadpoolWork(group->workers[i].work);
+        free(group);
+        return;
+    }
+#endif
     lock(&group->mutex);
     group->stopping = true;
     signal_event(&group->changed);
