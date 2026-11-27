@@ -103,6 +103,13 @@ typedef struct {
     int count, next;
 } Neofetch;
 
+typedef struct {
+    Text endpoint, model, key, error;
+    int provider, field;
+    size_t caret;
+    bool open, admin, authenticated, usage;
+} ModelMenu;
+
 static inline bool preview_busy(const Preview *preview)
 {
     return preview->recall_job != nullptr || preview->auto_research_job != nullptr || preview->active > 0;
@@ -116,6 +123,9 @@ typedef struct {
     Text screen, prompt, edit, info, status, trace, simulation_trace, server_address;
     Text research_scope, research_pending_scope, research_data, research_reply;
     Inference *research_job;
+    Inference *provider_job;
+    bool provider_switching, provider_menu_request;
+    ModelMenu model_menu;
     char info_title[96];
     size_t cursor, caret, mark, selection_a, selection_b;
     int cols, rows, scroll, scroll_max, panel_scroll, rail_cursor, rail_offset, command_cursor;
@@ -127,6 +137,12 @@ typedef struct {
     Neofetch neo;
     const char *server_override;
 } App;
+
+enum { MODEL_CURRENT, MODEL_OLLAMA, MODEL_LLAMACPP, MODEL_OPENAI, MODEL_CUSTOM, MODEL_PROVIDER_COUNT };
+enum { MODEL_PROVIDER_FIELD, MODEL_ENDPOINT_FIELD, MODEL_ID_FIELD, MODEL_KEY_FIELD, MODEL_USAGE_FIELD,
+       MODEL_APPLY_FIELD, MODEL_FIELD_COUNT };
+extern const char *const model_provider_labels[MODEL_PROVIDER_COUNT];
+bool model_field_enabled(const ModelMenu *menu, int field);
 
 typedef struct Browser Browser;
 typedef enum { BROWSER_STATE, BROWSER_HISTORY, BROWSER_ACTION, BROWSER_IMPORT,

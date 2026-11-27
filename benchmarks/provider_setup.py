@@ -7,8 +7,10 @@ import subprocess
 import tempfile
 import threading
 import urllib.request
+from urllib.error import HTTPError
 from pathlib import Path
 
+from fixtures import build
 from gateway_history import free_port, process, request, wait
 
 
@@ -18,7 +20,7 @@ def check(binary):
     class Provider(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            received.append((self.path, payload["model"], self.headers.get("Authorization")))
+            received.append((self.path, payload["model"], self.headers.get("Authorization"), payload.get("stream_options")))
             chunk = json.dumps({"choices": [{"delta": {"content": "Ready."}, "finish_reason": "stop"}]})
             data = f"data: {chunk}\n\ndata: [DONE]\n\n".encode()
             self.send_response(200)
@@ -61,7 +63,7 @@ def check(binary):
                                                  {"Content-Type": "application/json"})
                     with urllib.request.urlopen(req, timeout=5) as response:
                         assert b"Ready." in response.read()
-                    assert received[-1] == ("/v1/chat/completions", "local/fixture", expected_key)
+                    assert received[-1] == ("/v1/chat/completions", "local/fixture", expected_key, None)
                     print(f"{name} verified")
             for flags, expected in (
                 (["--provider", "openai"], b"API key environment variable"),
@@ -73,9 +75,88 @@ def check(binary):
                 assert failed.returncode == 2 and expected in failed.stderr
                 assert b"user:pass" not in failed.stderr
             print("Missing keys and credential-bearing URLs rejected at startup")
+            live_switch(binary,Path(scratch),base,endpoint,received)
         finally:
             upstream.shutdown()
             thread.join()
+
+
+def live_switch(binary, folder, base, endpoint, received):
+    admin = "synthetic-provider-admin-token"
+    ordinary = "synthetic-inference-token"
+    settings = base | {"NEUTRINO_PROVIDER_ADMIN_TOKEN": admin, "NEUTRINO_SERVER_TOKEN": ordinary,
+                       "NEUTRINO_PROVIDER_KEY_FIXTURE": "synthetic-runtime-key"}
+    gateway_port, web_port = free_port(), free_port()
+    gateway = f"http://127.0.0.1:{gateway_port}/v1"
+    web = f"http://127.0.0.1:{web_port}/api"
+    build(folder,1)
+    workspace = folder / "workspace.json"
+    data = json.loads(workspace.read_text(encoding="utf-8"))
+    data["serverNarrator"] = "old-model"
+    workspace.write_text(json.dumps(data),encoding="utf-8")
+    with process(binary,["--serve","--port",str(gateway_port)],settings,folder/"runtime-gateway.log"), \
+         process(binary,["--web","--port",str(web_port),"--server",gateway,"--workspace",str(workspace)],
+                 settings,folder/"runtime-web.log"):
+        wait(lambda: request(web+"/state"))
+
+        def submit(text):
+            return request(web+"/action",{"action":"submit","text":text})
+
+        def finish(text, status):
+            submit(text)
+            return wait(lambda: state if status in (state := request(web+"/state"))["status"] else None)
+
+        def stream():
+            req = urllib.request.Request(gateway+"/chat/completions",
+                                         b'{"model":"narrator","messages":[{"role":"user","content":"Ready?"}]}',
+                                         {"Content-Type":"application/json","Authorization":"Bearer "+ordinary})
+            with urllib.request.urlopen(req,timeout=5) as response:
+                assert b"Ready." in response.read()
+
+        assert "Unconfigured" in finish("/model api","Gateway API settings ready")["panel"]["text"]
+        req = urllib.request.Request(gateway+"/provider",b"{}",{"Authorization":"Bearer "+ordinary})
+        try:
+            urllib.request.urlopen(req,timeout=3).close()
+        except HTTPError as error:
+            assert error.code == 401
+        else:
+            raise AssertionError("Inference token was allowed to manage providers")
+
+        finish(f"/model provider {endpoint} | local/first | NEUTRINO_PROVIDER_KEY_FIXTURE",
+               "Gateway provider switched")
+        stream()
+        assert received[-1] == ("/v1/chat/completions","local/first","Bearer synthetic-runtime-key",None)
+        assert json.loads(workspace.read_text(encoding="utf-8"))["serverNarrator"] == ""
+
+        finish(f"/model provider {endpoint} | rejected | NEUTRINO_SERVER_TOKEN","gateway key variable")
+        assert "local/first" in finish("/model api","Gateway API settings ready")["panel"]["text"]
+
+        def show_menu():
+            submit("/model")
+            return wait(lambda: menu if (menu := request(web+"/state").get("modelMenu")) and not menu["busy"] else None)
+
+        def apply_menu(provider, url, model, usage):
+            request(web+"/action",{"action":"model-apply","provider":provider,"endpoint":url,
+                                   "model":model,"key":"","usage":usage})
+            wait(lambda: "modelMenu" not in request(web+"/state"))
+
+        menu = show_menu()
+        assert menu["endpoint"] == endpoint and menu["model"] == "local/first" and menu["authenticated"]
+        assert "synthetic-runtime-key" not in json.dumps(menu)
+        apply_menu(0,"","local/current",False)
+        stream()
+        assert received[-1] == ("/v1/chat/completions","local/current","Bearer synthetic-runtime-key",None)
+
+        show_menu()
+        apply_menu(4,endpoint+"/second","local/second",True)
+        stream()
+        assert received[-1] == ("/v1/second/chat/completions","local/second",None,{"include_usage": True})
+        panel = finish("/model api","Gateway API settings ready")["panel"]["text"]
+        assert "local/second" in panel and "Stream usage  On" in panel and "synthetic-runtime-key" not in panel
+        finish("/model api usage off","Gateway API settings ready")
+        stream()
+        assert received[-1] == ("/v1/second/chat/completions","local/second",None,None)
+        print("Live /model menu, provider switching, API settings, and separate admin authorization verified")
 
 
 if __name__ == "__main__":

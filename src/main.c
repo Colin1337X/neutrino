@@ -124,7 +124,7 @@ const Command commands[] = {
     {"import", " file", "Import a workspace, chat, character card, or lorebook"},
     {"export", " file", "Write a new workspace backup"},
     {"save", "", "Save the workspace"},
-    {"model", " [MODEL|recall CONN:MODEL]", "Select a server-configured narrator or recall model"},
+    {"model", " [MODEL|api|provider|recall]", "Select models, switch providers, or configure API settings"},
     {"server", " [URL]", "Set the Neutrino inference server"},
     {"neofetch", "", "Show server status and generation performance"},
     {"focus", "", "Toggle the side panes"},
@@ -1433,6 +1433,212 @@ static char *split_piece(char **rest, char sep)
     *rest = next;
     return trim_piece(piece);
 }
+
+static void model_api_help(App *a)
+{
+    show_info(a,"Model API");
+    append(&a->info,
+        "/model api · show active gateway settings\n"
+        "/model provider PRESET_OR_URL | MODEL [| KEY_ENV] · switch gateway provider\n"
+        "/model api usage on|off · request streaming token usage\n\n"
+        "Presets: ollama, llamacpp, openai. Custom key variables start with NEUTRINO_PROVIDER_KEY_.\n"
+        "Set NEUTRINO_PROVIDER_ADMIN_TOKEN in the gateway and trusted client processes.");
+}
+
+const char *const model_provider_labels[MODEL_PROVIDER_COUNT] = {
+    "Current provider", "Ollama", "llama.cpp", "OpenAI", "Custom URL"
+};
+static const char *const model_provider_presets[MODEL_PROVIDER_COUNT] = {
+    "", "ollama", "llamacpp", "openai", ""
+};
+
+bool model_field_enabled(const ModelMenu *menu, int field)
+{
+    switch (field) {
+    case MODEL_PROVIDER_FIELD: case MODEL_USAGE_FIELD: return menu->admin;
+    case MODEL_ENDPOINT_FIELD: return menu->admin && menu->provider == MODEL_CUSTOM;
+    case MODEL_KEY_FIELD: return menu->admin && menu->provider != MODEL_CURRENT;
+    default: return true;
+    }
+}
+
+static bool model_id_valid(const char *model)
+{
+    return strlen(model) <= 160 && !strpbrk(model," \t\r\n");
+}
+
+static void select_narrator(App *a, const char *model)
+{
+    if (strcmp(js(a->ws.root,"serverNarrator"),model)) a->neo.count = a->neo.next = 0;
+    set(a->ws.root,"serverNarrator",model);
+    a->ws.dirty = true;
+}
+
+static void model_menu_error(ModelMenu *menu, const char *message)
+{
+    clear(&menu->error);
+    append(&menu->error,message);
+}
+
+static bool start_model_api(App *a, const Json *settings, bool switching, bool menu)
+{
+    a->provider_job = inference_provider(ui_endpoint(a),env("NEUTRINO_PROVIDER_ADMIN_TOKEN",""),settings);
+    a->provider_switching = switching;
+    a->provider_menu_request = menu;
+    if (a->provider_job) return true;
+    if (menu) model_menu_error(&a->model_menu,"Could not start the model API request.");
+    else status(a,"Could not start the model API request.");
+    return false;
+}
+
+static void open_model_menu(App *a)
+{
+    if (a->provider_job) { status(a,"Wait for the active model API request."); return; }
+    ModelMenu *menu = &a->model_menu;
+    menu->open = true;
+    menu->admin = *env("NEUTRINO_PROVIDER_ADMIN_TOKEN","") != 0;
+    menu->provider = MODEL_CURRENT;
+    menu->field = menu->admin ? MODEL_PROVIDER_FIELD : MODEL_ID_FIELD;
+    menu->authenticated = false;
+    menu->usage = false;
+    clear(&menu->endpoint);
+    clear(&menu->model);
+    clear(&menu->key);
+    clear(&menu->error);
+    append(&menu->model,js(a->ws.root,"serverNarrator"));
+    menu->caret = menu->model.len;
+    if (menu->admin) {
+        Json *query = cJSON_CreateObject();
+        start_model_api(a,query,false,true);
+        cJSON_Delete(query);
+    }
+}
+
+static bool model_menu_busy(const App *a)
+{
+    return a->provider_job && a->provider_menu_request;
+}
+
+static void apply_model_menu(App *a, int provider, const char *endpoint, const char *model, const char *key, bool usage)
+{
+    ModelMenu *menu = &a->model_menu;
+    if (a->provider_job) return;
+    if (!model_id_valid(model) || (menu->admin && !*model)) {
+        model_menu_error(menu,"Enter one model ID.");
+        return;
+    }
+    if (preview_busy(&a->preview) || (menu->admin && (a->memory.job || a->research_job))) {
+        model_menu_error(menu,"Wait for active requests before applying changes.");
+        return;
+    }
+    if (!menu->admin) {
+        select_narrator(a,!strcmp(model,"default") ? "" : model);
+        status(a,"Narrator model selection saved");
+        menu->open = false;
+        return;
+    }
+    if (provider < MODEL_CURRENT || provider >= MODEL_PROVIDER_COUNT || (provider == MODEL_CUSTOM && !*endpoint)) {
+        model_menu_error(menu,"Choose a provider and enter its API URL.");
+        return;
+    }
+    Json *settings = cJSON_CreateObject();
+    set(settings,"model",model);
+    put(settings,"stream_usage",cJSON_CreateBool(usage));
+    if (provider != MODEL_CURRENT) {
+        set(settings,"endpoint",provider == MODEL_CUSTOM ? endpoint : model_provider_presets[provider]);
+        if (*key) set(settings,"key_env",key);
+    }
+    clear(&menu->error);
+    start_model_api(a,settings,true,true);
+    cJSON_Delete(settings);
+}
+
+static void model_api(App *a, char *arg)
+{
+    if (!strcmp(arg,"help")) { model_api_help(a); return; }
+    const char *token = env("NEUTRINO_PROVIDER_ADMIN_TOKEN","");
+    if (!*token) { model_api_help(a); status(a,"Model API configuration needs the provider admin token."); return; }
+    if (a->provider_job) { status(a,"A model API request is already running."); return; }
+    Json *settings = cJSON_CreateObject();
+    bool switching = false;
+    if (!strcmp(arg,"usage on") || !strcmp(arg,"usage off"))
+        put(settings,"stream_usage",cJSON_CreateBool(!strcmp(arg,"usage on")));
+    else if (*arg) {
+        char *rest = arg;
+        const char *endpoint = split_piece(&rest,'|'), *model = split_piece(&rest,'|');
+        const char *key = split_piece(&rest,'|');
+        if (!*endpoint || !model || !*model || rest || (key && !*key)) {
+            cJSON_Delete(settings);
+            model_api_help(a);
+            return;
+        }
+        set(settings,"endpoint",endpoint);
+        set(settings,"model",model);
+        if (key) set(settings,"key_env",key);
+        switching = true;
+    }
+    if (settings->child && (preview_busy(&a->preview) || a->memory.job || a->research_job)) {
+        cJSON_Delete(settings);
+        status(a,"Wait for active requests before changing API settings.");
+        return;
+    }
+    if (start_model_api(a,settings,switching,false)) status(a,"Reading gateway API settings…");
+    cJSON_Delete(settings);
+}
+
+static bool tick_model_api(App *a)
+{
+    if (!a->provider_job) return false;
+    Text body = {0}, reasoning = {0}, error = {0};
+    const bool done = inference_read(a->provider_job,&body,&reasoning,&error);
+    if (done) {
+        inference_free(a->provider_job);
+        a->provider_job = nullptr;
+        Json *response = cJSON_ParseWithOpts(str(&body),nullptr,true);
+        const char *problem = error.len ? str(&error) : js(response,"error");
+        if (!*problem && !cJSON_IsBool(at(response,"authenticated"))) problem = "Unrecognized gateway API response.";
+        if (*problem) {
+            if (a->provider_menu_request && a->model_menu.open) model_menu_error(&a->model_menu,problem);
+            else status(a,problem);
+        }
+        else {
+            if (a->provider_switching) {
+                select_narrator(a,"");
+                a->neo.count = a->neo.next = 0;
+                reset_neofetch_server(&a->neo);
+                save(a);
+            }
+            if (a->provider_menu_request) {
+                ModelMenu *menu = &a->model_menu;
+                if (a->provider_switching) {
+                    menu->open = false;
+                    status(a,"Gateway model settings applied");
+                } else if (menu->open) {
+                    clear(&menu->endpoint);
+                    clear(&menu->model);
+                    append(&menu->endpoint,js(response,"endpoint"));
+                    append(&menu->model,js(response,"model"));
+                    menu->authenticated = cJSON_IsTrue(at(response,"authenticated"));
+                    menu->usage = cJSON_IsTrue(at(response,"stream_usage"));
+                    menu->caret = menu->model.len;
+                }
+            } else {
+                show_info(a,"Model API");
+                format(&a->info,"Endpoint  %s\nModel  %s\nAPI key  %s\nStream usage  %s\n",
+                    *js(response,"endpoint") ? js(response,"endpoint") : "Unavailable",
+                    *js(response,"model") ? js(response,"model") : "Unconfigured",
+                    cJSON_IsTrue(at(response,"authenticated")) ? "Configured on gateway" : "None",
+                    cJSON_IsTrue(at(response,"stream_usage")) ? "On" : "Off");
+                status(a,a->provider_switching ? "Gateway provider switched" : "Gateway API settings ready");
+            }
+        }
+        cJSON_Delete(response);
+    }
+    release(&body);
+    release(&reasoning);
+    release(&error);
+    return done;
+}
 static void show_branches(App *a)
 {
     if (!a->story) { status(a, "Open a roleplay story first."); return; }
@@ -2178,14 +2384,16 @@ static void slash_command(App *a, char *line)
     } else if (!strcmp(line, "model")) {
         if (!strncmp(arg, "recall", 6) && (!arg[6] || isspace((unsigned char)arg[6])))
             memory_binding(a, trim_left(arg + 6));
-        else if (!*arg) status(a, ui_model(a));
+        else if (!strncmp(arg,"api",3) && (!arg[3] || isspace((unsigned char)arg[3])))
+            model_api(a,trim_piece(arg+3));
+        else if (!strncmp(arg,"provider",8) && (!arg[8] || isspace((unsigned char)arg[8])))
+            model_api(a,trim_piece(arg+8));
+        else if (!*arg) open_model_menu(a);
         else if (preview_busy(&a->preview)) status(a, "Finish or cancel generation before changing models.");
-        else if (strlen(arg) > 160 || strpbrk(arg, " \t\r\n")) status(a, "Enter one server-configured model ID or default.");
+        else if (!model_id_valid(arg)) status(a, "Enter one server-configured model ID or default.");
         else {
             const char *model = !strcmp(arg, "default") ? "" : arg;
-            if (strcmp(js(a->ws.root, "serverNarrator"), model)) a->neo.count = a->neo.next = 0;
-            set(a->ws.root, "serverNarrator", model);
-            a->ws.dirty = true;
+            select_narrator(a,model);
             status(a, "Narrator model selection saved");
         }
     } else if (!strcmp(line, "server")) {
@@ -2370,9 +2578,72 @@ static void library_key(App *a, int key)
     if (max >= 0) a->rail_cursor = n < 0 ? 0 : n > max ? max : n;
 }
 
+static Text *model_field_text(ModelMenu *menu)
+{
+    switch (menu->field) {
+    case MODEL_ENDPOINT_FIELD: return &menu->endpoint;
+    case MODEL_ID_FIELD: return &menu->model;
+    case MODEL_KEY_FIELD: return &menu->key;
+    default: return nullptr;
+    }
+}
+
+static void model_menu_key(App *a, int key)
+{
+    ModelMenu *menu = &a->model_menu;
+    if (key == 27) { menu->open = false; return; }
+    if (model_menu_busy(a)) return;
+    if (key == KEY_UP || key == KEY_DOWN || key == 9 || key == KEY_BACKTAB || key == 13 || key == 10) {
+        if ((key == 13 || key == 10) && menu->field == MODEL_APPLY_FIELD) {
+            apply_model_menu(a,menu->provider,str(&menu->endpoint),str(&menu->model),str(&menu->key),menu->usage);
+            return;
+        }
+        const int step = key == KEY_UP || key == KEY_BACKTAB ? MODEL_FIELD_COUNT-1 : 1;
+        do { menu->field = (menu->field+step)%MODEL_FIELD_COUNT; }
+        while (!model_field_enabled(menu,menu->field));
+        const Text *input = model_field_text(menu);
+        menu->caret = input ? input->len : 0;
+        return;
+    }
+    if (menu->field == MODEL_PROVIDER_FIELD) {
+        if (key == KEY_LEFT || key == KEY_RIGHT || key == ' ')
+            menu->provider = (menu->provider+(key == KEY_LEFT ? MODEL_PROVIDER_COUNT-1 : 1))%MODEL_PROVIDER_COUNT;
+        return;
+    }
+    if (menu->field == MODEL_USAGE_FIELD) {
+        if (key == KEY_LEFT || key == KEY_RIGHT || key == ' ') menu->usage = !menu->usage;
+        return;
+    }
+    Text *input = model_field_text(menu);
+    if (!input) return;
+    size_t *caret = &menu->caret;
+    switch (key) {
+    case KEY_LEFT: *caret = utf_prev(str(input),*caret); break;
+    case KEY_RIGHT: *caret = utf_next(str(input),input->len,*caret); break;
+    case KEY_HOME: *caret = 0; break;
+    case KEY_END: *caret = input->len; break;
+    case 21: clear(input); *caret = 0; break;
+    case 8: case 127: {
+        const size_t start = utf_prev(str(input),*caret);
+        remove_bytes(input,start,*caret-start);
+        *caret = start;
+        break;
+    }
+    case KEY_DEL: remove_bytes(input,*caret,utf_next(str(input),input->len,*caret)-*caret); break;
+    default:
+        if (key >= 32 && key <= 0x10ffff && !(key >= 127 && key < 160)) {
+            char chars[4];
+            const int n = utf_encode(key,chars);
+            const size_t limit = menu->field == MODEL_ENDPOINT_FIELD ? 2048 : 160;
+            if (input->len+(size_t)n <= limit) insert_bytes(input,caret,chars,(size_t)n);
+        }
+    }
+}
+
 static void key_event(App *a, int key)
 {
     if (key == KEY_CLOSED) { a->quit = true; return; }
+    if (a->model_menu.open && key != 17) { model_menu_key(a,key); return; }
     if (a->editing && key != 17) { edit_key(a, key); return; }
     switch (key) {
         case 17: if (a->editing) edit_save(a); if (!a->editing) quit(a); return;
@@ -2530,6 +2801,18 @@ static Json *browser_state(const App *a)
     set(state, "title", a->roleplay ? ui_story_name(a) : ui_scene_name(a));
     set(state, "status", str(&a->status));
     put(state, "library", browser_library(a));
+    if (a->model_menu.open) {
+        const ModelMenu *menu = &a->model_menu;
+        Json *value = cJSON_CreateObject();
+        put(state,"modelMenu",value);
+        put(value,"admin",cJSON_CreateBool(menu->admin));
+        put(value,"busy",cJSON_CreateBool(model_menu_busy(a)));
+        put(value,"usage",cJSON_CreateBool(menu->usage));
+        put(value,"authenticated",cJSON_CreateBool(menu->authenticated));
+        set(value,"endpoint",str(&menu->endpoint));
+        set(value,"model",str(&menu->model));
+        set(value,"error",str(&menu->error));
+    }
     if (a->roleplay) {
         put(state, "messages", browser_messages(a, 80));
         if (busy && p->count && a->story == p->story) set(state, "stream", str(&p->candidates[0].body));
@@ -2563,6 +2846,18 @@ static int browser_action(App *a, const Json *input, Text *error)
         if (strlen(text) > EDIT_LIMIT) { append(error, "Input exceeds the 2 MiB limit."); return 413; }
         prompt_set(a, text);
         submit(a);
+    } else if (!strcmp(action,"model-close")) {
+        a->model_menu.open = false;
+    } else if (!strcmp(action,"model-apply") && a->model_menu.open &&
+               cJSON_IsNumber(at(input,"provider")) && cJSON_IsString(at(input,"endpoint")) &&
+               cJSON_IsString(at(input,"model")) && cJSON_IsString(at(input,"key")) &&
+               cJSON_IsBool(at(input,"usage"))) {
+        if (strlen(js(input,"endpoint")) > 2048 || strlen(js(input,"key")) > 160) {
+            append(error,"The API URL or key variable is too long.");
+            return 400;
+        }
+        apply_model_menu(a,number(input,"provider"),js(input,"endpoint"),js(input,"model"),js(input,"key"),
+                         cJSON_IsTrue(at(input,"usage")));
     } else if (!strcmp(action, "open") && cJSON_IsBool(at(input, "roleplay"))) {
         const char *id = js(input, "id");
         bool switching = !cJSON_IsString(at(input, "id"));
@@ -2748,6 +3043,7 @@ static int run(int argc, char **argv)
             while (!interrupted) {
                 update_generation(&a);
                 tick_neofetch(&a);
+                tick_model_api(&a);
                 tick_research(&a);
                 if (memory_tick(&a)) save(&a);
                 browser_poll(web, &a);
@@ -2777,6 +3073,7 @@ static int run(int argc, char **argv)
             }
             if (update_generation(&a)) redraw = true;
             if (tick_neofetch(&a)) redraw = true;
+            if (tick_model_api(&a)) redraw = true;
             if (tick_research(&a)) redraw = true;
             if (memory_tick(&a)) {
                 save(&a);
@@ -2801,6 +3098,11 @@ static int run(int argc, char **argv)
     release_preview(&a.preview);
     reset_neofetch_server(&a.neo);
     if (a.neo.probe) inference_free(a.neo.probe);
+    if (a.provider_job) inference_free(a.provider_job);
+    release(&a.model_menu.endpoint);
+    release(&a.model_menu.model);
+    release(&a.model_menu.key);
+    release(&a.model_menu.error);
     release(&a.neo.error);
     for (int i = 0; i < a.history_count; i++) free(a.history[i]);
     release(&a.screen);

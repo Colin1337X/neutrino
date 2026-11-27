@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(neutrino VERSION 0.19.0 LANGUAGES C)
+project(neutrino VERSION 0.20.0 LANGUAGES C)
 
 if(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
     message(FATAL_ERROR "Neutrino requires C23. Use a C23-capable GCC or Clang, including clang-cl on Windows.")

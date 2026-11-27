@@ -79,6 +79,29 @@
     <input id="command-search" type="search" placeholder="Search commands">
     <div id="command-results"></div>
   </dialog>
+  <dialog id="model-menu" aria-labelledby="model-menu-title">
+    <div class="dialog-top"><h2 id="model-menu-title">Model settings</h2><button id="model-close" type="button" aria-label="Close model settings">×</button></div>
+    <form id="model-form">
+      <label for="model-provider">Provider</label>
+      <select id="model-provider">
+        <option value="0">Current provider</option>
+        <option value="1">Ollama</option>
+        <option value="2">llama.cpp</option>
+        <option value="3">OpenAI</option>
+        <option value="4">Custom URL</option>
+      </select>
+      <p id="model-current-endpoint"></p>
+      <label id="model-url-label" for="model-url">API URL</label>
+      <input id="model-url" type="url" maxlength="2048" autocomplete="off">
+      <label for="model-id">Model ID</label>
+      <input id="model-id" maxlength="160" autocomplete="off">
+      <label id="model-key-label" for="model-key">Gateway key variable</label>
+      <input id="model-key" maxlength="160" autocomplete="off" placeholder="NEUTRINO_PROVIDER_KEY_NAME">
+      <label id="model-usage-label"><input id="model-usage" type="checkbox"> Request streaming token usage</label>
+      <p id="model-feedback" role="status"></p>
+      <button id="model-apply" class="primary" type="submit">Apply</button>
+    </form>
+  </dialog>
   <dialog id="login" aria-labelledby="login-title">
     <form id="login-form">
       <h2 id="login-title">Open workspace</h2>

@@ -788,6 +788,45 @@ static void palette(App *a, const Layout *l)
     }
 }
 
+static void model_popup(App *a, int *cx, int *cy)
+{
+    const ModelMenu *menu = &a->model_menu;
+    const int w = minimum(74,a->cols-4), h = 10, x = (a->cols-w)/2, y = (a->rows-h)/2;
+    const int label_width = w >= 45 ? 15 : 8, input_x = x+2+label_width, input_width = w-label_width-4;
+    const bool busy = a->provider_job && a->provider_menu_request;
+    const char *const labels[] = {"Provider", "API URL", "Model ID", "Key variable", "Stream usage", ""};
+    const char *const compact[] = {"Server", "URL", "Model", "Key env", "Usage", ""};
+    const char *key = menu->provider == MODEL_CURRENT && menu->authenticated ? "Configured on gateway" : str(&menu->key);
+    const char *const values[] = {model_provider_labels[menu->provider],str(&menu->endpoint),str(&menu->model),
+                                  key,menu->usage ? "On" : "Off","Apply"};
+    card(a,x,y,w,h,RAIL MINT NORMAL);
+    cell(a,x+2,y,w-4,RAIL MINT BOLD," Model settings ");
+    *cx = *cy = -1;
+    for (int i = 0; i < MODEL_FIELD_COUNT; ++i) {
+        const int row = y+i+1;
+        const bool active = i == menu->field && !busy;
+        const bool enabled = model_field_enabled(menu,i);
+        if (active) paint(a,x+1,row,w-2,PICK);
+        const char *style = active ? PICK TXT BOLD : enabled ? RAIL TXT NORMAL : RAIL DIM NORMAL;
+        clipped_cell(a,x+2,row,label_width,style,(w >= 45 ? labels : compact)[i]);
+        const char *value = values[i];
+        if (active && (i == MODEL_ENDPOINT_FIELD || i == MODEL_ID_FIELD || i == MODEL_KEY_FIELD)) {
+            size_t start = 0;
+            while (start < menu->caret && display_width(value+start,menu->caret-start) >= input_width)
+                start = utf_next(value,strlen(value),start);
+            *cx = input_x+display_width(value+start,menu->caret-start);
+            *cy = row;
+            value += start;
+        } else if (!*value && i == MODEL_ID_FIELD && !menu->admin) value = "Server default";
+        clipped_cell(a,input_x,row,input_width,style,value);
+    }
+    const char *message = busy ? "Contacting gateway…" : menu->error.len ? str(&menu->error) :
+                          !menu->admin ? "API settings require gateway admin access" : "";
+    clipped_cell(a,x+2,y+7,w-4,RAIL GOLD NORMAL,message);
+    clipped_cell(a,x+2,y+8,w-4,RAIL DIM NORMAL,w >= 56 ?
+                  "Tab move   ←→ choose   Enter next/apply   Esc close" : "Tab · Enter · Esc");
+}
+
 static void frame(App *a)
 {
     clear(&a->screen);
@@ -836,7 +875,8 @@ static void frame(App *a)
     clipped_cell(a, l.left + 2, a->rows - 1, l.width - reserve - 3,
                  preview_busy(&a->preview) || a->research_job ? RAIL GOLD NORMAL : RAIL DIM NORMAL, state);
     right(a, l.left + l.width - 2, a->rows - 1, reserve, RAIL QUIET NORMAL, keys);
-    palette(a, &l);
+    if (a->model_menu.open) model_popup(a,&cx,&cy);
+    else palette(a, &l);
     styled(a, ROOT TXT NORMAL);
     if (cx >= 0 && cy >= 0) editor_cursor(a, cx, cy);
 }

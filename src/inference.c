@@ -46,7 +46,7 @@ struct Inference {
     Text out, reasoning, error;
     InferenceMetrics metrics;
     atomic_bool cancel;
-    bool done, started, probe, from_gateway;
+    bool done, started, probe, configuration, from_gateway;
 #ifdef _WIN32
     SRWLOCK lock;
     HANDLE thread;
@@ -230,7 +230,7 @@ static bool transfer(Inference *j, Response *r, long *status)
         WinHttpSetTimeouts(session, setup, setup, setup, read);
     }
     HINTERNET conn = session ? WinHttpConnect(session, host, parts.nPort, 0) : NULL;
-    HINTERNET req = conn ? WinHttpOpenRequest(conn, j->probe ? L"GET" : L"POST", path, NULL, WINHTTP_NO_REFERER,
+    HINTERNET req = conn ? WinHttpOpenRequest(conn, j->probe && !j->configuration ? L"GET" : L"POST", path, NULL, WINHTTP_NO_REFERER,
                         WINHTTP_DEFAULT_ACCEPT_TYPES, parts.nScheme == INTERNET_SCHEME_HTTPS
                         ? WINHTTP_FLAG_SECURE : 0) : NULL;
     DWORD redirect = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
@@ -315,7 +315,7 @@ static bool transfer(Inference *j, Response *r, long *status)
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, j->probe ? 2500L : 10000L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, j->timeout_ms > 0 ? (long)j->timeout_ms : 300000L);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    if (!j->probe) curl_easy_setopt(curl, CURLOPT_POSTFIELDS, j->body);
+    if (j->body) curl_easy_setopt(curl, CURLOPT_POSTFIELDS, j->body);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_receive);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, r);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
@@ -500,6 +500,32 @@ Inference *inference_start(const char *endpoint, const char *key, const char *mo
 Inference *inference_probe(const char *endpoint, const char *key)
 {
     return start_request(endpoint, key, "", nullptr, (RequestOptions){.timeout_ms = 2500}, true, false);
+}
+Inference *inference_provider(const char *endpoint, const char *key, const Json *settings)
+{
+    if ((strncmp(endpoint,"http://",7) && strncmp(endpoint,"https://",8)) ||
+        strpbrk(endpoint,"\r\n?#@") || !*key || strpbrk(key,"\r\n")) return nullptr;
+#ifndef _WIN32
+    if (!initialize_http()) return nullptr;
+#endif
+    Inference *j = new_job();
+    j->probe = j->configuration = true;
+    j->timeout_ms = 5000;
+    Text url = {0};
+    size_t len = strlen(endpoint);
+    while (len && endpoint[len-1] == '/') --len;
+    const char suffix[] = "/chat/completions";
+    if (len >= sizeof suffix-1 && !memcmp(endpoint+len-(sizeof suffix-1),suffix,sizeof suffix-1))
+        len -= sizeof suffix-1;
+    append_n(&url,endpoint,len);
+    append(&url,"/provider");
+    j->url = url.data;
+    j->key = copy(key);
+    char *json = cJSON_PrintUnformatted(settings);
+    if (!json) abort();
+    j->body = copy(json);
+    cJSON_free(json);
+    return launch_job(j);
 }
 InferenceMetrics inference_metrics(Inference *j)
 {

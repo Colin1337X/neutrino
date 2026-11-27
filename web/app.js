@@ -6,11 +6,13 @@ const editor = byId("editor");
 const prompt = byId("prompt");
 const login = byId("login");
 const commandDialog = byId("commands");
+const modelDialog = byId("model-menu");
 const content = byId("content");
 const drafts = new Map();
 let token = "", feedback = "", state, commands = [], revision = 0, mutating = false;
 let editorId = null, libraryKey = "", messageKey = "", panelKey = "", toolMode;
 let earlier = null, uploadKind, mutation = Promise.resolve(), streamText = "";
+let modelRequested = false, modelSeeded = false;
 
 function element(tag, text, className) {
     const node = document.createElement(tag);
@@ -92,7 +94,72 @@ function mutate(route, payload, beforeRender) {
 }
 
 const act = (action, fields) => mutate("action", {action, ...fields});
-const submit = text => act("submit", {text});
+function submit(text) {
+    if (text.trim() !== "/model") return act("submit", {text});
+    modelRequested = true;
+    modelSeeded = false;
+    return act("submit", {text}).then(ok => {
+        if (!ok || !state?.modelMenu) modelRequested = false;
+        return ok;
+    });
+}
+
+function writeModelMenu(menu) {
+    if (!menu || !modelRequested) {
+        if (modelDialog.open) modelDialog.close();
+        if (!menu) modelRequested = false;
+        modelSeeded = false;
+        return;
+    }
+    if (!modelDialog.open) modelDialog.showModal();
+    const provider = byId("model-provider"), url = byId("model-url"), id = byId("model-id"), key = byId("model-key");
+    const usage = byId("model-usage");
+    const initialize = !modelSeeded && !menu.busy;
+    if (initialize) {
+        provider.value = "0";
+        url.value = menu.endpoint;
+        id.value = menu.model;
+        key.value = "";
+        usage.checked = menu.usage;
+        modelSeeded = true;
+    }
+    const custom = menu.admin && provider.value === "4", switching = menu.admin && provider.value !== "0";
+    byId("model-current-endpoint").textContent = menu.admin && !switching ?
+        menu.endpoint + (menu.authenticated ? " · Gateway key configured" : "") : "";
+    byId("model-url-label").hidden = url.hidden = !custom;
+    byId("model-key-label").hidden = key.hidden = !switching;
+    byId("model-usage-label").hidden = !menu.admin;
+    provider.disabled = usage.disabled = !menu.admin || menu.busy;
+    url.disabled = !custom || menu.busy;
+    key.disabled = !switching || menu.busy;
+    id.disabled = byId("model-apply").disabled = menu.busy;
+    id.required = menu.admin;
+    id.placeholder = menu.admin ? "Model ID from your provider" : "Server default";
+    url.required = custom;
+    byId("model-feedback").textContent = menu.busy ? "Contacting gateway…" :
+        menu.error || (menu.admin ? "" : "API settings require gateway admin access.");
+    if (initialize) (menu.admin ? provider : id).focus();
+}
+
+function closeModelMenu() {
+    modelRequested = false;
+    modelDialog.close();
+    act("model-close");
+}
+
+byId("model-close").addEventListener("click",closeModelMenu);
+modelDialog.addEventListener("cancel",event => {
+    event.preventDefault();
+    closeModelMenu();
+});
+byId("model-provider").addEventListener("change",() => writeModelMenu(state?.modelMenu));
+byId("model-form").addEventListener("submit",event => {
+    event.preventDefault();
+    act("model-apply",{
+        provider: Number(byId("model-provider").value), endpoint: byId("model-url").value.trim(),
+        model: byId("model-id").value.trim(), key: byId("model-key").value.trim(), usage: byId("model-usage").checked
+    });
+});
 
 function drawer(name, show) {
     workspace.dataset[name] = String(show);
@@ -234,10 +301,10 @@ function quickTools(roleplay) {
     toolMode = roleplay;
     const tools = roleplay ? [
         ["Narrate", "/narrate"], ["Swipe", "/swipe"], ["Branches", "/branch"], ["Compendium", "/memory"],
-        ["World", "/world"], ["Stats", "/stats"], ["Prompt trace", "/trace"], ["Neofetch", "/neofetch"]
+        ["World", "/world"], ["Stats", "/stats"], ["Models", "/model"], ["Prompt trace", "/trace"], ["Neofetch", "/neofetch"]
     ] : [
         ["Continue", "/continue"], ["Revisions", "/revisions"], ["Story Bible", "/bible"],
-        ["Context", "/context"], ["Start roleplay", "/play"], ["Prompt trace", "/trace"], ["Neofetch", "/neofetch"]
+        ["Context", "/context"], ["Start roleplay", "/play"], ["Models", "/model"], ["Prompt trace", "/trace"], ["Neofetch", "/neofetch"]
     ];
     byId("quick-tools").replaceChildren(...tools.map(([label, command]) => button(label, () => submit(command))));
 }
@@ -270,6 +337,7 @@ function render(next) {
     writeLibrary(next);
     quickTools(next.roleplay);
     writePanel(next.panel, next.busy);
+    writeModelMenu(next.modelMenu);
     if (showPanel) drawer("tools", true);
 }
 
@@ -299,7 +367,7 @@ function findCommands() {
         (item.name + " " + item.summary).toLowerCase().includes(needle));
     byId("command-results").replaceChildren(...rows.map(item => {
         const itemButton = button("/" + item.name + item.args, () => {
-            if (!item.args) {
+            if (!item.args || item.name === "model") {
                 commandDialog.close();
                 submit("/" + item.name);
             } else setPrompt("/" + item.name + " ");
@@ -334,7 +402,7 @@ byId("create").onclick = () => setPrompt(state?.roleplay ? "/story " : "/scene "
 byId("command-toggle").onclick = openCommands;
 byId("command-search").oninput = findCommands;
 document.addEventListener("keydown", event => {
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "p" && !login.open) {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "p" && !login.open && !modelDialog.open) {
         event.preventDefault();
         openCommands();
     }

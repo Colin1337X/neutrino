@@ -39,19 +39,23 @@ typedef struct {
     Inference *job;
     Json *messages;
     Route route;
-    bool closing;
+    bool closing, provider_request;
 } Client;
 typedef struct {
     const char *endpoint, *model, *key;
+    bool stream_usage;
 } Provider;
 typedef struct {
     Client clients[CLIENTS];
-    const char *host;
+    const char *host, *provider_admin;
     Provider provider;
+    char *provider_endpoint, *provider_model;
     int workers;
     uint64_t last_provider_result;
     bool provider_ok;
 } Gateway;
+
+static void configure_provider(Client *c, Gateway *gateway, const Json *settings);
 
 static bool route_for(const Provider *provider, const char *name, Route *route)
 {
@@ -60,7 +64,7 @@ static bool route_for(const Provider *provider, const char *name, Route *route)
     const bool slots = !strcmp(env("NEUTRINO_LLAMA_SLOTS", ""), "1");
     *route = (Route){.endpoint = base, .key = key, .model = provider->model,
         .options = {.slot = slots ? 0 : -1,
-                    .include_usage = !strcmp(env("NEUTRINO_STREAM_USAGE", ""), "1")}, .lane = 0};
+                    .include_usage = provider->stream_usage}, .lane = 0};
     if (!strcmp(name, "web-search") || !strcmp(name, "web-read")) {
         route->lane = 3;
         route->web_mode = !strcmp(name, "web-search") ? "web-search" : "web-read";
@@ -112,7 +116,7 @@ static bool route_for(const Provider *provider, const char *name, Route *route)
             route->key = key;
             route->lane = slots ? 1 : 0;
             route->options.slot = slots ? 1 : -1;
-            route->options.include_usage = !strcmp(env("NEUTRINO_STREAM_USAGE", ""), "1");
+            route->options.include_usage = provider->stream_usage;
             recall_model = provider->model;
         } else if (strncmp(binding, "recall:", 7) || strcmp(binding + 7, recall_model)) {
             return false;
@@ -180,6 +184,17 @@ static bool local_host(const char *host, const char *end)
     return true;
 }
 
+static void respond_json(Client *c, Json *value)
+{
+    char *body = cJSON_PrintUnformatted(value);
+    if (!body) abort();
+    format(&c->send,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+           "Cache-Control: no-store\r\nConnection: close\r\nContent-Length: %zu\r\n\r\n%s",strlen(body),body);
+    c->closing = true;
+    cJSON_free(body);
+    cJSON_Delete(value);
+}
+
 static void respond_status(Client *c, const Gateway *gateway)
 {
     int active = 0, queued = 0;
@@ -199,13 +214,7 @@ static void respond_status(Client *c, const Gateway *gateway)
     integer(status, "queued", queued);
     integer(status, "workers", pinned ? 1 : gateway->workers);
     put(status, "pinned_slots", cJSON_CreateBool(pinned));
-    char *body = cJSON_PrintUnformatted(status);
-    if (!body) abort();
-    format(&c->send, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-           "Cache-Control: no-store\r\nConnection: close\r\nContent-Length: %zu\r\n\r\n%s", strlen(body), body);
-    c->closing = true;
-    cJSON_free(body);
-    cJSON_Delete(status);
+    respond_json(c,status);
 }
 
 static bool receiving_request(const Client *c)
@@ -225,11 +234,19 @@ static void parse_headers(Client *c, const char *token, const Gateway *gateway)
     const char *line_end = strstr(s, "\r\n");
     const char path[] = "POST /v1/chat/completions HTTP/1.1";
     const char status_path[] = "GET /v1/status HTTP/1.1";
+    const char provider_path[] = "POST /v1/provider HTTP/1.1";
     bool status_request = (size_t)(line_end - s) == sizeof status_path - 1 &&
                           !memcmp(s, status_path, sizeof status_path - 1);
-    if (!status_request && ((size_t)(line_end - s) != sizeof path - 1 || memcmp(s, path, sizeof path - 1))) {
+    c->provider_request = (size_t)(line_end-s) == sizeof provider_path-1 &&
+                          !memcmp(s,provider_path,sizeof provider_path-1);
+    if (!status_request && !c->provider_request &&
+        ((size_t)(line_end - s) != sizeof path - 1 || memcmp(s, path, sizeof path - 1))) {
         http_error(c, 404, "Not Found");
         return;
+    }
+    if (c->provider_request) {
+        if (!*gateway->provider_admin) { http_error(c,404,"Not Found"); return; }
+        token = gateway->provider_admin;
     }
     bool has_length = false, has_host = false, authorized = !*token, auth_seen = false;
     size_t length = 0;
@@ -272,6 +289,7 @@ static void parse_headers(Client *c, const char *token, const Gateway *gateway)
         return;
     }
     if (!has_length) { http_error(c, 411, "Length Required"); return; }
+    if (c->provider_request && length > 4096) { http_error(c,413,"Body Too Large"); return; }
     if (c->request.len < offset + length) {
         int bodies = 0;
         for (int i = 0; i < CLIENTS; ++i)
@@ -283,7 +301,7 @@ static void parse_headers(Client *c, const char *token, const Gateway *gateway)
     c->request_started = monotonic_ms();
 }
 
-static void parse_request(Client *c, const char *token, const Gateway *gateway)
+static void parse_request(Client *c, const char *token, Gateway *gateway)
 {
     if (!c->body_offset) parse_headers(c, token, gateway);
     if (c->closing || !c->body_offset || c->request.len < c->body_offset + c->body_length) return;
@@ -291,6 +309,12 @@ static void parse_request(Client *c, const char *token, const Gateway *gateway)
     const char *s = str(&c->request);
     if (c->request.len != offset + length || memchr(s + offset, 0, length)) {
         http_error(c, 400, "Bad Request"); return;
+    }
+    if (c->provider_request) {
+        Json *settings = cJSON_ParseWithOpts(s+offset,nullptr,true);
+        configure_provider(c,gateway,settings);
+        cJSON_Delete(settings);
+        return;
     }
     int ready = 0;
     for (int i = 0; i < CLIENTS; ++i)
@@ -478,13 +502,11 @@ static bool provider_url(const char *url)
     return valid;
 }
 
-static bool provider_setup(Provider *provider, const ProviderSetup *setup)
+static const char *provider_setup(Provider *provider, const ProviderSetup *setup, bool allow_empty_model)
 {
     const char *model = setup->model ? setup->model : env("NEUTRINO_MODEL","");
-    if (!*model || (setup->model && strpbrk(model," \t\r\n"))) {
-        fputs("Pass --model MODEL_ID or set NEUTRINO_MODEL before starting the gateway.\n",stderr);
-        return false;
-    }
+    if ((!*model && !allow_empty_model) || (setup->model && strpbrk(model," \t\r\n")))
+        return "Pass --model MODEL_ID or set NEUTRINO_MODEL before starting the gateway.";
     const char *endpoint = setup->endpoint ? setup->endpoint : env("NEUTRINO_ENDPOINT","http://127.0.0.1:11434/v1");
     const char *key_env = setup->key_env;
     if (setup->endpoint) {
@@ -494,32 +516,94 @@ static bool provider_setup(Provider *provider, const ProviderSetup *setup)
             endpoint = "https://api.openai.com/v1";
             if (!key_env) key_env = "OPENAI_API_KEY";
         }
-        if (!provider_url(endpoint)) {
-            fputs("Use a provider preset or an HTTP(S) API URL without credentials, query, or fragment.\n",stderr);
-            return false;
-        }
+        if (!provider_url(endpoint))
+            return "Use a provider preset or an HTTP(S) API URL without credentials, query, or fragment.";
     }
     const char *key = setup->endpoint ? "" : env("NEUTRINO_API_KEY","");
     if (key_env) {
         const size_t letters = strspn(key_env,"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_");
         if (!letters || key_env[letters + strspn(key_env+letters,"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_0123456789")]) {
-            fputs("--api-key-env takes the name of an environment variable.\n",stderr);
-            return false;
+            return "Use the name of an API key environment variable.";
         }
         key = env(key_env,"");
-        if (!*key || strpbrk(key,"\r\n")) {
-            fputs("The provider API key environment variable is empty or invalid.\n",stderr);
-            return false;
-        }
+        if (!*key || strpbrk(key,"\r\n")) return "The provider API key environment variable is empty or invalid.";
     }
-    *provider = (Provider){endpoint,model,key};
-    return true;
+    *provider = (Provider){endpoint,model,key,!strcmp(env("NEUTRINO_STREAM_USAGE",""),"1")};
+    return nullptr;
+}
+
+static const char *update_provider(Gateway *gateway, const Json *settings)
+{
+    if (!cJSON_IsObject(settings)) return "Invalid provider settings.";
+    if (!settings->child) return nullptr;
+    const Json *field;
+    cJSON_ArrayForEach(field,settings) {
+        if (!field->string || at(settings,field->string) != field) return "Repeated provider setting.";
+        if (!strcmp(field->string,"stream_usage") && cJSON_IsBool(field)) continue;
+        if ((!strcmp(field->string,"endpoint") || !strcmp(field->string,"model") ||
+             !strcmp(field->string,"key_env")) && cJSON_IsString(field) && *field->valuestring) continue;
+        return "Invalid provider setting.";
+    }
+    const char *endpoint = js(settings,"endpoint"), *model = js(settings,"model"), *key = js(settings,"key_env");
+    if ((*endpoint && !*model) || (*key && !*endpoint))
+        return "Set the endpoint and model together.";
+    if (strlen(model) > 160 || strpbrk(model," \t\r\n")) return "Enter one model ID.";
+    const char prefix[] = "NEUTRINO_PROVIDER_KEY_";
+    if (*key && (strncmp(key,prefix,sizeof prefix-1) || !key[sizeof prefix-1]))
+        return "Use a gateway key variable named NEUTRINO_PROVIDER_KEY_<NAME>.";
+    for (int i = 0; i < CLIENTS; ++i)
+        if (gateway->clients[i].job || gateway->clients[i].messages)
+            return "The gateway has active requests. Try again after they finish.";
+    if (*endpoint) {
+        Provider replacement;
+        const ProviderSetup setup = {endpoint,model,*key ? key : nullptr};
+        const char *error = provider_setup(&replacement,&setup,false);
+        if (error) return error;
+        char *address = copy(replacement.endpoint);
+        free(gateway->provider_endpoint);
+        gateway->provider.endpoint = gateway->provider_endpoint = address;
+        gateway->provider.key = replacement.key;
+    }
+    if (*model) {
+        char *name = copy(model);
+        free(gateway->provider_model);
+        gateway->provider.model = gateway->provider_model = name;
+    }
+    if (at(settings,"stream_usage"))
+        gateway->provider.stream_usage = cJSON_IsTrue(at(settings,"stream_usage"));
+    gateway->last_provider_result = 0;
+    return nullptr;
+}
+
+static void configure_provider(Client *c, Gateway *gateway, const Json *settings)
+{
+    const char *error = update_provider(gateway,settings);
+    Json *response = cJSON_CreateObject();
+    if (error) set(response,"error",error);
+    else {
+        const Provider *provider = &gateway->provider;
+        set(response,"model",provider->model);
+        if (provider_url(provider->endpoint)) set(response,"endpoint",provider->endpoint);
+        put(response,"authenticated",cJSON_CreateBool(*provider->key));
+        put(response,"stream_usage",cJSON_CreateBool(provider->stream_usage));
+    }
+    respond_json(c,response);
 }
 
 int inference_server(int port, const ProviderSetup *setup, const volatile sig_atomic_t *stop)
 {
     Provider provider;
-    if (!provider_setup(&provider,setup)) return 2;
+    const char *admin = env("NEUTRINO_PROVIDER_ADMIN_TOKEN","");
+    if (*admin && (strlen(admin) < 16 || strpbrk(admin," \t\r\n"))) {
+        fputs("Use a provider admin token of at least 16 characters without whitespace.\n",stderr);
+        return 2;
+    }
+    if (*admin && !strcmp(admin,env("NEUTRINO_SERVER_TOKEN",""))) {
+        fputs("Use a separate provider admin token.\n",stderr);
+        return 2;
+    }
+    const char *error = provider_setup(&provider,setup,*admin && !setup->model);
+    if (error) { fprintf(stderr,"%s\n",error); return 2; }
     const char *configured_workers = env("NEUTRINO_WORKERS", "2");
     if (strlen(configured_workers) != 1 || configured_workers[0] < '1' || configured_workers[0] > '4') {
         fputs("NEUTRINO_WORKERS must be a number from 1 to 4.\n", stderr);
@@ -559,7 +643,7 @@ int inference_server(int port, const ProviderSetup *setup, const volatile sig_at
     } else {
         printf("Neutrino server listening on http://%s:%d/v1\n", bind_to, port);
         fflush(stdout);
-        Gateway gateway = {.host = host, .provider = provider, .workers = workers};
+        Gateway gateway = {.host = host, .provider_admin = admin, .provider = provider, .workers = workers};
         Client *clients = gateway.clients;
         for (int i = 0; i < CLIENTS; i++) clients[i].socket = BAD_SOCKET;
         while (!*stop) {
@@ -571,6 +655,8 @@ int inference_server(int port, const ProviderSetup *setup, const volatile sig_at
         }
         for (int i = 0; i < CLIENTS; i++) discard_socket(&clients[i]);
         for (int i = 0; i < CLIENTS; i++) reset_client(&clients[i]);
+        free(gateway.provider_endpoint);
+        free(gateway.provider_model);
     }
     if (listener != BAD_SOCKET) close_socket(listener);
 #ifdef _WIN32
