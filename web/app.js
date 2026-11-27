@@ -12,7 +12,7 @@ const drafts = new Map();
 let token = "", feedback = "", state, commands = [], revision = 0, mutating = false;
 let editorId = null, libraryKey = "", messageKey = "", panelKey = "", toolMode;
 let earlier = null, uploadKind, mutation = Promise.resolve(), streamText = "";
-let modelRequested = false, modelSeeded = false;
+let modelRequested = false, modelSeeded = false, modelEditing = "";
 
 function element(tag, text, className) {
     const node = document.createElement(tag);
@@ -98,6 +98,7 @@ function submit(text) {
     if (text.trim() !== "/model") return act("submit", {text});
     modelRequested = true;
     modelSeeded = false;
+    modelEditing = "";
     return act("submit", {text}).then(ok => {
         if (!ok || !state?.modelMenu) modelRequested = false;
         return ok;
@@ -131,15 +132,16 @@ function writeModelMenu(menu) {
         usage.checked = menu.usage;
         modelSeeded = true;
     }
-    const saved = Number(provider.value) >= 5;
-    const custom = menu.admin && provider.value === "4", switching = menu.admin && !saved && provider.value !== "0";
+    const saved = Number(provider.value) >= 5 && !modelEditing;
+    const custom = menu.admin && (provider.value === "4" || !!modelEditing);
+    const switching = menu.admin && !saved && (provider.value !== "0" || !!modelEditing);
     byId("model-current-endpoint").textContent = menu.admin && provider.value === "0" ?
         [menu.active_profile, menu.endpoint, menu.authenticated ? "Gateway key configured" : ""].filter(Boolean).join(" · ") : "";
     byId("model-url-label").hidden = url.hidden = !custom;
     byId("model-key-label").hidden = key.hidden = !switching;
     byId("model-usage-label").hidden = !menu.admin || saved;
     byId("model-name-label").hidden = byId("model-name").hidden = !menu.admin || saved;
-    provider.disabled = !menu.admin || menu.busy;
+    provider.disabled = !menu.admin || menu.busy || !!modelEditing;
     usage.disabled = byId("model-name").disabled = !menu.admin || menu.busy || saved;
     url.disabled = !custom || menu.busy;
     key.disabled = !switching || menu.busy;
@@ -147,7 +149,14 @@ function writeModelMenu(menu) {
     id.hidden = saved;
     document.querySelector('label[for="model-id"]').hidden = saved;
     byId("model-apply").disabled = menu.busy;
-    byId("model-apply").textContent = saved ? "Switch provider" : "Apply";
+    byId("model-apply").textContent = modelEditing ? "Save changes" : saved ? "Switch provider" : "Apply";
+    byId("model-name-label").textContent = modelEditing ? "Name" : "Save as";
+    byId("model-name").required = !!modelEditing;
+    key.placeholder = modelEditing ? "Blank keeps key · none clears it" : "NEUTRINO_PROVIDER_KEY_NAME";
+    for (const button of [byId("model-edit"),byId("model-delete")]) {
+        button.hidden = !saved;
+        button.disabled = menu.busy;
+    }
     id.required = menu.admin && !saved;
     id.placeholder = menu.admin ? "Model ID from your provider" : "Server default";
     url.required = custom;
@@ -168,9 +177,31 @@ modelDialog.addEventListener("cancel",event => {
     closeModelMenu();
 });
 byId("model-provider").addEventListener("change",() => writeModelMenu(state?.modelMenu));
+function selectedProfile() {
+    return state?.modelMenu?.profiles?.[Number(byId("model-provider").value)-5];
+}
+byId("model-edit").addEventListener("click",() => {
+    const name = selectedProfile();
+    const details = state?.modelMenu?.profile_details;
+    if (!name || !details || !Object.hasOwn(details,name)) return;
+    modelEditing = name;
+    byId("model-url").value = details[name].endpoint;
+    byId("model-id").value = details[name].model;
+    byId("model-usage").checked = details[name].stream_usage;
+    byId("model-key").value = "";
+    byId("model-name").value = name;
+    writeModelMenu(state.modelMenu);
+    byId("model-name").focus();
+});
+byId("model-delete").addEventListener("click",() => {
+    const profile = selectedProfile();
+    if (profile && window.confirm("Delete the saved provider “"+profile+"”?"))
+        act("model-profile-delete",{profile});
+});
 byId("model-form").addEventListener("submit",event => {
     event.preventDefault();
-    act("model-apply",{
+    act(modelEditing ? "model-profile-edit" : "model-apply",{
+        profile: modelEditing,
         provider: Number(byId("model-provider").value), endpoint: byId("model-url").value.trim(),
         model: byId("model-id").value.trim(), key: byId("model-key").value.trim(), usage: byId("model-usage").checked,
         name: byId("model-name").value.trim()

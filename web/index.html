@@ -101,7 +101,11 @@
       <label id="model-name-label" for="model-name">Save as</label>
       <input id="model-name" maxlength="48" autocomplete="off" placeholder="Profile name (optional)">
       <p id="model-feedback" role="status"></p>
-      <button id="model-apply" class="primary" type="submit">Apply</button>
+      <div class="panel-actions">
+        <button id="model-edit" type="button" hidden>Edit / rename</button>
+        <button id="model-delete" type="button" hidden>Delete</button>
+        <button id="model-apply" class="primary" type="submit">Apply</button>
+      </div>
     </form>
   </dialog>
   <dialog id="login" aria-labelledby="login-title">

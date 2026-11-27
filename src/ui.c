@@ -794,19 +794,25 @@ static void model_popup(App *a, int *cx, int *cy)
     const int w = minimum(74,a->cols-4), h = minimum(11,a->rows), x = (a->cols-w)/2, y = (a->rows-h)/2;
     const int label_width = w >= 45 ? 15 : 8, input_x = x+2+label_width, input_width = w-label_width-4;
     const bool busy = a->provider_job && a->provider_menu_request;
-    const char *const labels[] = {"Provider", "API URL", "Model ID", "Key variable", "Stream usage", "Save as", ""};
-    const char *const compact[] = {"Server", "URL", "Model", "Key env", "Usage", "Save as", ""};
+    const char *const labels[] = {"Provider", "API URL", "Model ID", "Key variable", "Stream usage",
+                                  menu->editing ? "Name" : "Save as", "", "", ""};
+    const char *const compact[] = {"Server", "URL", "Model", "Key env", "Usage",
+                                   menu->editing ? "Name" : "Save as", "", "", ""};
     const char *key = menu->provider == MODEL_CURRENT && menu->authenticated ? "Configured on gateway" : str(&menu->key);
     const char *const values[] = {model_provider_label(menu),str(&menu->endpoint),str(&menu->model),
                                   key,menu->usage ? "On" : "Off",str(&menu->name),
-                                  menu->provider >= MODEL_PROVIDER_COUNT ? "Switch provider" : "Apply"};
+                                  menu->editing ? "Save changes" :
+                                  menu->provider >= MODEL_PROVIDER_COUNT ? "Switch provider" : "Apply",
+                                  "Edit / rename", menu->confirming ? "Confirm delete" : "Delete profile"};
     card(a,x,y,w,h,RAIL MINT NORMAL);
-    cell(a,x+2,y,w-4,RAIL MINT BOLD," Model settings ");
+    cell(a,x+2,y,w-4,RAIL MINT BOLD,menu->editing ? " Edit provider " : " Model settings ");
     *cx = *cy = -1;
+    int row = y;
     for (int i = 0; i < MODEL_FIELD_COUNT; ++i) {
-        const int row = y+i+1;
         const bool active = i == menu->field && !busy;
         const bool enabled = model_field_enabled(menu,i);
+        if (!enabled && (menu->provider >= MODEL_PROVIDER_COUNT || i >= MODEL_EDIT_FIELD)) continue;
+        ++row;
         if (active) paint(a,x+1,row,w-2,PICK);
         const char *style = active ? PICK TXT BOLD : enabled ? RAIL TXT NORMAL : RAIL DIM NORMAL;
         clipped_cell(a,x+2,row,label_width,style,(w >= 45 ? labels : compact)[i]);
@@ -822,6 +828,8 @@ static void model_popup(App *a, int *cx, int *cy)
         clipped_cell(a,input_x,row,input_width,style,value);
     }
     const char *message = busy ? "Contacting gateway…" : menu->error.len ? str(&menu->error) :
+                          menu->confirming ? "Enter deletes this profile · Esc cancels" :
+                          menu->editing ? "Key: blank keeps it · none clears it" :
                           !menu->admin ? "API settings require gateway admin access" :
                           menu->provider == MODEL_CURRENT ? str(&menu->active_profile) : "";
     clipped_cell(a,x+2,y+8,w-4,RAIL GOLD NORMAL,message);

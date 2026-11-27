@@ -105,10 +105,10 @@ typedef struct {
 
 typedef struct {
     Text endpoint, model, key, name, active_profile, error;
-    Json *profiles;
+    Json *profiles, *profile_details;
     int provider, field;
     size_t caret;
-    bool open, admin, authenticated, usage;
+    bool open, admin, authenticated, usage, editing, confirming, managing;
 } ModelMenu;
 
 static inline bool preview_busy(const Preview *preview)
@@ -141,7 +141,7 @@ typedef struct {
 
 enum { MODEL_CURRENT, MODEL_OLLAMA, MODEL_LLAMACPP, MODEL_OPENAI, MODEL_CUSTOM, MODEL_PROVIDER_COUNT };
 enum { MODEL_PROVIDER_FIELD, MODEL_ENDPOINT_FIELD, MODEL_ID_FIELD, MODEL_KEY_FIELD, MODEL_USAGE_FIELD, MODEL_NAME_FIELD,
-       MODEL_APPLY_FIELD, MODEL_FIELD_COUNT };
+       MODEL_APPLY_FIELD, MODEL_EDIT_FIELD, MODEL_DELETE_FIELD, MODEL_FIELD_COUNT };
 extern const char *const model_provider_labels[MODEL_PROVIDER_COUNT];
 bool model_field_enabled(const ModelMenu *menu, int field);
 const char *model_provider_label(const ModelMenu *menu);

@@ -184,7 +184,53 @@ def live_switch(binary, folder, base, endpoint, received):
         apply_menu(6)
         stream()
         assert received[-1] == ("/v1/second/chat/completions","local/second",None,{"include_usage": True})
-        print("Named provider profiles, live switching, restart restore, and gateway-only keys verified")
+
+        def edit(profile, **changes):
+            menu = show_menu()
+            details = menu["profile_details"][profile]
+            fields = {"profile": profile, "name": profile, "endpoint": details["endpoint"], "model": details["model"],
+                      "usage": details["stream_usage"], "key": ""}
+            request(web+"/action",{"action":"model-profile-edit",**(fields | changes)})
+
+        def menu_closed():
+            return "modelMenu" not in request(web+"/state")
+
+        edit("Private relay",name="Public relay")
+        rejected = wait(lambda: menu if (menu := request(web+"/state").get("modelMenu", {})).get("error") else None)
+        assert "already uses" in rejected["error"]
+        assert "key_env" not in json.dumps(rejected) and "synthetic-rotated-key" not in json.dumps(rejected)
+        edit("Private relay",name="Renamed relay",model="local/renamed",usage=True)
+        wait(menu_closed)
+        stream()
+        assert received[-1] == ("/v1/second/chat/completions","local/second",None,{"include_usage": True})
+        menu = show_menu()
+        apply_menu(5+menu["profiles"].index("Renamed relay"))
+        edit("Renamed relay",model="local/edited",usage=False)
+        wait(menu_closed)
+        stream()
+        assert received[-1] == ("/v1/chat/completions","local/edited","Bearer synthetic-rotated-key",None)
+        show_menu()
+        request(web+"/action",{"action":"model-profile-delete","profile":"Public relay"})
+        wait(menu_closed)
+
+    gateway_port, web_port = free_port(), free_port()
+    gateway = f"http://127.0.0.1:{gateway_port}/v1"
+    web = f"http://127.0.0.1:{web_port}/api"
+    with process(binary,["--serve","--port",str(gateway_port)],settings,folder/"edited-gateway.log"), \
+         process(binary,["--web","--port",str(web_port),"--server",gateway,"--workspace",str(workspace)],
+                 settings,folder/"edited-web.log"):
+        wait(lambda: request(web+"/state"))
+        menu = show_menu()
+        assert menu["profiles"] == ["Renamed relay"] and menu["active_profile"] == "Renamed relay"
+        assert menu["profile_details"]["Renamed relay"]["model"] == "local/edited"
+        stream()
+        assert received[-1] == ("/v1/chat/completions","local/edited","Bearer synthetic-rotated-key",None)
+        request(web+"/action",{"action":"model-profile-delete","profile":"Renamed relay"})
+        wait(menu_closed)
+        stream()
+        assert received[-1] == ("/v1/chat/completions","local/edited","Bearer synthetic-rotated-key",None)
+        assert json.loads((folder/"providers.json").read_text(encoding="utf-8")) == {"profiles": {}, "active": ""}
+        print("Provider profile edits, rename, deletion, restart restore, and gateway-only keys verified")
 
 
 if __name__ == "__main__":

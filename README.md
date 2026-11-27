@@ -280,6 +280,8 @@ Open `/model` to choose a provider and edit its model ID, key variable, and stre
 
 Fill in **Save as** and apply to save a named provider, or reuse its name to update it. Saved names appear in the **Provider** list. Select a name and choose **Switch provider** to load all of its settings. With provider administration enabled, the gateway stores the profiles and the last saved selection in `.neutrino-providers.json` in its working directory. Set `NEUTRINO_PROVIDERS_FILE` to choose a different path. The file stores key variable names only. Keep their values in the gateway environment across restarts.
 
+Select a saved provider to open **Edit / rename** or **Delete profile**. Edits to the active profile apply immediately. Inactive profiles keep their edits for the next time you select them. In the editor, a blank key field keeps the existing key for the same URL. Enter `none` to clear the key or enter a gateway key variable to replace it. Changing an authenticated URL requires one of those choices. Deleting the active profile keeps its live connection for the current gateway session and clears the saved selection.
+
 ```text
 /model provider ollama | your-installed-model-id
 /model provider https://provider.example/v1 | model-id | NEUTRINO_PROVIDER_KEY_HOSTED

@@ -604,6 +604,64 @@ static void replace_provider(Gateway *gateway, Provider provider)
     gateway->last_provider_result = 0;
 }
 
+static bool write_profiles(const Gateway *gateway, const Json *draft)
+{
+    char *data = cJSON_PrintUnformatted(draft);
+    const bool saved = data && write_file(gateway->profiles.path,data,true);
+    cJSON_free(data);
+    return saved;
+}
+
+static const char *manage_profile(Gateway *gateway, const Json *settings)
+{
+    const char *edit = js(settings,"edit_profile"), *remove = js(settings,"delete_profile");
+    const Json *profiles = at(gateway->profiles.root,"profiles");
+    const char *name = *remove ? remove : edit;
+    const Json *old = at(profiles,name);
+    if (!old) return "Saved provider profile not found.";
+    const bool selected = !strcmp(js(gateway->profiles.root,"active"),name);
+    const char *renamed = js(settings,"save_as");
+    if (!*renamed) renamed = name;
+    Provider replacement = {0};
+    Json *entry = nullptr;
+    if (*remove) {
+        if (cJSON_GetArraySize(settings) != 1) return "Delete one profile at a time.";
+    } else {
+        if (*js(settings,"use_profile") || !profile_name(renamed) || !cJSON_IsBool(at(settings,"stream_usage")))
+            return "Enter valid profile settings.";
+        if (strcmp(name,renamed) && at(profiles,renamed)) return "A profile already uses that name.";
+        const char *endpoint = js(settings,"endpoint"), *model = js(settings,"model"), *key = js(settings,"key_env");
+        const bool clear_key = cJSON_IsTrue(at(settings,"clear_key"));
+        if (!provider_url(endpoint) || !*model || (clear_key && *key)) return "Enter an API URL and one model ID.";
+        if (!*key && !clear_key && at(old,"key_env")) {
+            if (strcmp(endpoint,js(old,"endpoint"))) return "Changing the URL requires a key variable or clearing the key.";
+            key = js(old,"key_env");
+        }
+        entry = cJSON_CreateObject();
+        set(entry,"endpoint",endpoint);
+        set(entry,"model",model);
+        if (*key) set(entry,"key_env",key);
+        put(entry,"stream_usage",cJSON_CreateBool(cJSON_IsTrue(at(settings,"stream_usage"))));
+        const char *error = !profile_shape(entry) ? "Invalid saved provider profile." :
+            (selected && gateway->profile_active) || *js(settings,"key_env") ? load_profile(&replacement,entry) : nullptr;
+        if (error) { cJSON_Delete(entry); return error; }
+    }
+    Json *draft = cJSON_Duplicate(gateway->profiles.root,true);
+    if (!draft) abort();
+    Json *list = at(draft,"profiles");
+    if (*remove || strcmp(name,renamed)) cJSON_DeleteItemFromObjectCaseSensitive(list,name);
+    if (entry) put(list,renamed,entry);
+    if (selected) set(draft,"active",*remove ? "" : renamed);
+    if (!write_profiles(gateway,draft)) { cJSON_Delete(draft); return "Could not write the gateway provider profile file."; }
+    if (selected && gateway->profile_active) {
+        if (*remove) gateway->profile_active = false;
+        else replace_provider(gateway,replacement);
+    }
+    cJSON_Delete(gateway->profiles.root);
+    gateway->profiles.root = draft;
+    return nullptr;
+}
+
 static const char *update_provider(Gateway *gateway, const Json *settings)
 {
     if (!cJSON_IsObject(settings)) return "Invalid provider settings.";
@@ -611,10 +669,11 @@ static const char *update_provider(Gateway *gateway, const Json *settings)
     const Json *field;
     cJSON_ArrayForEach(field,settings) {
         if (!field->string || at(settings,field->string) != field) return "Repeated provider setting.";
-        if (!strcmp(field->string,"stream_usage") && cJSON_IsBool(field)) continue;
+        if ((!strcmp(field->string,"stream_usage") || !strcmp(field->string,"clear_key")) && cJSON_IsBool(field)) continue;
         if ((!strcmp(field->string,"endpoint") || !strcmp(field->string,"model") ||
              !strcmp(field->string,"key_env") || !strcmp(field->string,"save_as") ||
-             !strcmp(field->string,"use_profile")) && cJSON_IsString(field) && *field->valuestring) continue;
+             !strcmp(field->string,"use_profile") || !strcmp(field->string,"edit_profile") ||
+             !strcmp(field->string,"delete_profile")) && cJSON_IsString(field) && *field->valuestring) continue;
         return "Invalid provider setting.";
     }
     const char *endpoint = js(settings,"endpoint"), *model = js(settings,"model"), *key = js(settings,"key_env");
@@ -630,6 +689,8 @@ static const char *update_provider(Gateway *gateway, const Json *settings)
     for (int i = 0; i < CLIENTS; ++i)
         if (gateway->clients[i].job || gateway->clients[i].messages)
             return "The gateway has active requests. Try again after they finish.";
+    if (*js(settings,"edit_profile") || *js(settings,"delete_profile")) return manage_profile(gateway,settings);
+    if (at(settings,"clear_key")) return "Clear a key while editing a profile.";
     Provider replacement = gateway->provider;
     const Json *profiles = at(gateway->profiles.root,"profiles");
     if (*use) {
@@ -661,10 +722,7 @@ static const char *update_provider(Gateway *gateway, const Json *settings)
             put(at(draft,"profiles"),save_as,entry);
         }
         set(draft,"active",*save_as ? save_as : use);
-        char *data = cJSON_PrintUnformatted(draft);
-        const bool saved = data && write_file(gateway->profiles.path,data,true);
-        cJSON_free(data);
-        if (!saved) { cJSON_Delete(draft); return "Could not write the gateway provider profile file."; }
+        if (!write_profiles(gateway,draft)) { cJSON_Delete(draft); return "Could not write the gateway provider profile file."; }
         replace_provider(gateway,replacement);
         cJSON_Delete(gateway->profiles.root);
         gateway->profiles.root = draft;
@@ -688,10 +746,19 @@ static void configure_provider(Client *c, Gateway *gateway, const Json *settings
         put(response,"authenticated",cJSON_CreateBool(*provider->key));
         put(response,"stream_usage",cJSON_CreateBool(provider->stream_usage));
         Json *names = cJSON_CreateArray();
+        Json *details = cJSON_CreateObject();
         const Json *entry;
-        cJSON_ArrayForEach(entry,at(gateway->profiles.root,"profiles"))
+        cJSON_ArrayForEach(entry,at(gateway->profiles.root,"profiles")) {
             cJSON_AddItemToArray(names,cJSON_CreateString(entry->string));
+            Json *info = cJSON_CreateObject();
+            set(info,"endpoint",js(entry,"endpoint"));
+            set(info,"model",js(entry,"model"));
+            put(info,"stream_usage",cJSON_CreateBool(cJSON_IsTrue(at(entry,"stream_usage"))));
+            put(info,"authenticated",cJSON_CreateBool(at(entry,"key_env") != nullptr));
+            put(details,entry->string,info);
+        }
         put(response,"profiles",names);
+        put(response,"profile_details",details);
         if (gateway->profile_active) set(response,"active_profile",js(gateway->profiles.root,"active"));
     }
     respond_json(c,response);
@@ -758,6 +825,7 @@ int inference_server(int port, const ProviderSetup *setup, const volatile sig_at
 #endif
             return 2;
         }
+        if (gateway.profile_active) replace_provider(&gateway,gateway.provider);
         printf("Neutrino server listening on http://%s:%d/v1\n", bind_to, port);
         fflush(stdout);
         Client *clients = gateway.clients;

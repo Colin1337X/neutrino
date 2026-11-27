@@ -151,7 +151,7 @@ static bool receive(Response *r, const char *data, size_t n)
 {
     if (cancelled(r->job) || r->pending.len + n > FILE_LIMIT) return false;
     if (r->job->probe) {
-        if (r->pending.len + n > 16384 || memchr(data, 0, n)) return false;
+        if (r->pending.len + n > (r->job->configuration ? 512*1024 : 16384) || memchr(data, 0, n)) return false;
         append_n(&r->pending, data, n);
         return true;
     }
