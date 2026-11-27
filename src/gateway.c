@@ -42,14 +42,16 @@ typedef struct {
     bool closing, provider_request;
 } Client;
 typedef struct {
-    const char *endpoint, *model, *key;
+    const char *endpoint, *model, *key, *key_env;
     bool stream_usage;
 } Provider;
 typedef struct {
     Client clients[CLIENTS];
     const char *host, *provider_admin;
     Provider provider;
-    char *provider_endpoint, *provider_model;
+    char *provider_endpoint, *provider_model, *provider_key_env;
+    Workspace profiles;
+    bool profile_active;
     int workers;
     uint64_t last_provider_result;
     bool provider_ok;
@@ -528,8 +530,78 @@ static const char *provider_setup(Provider *provider, const ProviderSetup *setup
         key = env(key_env,"");
         if (!*key || strpbrk(key,"\r\n")) return "The provider API key environment variable is empty or invalid.";
     }
-    *provider = (Provider){endpoint,model,key,!strcmp(env("NEUTRINO_STREAM_USAGE",""),"1")};
+    if (!key_env && !setup->endpoint && *key) key_env = "NEUTRINO_API_KEY";
+    *provider = (Provider){endpoint,model,key,key_env,!strcmp(env("NEUTRINO_STREAM_USAGE",""),"1")};
     return nullptr;
+}
+
+enum { PROVIDER_PROFILE_LIMIT = 32 };
+
+static bool profile_name(const char *name)
+{
+    size_t n = strlen(name);
+    if (!n || n > 48 || *name == ' ' || name[n-1] == ' ') return false;
+    for (const unsigned char *p = (const unsigned char *)name; *p; ++p)
+        if (*p < 32 || *p == 127) return false;
+    return true;
+}
+
+static bool profile_shape(const Json *entry)
+{
+    const Json *key = at(entry,"key_env");
+    return cJSON_IsObject(entry) && cJSON_GetArraySize(entry) == (key ? 4 : 3) &&
+        cJSON_IsString(at(entry,"endpoint")) && provider_url(js(entry,"endpoint")) &&
+        cJSON_IsString(at(entry,"model")) && *js(entry,"model") && strlen(js(entry,"model")) <= 160 &&
+        !strpbrk(js(entry,"model")," \t\r\n") && cJSON_IsBool(at(entry,"stream_usage")) &&
+        (!key || (cJSON_IsString(key) && *js(entry,"key_env")));
+}
+
+static const char *load_profile(Provider *provider, const Json *entry)
+{
+    if (!profile_shape(entry)) return "Invalid saved provider profile.";
+    const ProviderSetup setup = {js(entry,"endpoint"),js(entry,"model"),
+                                at(entry,"key_env") ? js(entry,"key_env") : nullptr};
+    const char *error = provider_setup(provider,&setup,false);
+    if (!error) provider->stream_usage = cJSON_IsTrue(at(entry,"stream_usage"));
+    return error;
+}
+
+static bool open_profiles(Gateway *gateway)
+{
+    Workspace *store = &gateway->profiles;
+    store->path = env("NEUTRINO_PROVIDERS_FILE",".neutrino-providers.json");
+    if (!workspace_lock(store)) return false;
+    char *text = read_file(store->path);
+    if (!text && errno != ENOENT) return false;
+    store->root = cJSON_ParseWithOpts(text ? text : "{\"profiles\":{},\"active\":\"\"}",nullptr,true);
+    free(text);
+    const Json *list = at(store->root,"profiles");
+    if (!cJSON_IsObject(list) || cJSON_GetArraySize(list) > PROVIDER_PROFILE_LIMIT ||
+        !cJSON_IsString(at(store->root,"active"))) return false;
+    const Json *entry;
+    cJSON_ArrayForEach(entry,list)
+        if (!profile_name(entry->string) || at(list,entry->string) != entry || !profile_shape(entry)) return false;
+    const char *active = js(store->root,"active");
+    if (*active) {
+        const char *error = load_profile(&gateway->provider,at(list,active));
+        if (error) { fprintf(stderr,"%s\n",error); return false; }
+        gateway->profile_active = true;
+    }
+    return true;
+}
+
+static void replace_provider(Gateway *gateway, Provider provider)
+{
+    char *endpoint = copy(provider.endpoint), *model = copy(provider.model);
+    char *key_env = provider.key_env ? copy(provider.key_env) : nullptr;
+    free(gateway->provider_endpoint);
+    free(gateway->provider_model);
+    free(gateway->provider_key_env);
+    provider.endpoint = gateway->provider_endpoint = endpoint;
+    provider.model = gateway->provider_model = model;
+    provider.key_env = gateway->provider_key_env = key_env;
+    gateway->provider = provider;
+    gateway->last_provider_result = 0;
 }
 
 static const char *update_provider(Gateway *gateway, const Json *settings)
@@ -541,10 +613,14 @@ static const char *update_provider(Gateway *gateway, const Json *settings)
         if (!field->string || at(settings,field->string) != field) return "Repeated provider setting.";
         if (!strcmp(field->string,"stream_usage") && cJSON_IsBool(field)) continue;
         if ((!strcmp(field->string,"endpoint") || !strcmp(field->string,"model") ||
-             !strcmp(field->string,"key_env")) && cJSON_IsString(field) && *field->valuestring) continue;
+             !strcmp(field->string,"key_env") || !strcmp(field->string,"save_as") ||
+             !strcmp(field->string,"use_profile")) && cJSON_IsString(field) && *field->valuestring) continue;
         return "Invalid provider setting.";
     }
     const char *endpoint = js(settings,"endpoint"), *model = js(settings,"model"), *key = js(settings,"key_env");
+    const char *save_as = js(settings,"save_as"), *use = js(settings,"use_profile");
+    if ((*save_as && !profile_name(save_as)) || (*use && cJSON_GetArraySize(settings) != 1))
+        return "Enter one valid profile name.";
     if ((*endpoint && !*model) || (*key && !*endpoint))
         return "Set the endpoint and model together.";
     if (strlen(model) > 160 || strpbrk(model," \t\r\n")) return "Enter one model ID.";
@@ -554,24 +630,49 @@ static const char *update_provider(Gateway *gateway, const Json *settings)
     for (int i = 0; i < CLIENTS; ++i)
         if (gateway->clients[i].job || gateway->clients[i].messages)
             return "The gateway has active requests. Try again after they finish.";
-    if (*endpoint) {
-        Provider replacement;
+    Provider replacement = gateway->provider;
+    const Json *profiles = at(gateway->profiles.root,"profiles");
+    if (*use) {
+        const Json *entry = at(profiles,use);
+        if (!entry) return "Saved provider profile not found.";
+        const char *error = load_profile(&replacement,entry);
+        if (error) return error;
+    } else if (*endpoint) {
         const ProviderSetup setup = {endpoint,model,*key ? key : nullptr};
         const char *error = provider_setup(&replacement,&setup,false);
         if (error) return error;
-        char *address = copy(replacement.endpoint);
-        free(gateway->provider_endpoint);
-        gateway->provider.endpoint = gateway->provider_endpoint = address;
-        gateway->provider.key = replacement.key;
+        replacement.stream_usage = gateway->provider.stream_usage;
     }
-    if (*model) {
-        char *name = copy(model);
-        free(gateway->provider_model);
-        gateway->provider.model = gateway->provider_model = name;
-    }
+    if (*model) replacement.model = model;
     if (at(settings,"stream_usage"))
-        gateway->provider.stream_usage = cJSON_IsTrue(at(settings,"stream_usage"));
-    gateway->last_provider_result = 0;
+        replacement.stream_usage = cJSON_IsTrue(at(settings,"stream_usage"));
+    if (*save_as || *use) {
+        if (*save_as && !at(profiles,save_as) && cJSON_GetArraySize(profiles) >= PROVIDER_PROFILE_LIMIT)
+            return "The gateway already has 32 saved provider profiles.";
+        if (!*replacement.model || !provider_url(replacement.endpoint)) return "Configure the API URL and model first.";
+        Json *draft = cJSON_Duplicate(gateway->profiles.root,true);
+        if (!draft) abort();
+        if (*save_as) {
+            Json *entry = cJSON_CreateObject();
+            set(entry,"endpoint",replacement.endpoint);
+            set(entry,"model",replacement.model);
+            if (replacement.key_env) set(entry,"key_env",replacement.key_env);
+            put(entry,"stream_usage",cJSON_CreateBool(replacement.stream_usage));
+            put(at(draft,"profiles"),save_as,entry);
+        }
+        set(draft,"active",*save_as ? save_as : use);
+        char *data = cJSON_PrintUnformatted(draft);
+        const bool saved = data && write_file(gateway->profiles.path,data,true);
+        cJSON_free(data);
+        if (!saved) { cJSON_Delete(draft); return "Could not write the gateway provider profile file."; }
+        replace_provider(gateway,replacement);
+        cJSON_Delete(gateway->profiles.root);
+        gateway->profiles.root = draft;
+        gateway->profile_active = true;
+    } else {
+        replace_provider(gateway,replacement);
+        gateway->profile_active = false;
+    }
     return nullptr;
 }
 
@@ -586,6 +687,12 @@ static void configure_provider(Client *c, Gateway *gateway, const Json *settings
         if (provider_url(provider->endpoint)) set(response,"endpoint",provider->endpoint);
         put(response,"authenticated",cJSON_CreateBool(*provider->key));
         put(response,"stream_usage",cJSON_CreateBool(provider->stream_usage));
+        Json *names = cJSON_CreateArray();
+        const Json *entry;
+        cJSON_ArrayForEach(entry,at(gateway->profiles.root,"profiles"))
+            cJSON_AddItemToArray(names,cJSON_CreateString(entry->string));
+        put(response,"profiles",names);
+        if (gateway->profile_active) set(response,"active_profile",js(gateway->profiles.root,"active"));
     }
     respond_json(c,response);
 }
@@ -641,9 +748,18 @@ int inference_server(int port, const ProviderSetup *setup, const volatile sig_at
         fprintf(stderr, "Could not listen on %s:%d.\n", bind_to, port);
         code = 1;
     } else {
+        Gateway gateway = {.host = host, .provider_admin = admin, .provider = provider, .workers = workers};
+        if (*admin && !open_profiles(&gateway)) {
+            fputs("Could not open the gateway provider profile file. Check its path, format, and active profile key.\n",stderr);
+            workspace_close(&gateway.profiles);
+            close_socket(listener);
+#ifdef _WIN32
+            WSACleanup();
+#endif
+            return 2;
+        }
         printf("Neutrino server listening on http://%s:%d/v1\n", bind_to, port);
         fflush(stdout);
-        Gateway gateway = {.host = host, .provider_admin = admin, .provider = provider, .workers = workers};
         Client *clients = gateway.clients;
         for (int i = 0; i < CLIENTS; i++) clients[i].socket = BAD_SOCKET;
         while (!*stop) {
@@ -657,6 +773,8 @@ int inference_server(int port, const ProviderSetup *setup, const volatile sig_at
         for (int i = 0; i < CLIENTS; i++) reset_client(&clients[i]);
         free(gateway.provider_endpoint);
         free(gateway.provider_model);
+        free(gateway.provider_key_env);
+        workspace_close(&gateway.profiles);
     }
     if (listener != BAD_SOCKET) close_socket(listener);
 #ifdef _WIN32

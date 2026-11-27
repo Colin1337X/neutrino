@@ -104,7 +104,8 @@ typedef struct {
 } Neofetch;
 
 typedef struct {
-    Text endpoint, model, key, error;
+    Text endpoint, model, key, name, active_profile, error;
+    Json *profiles;
     int provider, field;
     size_t caret;
     bool open, admin, authenticated, usage;
@@ -139,10 +140,11 @@ typedef struct {
 } App;
 
 enum { MODEL_CURRENT, MODEL_OLLAMA, MODEL_LLAMACPP, MODEL_OPENAI, MODEL_CUSTOM, MODEL_PROVIDER_COUNT };
-enum { MODEL_PROVIDER_FIELD, MODEL_ENDPOINT_FIELD, MODEL_ID_FIELD, MODEL_KEY_FIELD, MODEL_USAGE_FIELD,
+enum { MODEL_PROVIDER_FIELD, MODEL_ENDPOINT_FIELD, MODEL_ID_FIELD, MODEL_KEY_FIELD, MODEL_USAGE_FIELD, MODEL_NAME_FIELD,
        MODEL_APPLY_FIELD, MODEL_FIELD_COUNT };
 extern const char *const model_provider_labels[MODEL_PROVIDER_COUNT];
 bool model_field_enabled(const ModelMenu *menu, int field);
+const char *model_provider_label(const ModelMenu *menu);
 
 typedef struct Browser Browser;
 typedef enum { BROWSER_STATE, BROWSER_HISTORY, BROWSER_ACTION, BROWSER_IMPORT,

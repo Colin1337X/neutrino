@@ -342,7 +342,7 @@ struct WorkspaceLock {
 #endif
 };
 
-static bool lock_workspace(Workspace *ws)
+bool workspace_lock(Workspace *ws)
 {
     Text name = {0};
     format(&name, "%s.lock", ws->path);
@@ -387,7 +387,7 @@ void workspace_close(Workspace *ws)
 bool workspace_open(Workspace *ws, const char *path, bool writable)
 {
     *ws = (Workspace){.path = path};
-    if (path && writable && !lock_workspace(ws)) return false;
+    if (path && writable && !workspace_lock(ws)) return false;
     char *data = path ? read_text(path,SIZE_MAX-1) : NULL;
     if (path && !data && errno != ENOENT) { workspace_close(ws); return false; }
     ws->root = cJSON_ParseWithOpts(data ? data : "{\"records\":[],\"config\":{}}", NULL, 1);

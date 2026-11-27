@@ -13,7 +13,7 @@
 
 typedef cJSON Json;
 typedef struct { char *data; size_t len, cap; } Text;
-#define NEUTRINO_VERSION "0.20.0"
+#define NEUTRINO_VERSION "0.20.1"
 #define FILE_LIMIT (32u * 1024u * 1024u)
 #define EDIT_LIMIT (2u * 1024u * 1024u)
 
@@ -60,6 +60,7 @@ typedef struct {
 } Workspace;
 
 bool workspace_open(Workspace *ws, const char *path, bool writable);
+bool workspace_lock(Workspace *ws);
 void workspace_close(Workspace *ws);
 bool workspace_save(Workspace *ws);
 bool workspace_export(const Workspace *ws, const char *path);

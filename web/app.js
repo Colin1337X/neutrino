@@ -116,24 +116,39 @@ function writeModelMenu(menu) {
     const usage = byId("model-usage");
     const initialize = !modelSeeded && !menu.busy;
     if (initialize) {
+        provider.querySelectorAll("[data-saved]").forEach(option => option.remove());
+        for (const [i, name] of (menu.profiles ?? []).entries()) {
+            const option = element("option", name);
+            option.value = String(5 + i);
+            option.dataset.saved = "";
+            provider.append(option);
+        }
         provider.value = "0";
         url.value = menu.endpoint;
         id.value = menu.model;
         key.value = "";
+        byId("model-name").value = "";
         usage.checked = menu.usage;
         modelSeeded = true;
     }
-    const custom = menu.admin && provider.value === "4", switching = menu.admin && provider.value !== "0";
-    byId("model-current-endpoint").textContent = menu.admin && !switching ?
-        menu.endpoint + (menu.authenticated ? " · Gateway key configured" : "") : "";
+    const saved = Number(provider.value) >= 5;
+    const custom = menu.admin && provider.value === "4", switching = menu.admin && !saved && provider.value !== "0";
+    byId("model-current-endpoint").textContent = menu.admin && provider.value === "0" ?
+        [menu.active_profile, menu.endpoint, menu.authenticated ? "Gateway key configured" : ""].filter(Boolean).join(" · ") : "";
     byId("model-url-label").hidden = url.hidden = !custom;
     byId("model-key-label").hidden = key.hidden = !switching;
-    byId("model-usage-label").hidden = !menu.admin;
-    provider.disabled = usage.disabled = !menu.admin || menu.busy;
+    byId("model-usage-label").hidden = !menu.admin || saved;
+    byId("model-name-label").hidden = byId("model-name").hidden = !menu.admin || saved;
+    provider.disabled = !menu.admin || menu.busy;
+    usage.disabled = byId("model-name").disabled = !menu.admin || menu.busy || saved;
     url.disabled = !custom || menu.busy;
     key.disabled = !switching || menu.busy;
-    id.disabled = byId("model-apply").disabled = menu.busy;
-    id.required = menu.admin;
+    id.disabled = menu.busy || saved;
+    id.hidden = saved;
+    document.querySelector('label[for="model-id"]').hidden = saved;
+    byId("model-apply").disabled = menu.busy;
+    byId("model-apply").textContent = saved ? "Switch provider" : "Apply";
+    id.required = menu.admin && !saved;
     id.placeholder = menu.admin ? "Model ID from your provider" : "Server default";
     url.required = custom;
     byId("model-feedback").textContent = menu.busy ? "Contacting gateway…" :
@@ -157,7 +172,8 @@ byId("model-form").addEventListener("submit",event => {
     event.preventDefault();
     act("model-apply",{
         provider: Number(byId("model-provider").value), endpoint: byId("model-url").value.trim(),
-        model: byId("model-id").value.trim(), key: byId("model-key").value.trim(), usage: byId("model-usage").checked
+        model: byId("model-id").value.trim(), key: byId("model-key").value.trim(), usage: byId("model-usage").checked,
+        name: byId("model-name").value.trim()
     });
 });
 

@@ -1452,10 +1452,19 @@ static const char *const model_provider_presets[MODEL_PROVIDER_COUNT] = {
     "", "ollama", "llamacpp", "openai", ""
 };
 
+const char *model_provider_label(const ModelMenu *menu)
+{
+    if (menu->provider < MODEL_PROVIDER_COUNT) return model_provider_labels[menu->provider];
+    const char *name = cJSON_GetStringValue(cJSON_GetArrayItem(menu->profiles,menu->provider-MODEL_PROVIDER_COUNT));
+    return name ? name : "Unavailable profile";
+}
+
 bool model_field_enabled(const ModelMenu *menu, int field)
 {
+    if (menu->provider >= MODEL_PROVIDER_COUNT)
+        return field == MODEL_PROVIDER_FIELD || field == MODEL_APPLY_FIELD;
     switch (field) {
-    case MODEL_PROVIDER_FIELD: case MODEL_USAGE_FIELD: return menu->admin;
+    case MODEL_PROVIDER_FIELD: case MODEL_USAGE_FIELD: case MODEL_NAME_FIELD: return menu->admin;
     case MODEL_ENDPOINT_FIELD: return menu->admin && menu->provider == MODEL_CUSTOM;
     case MODEL_KEY_FIELD: return menu->admin && menu->provider != MODEL_CURRENT;
     default: return true;
@@ -1504,6 +1513,10 @@ static void open_model_menu(App *a)
     clear(&menu->endpoint);
     clear(&menu->model);
     clear(&menu->key);
+    clear(&menu->name);
+    clear(&menu->active_profile);
+    cJSON_Delete(menu->profiles);
+    menu->profiles = nullptr;
     clear(&menu->error);
     append(&menu->model,js(a->ws.root,"serverNarrator"));
     menu->caret = menu->model.len;
@@ -1519,11 +1532,13 @@ static bool model_menu_busy(const App *a)
     return a->provider_job && a->provider_menu_request;
 }
 
-static void apply_model_menu(App *a, int provider, const char *endpoint, const char *model, const char *key, bool usage)
+static void apply_model_menu(App *a, int provider, const char *endpoint, const char *model, const char *key, bool usage,
+                             const char *save_as)
 {
     ModelMenu *menu = &a->model_menu;
     if (a->provider_job) return;
-    if (!model_id_valid(model) || (menu->admin && !*model)) {
+    const bool saved_profile = menu->admin && provider >= MODEL_PROVIDER_COUNT;
+    if (!saved_profile && (!model_id_valid(model) || (menu->admin && !*model))) {
         model_menu_error(menu,"Enter one model ID.");
         return;
     }
@@ -1537,16 +1552,29 @@ static void apply_model_menu(App *a, int provider, const char *endpoint, const c
         menu->open = false;
         return;
     }
-    if (provider < MODEL_CURRENT || provider >= MODEL_PROVIDER_COUNT || (provider == MODEL_CUSTOM && !*endpoint)) {
+    if (provider < MODEL_CURRENT || provider >= MODEL_PROVIDER_COUNT+cJSON_GetArraySize(menu->profiles) ||
+        (provider == MODEL_CUSTOM && !*endpoint)) {
         model_menu_error(menu,"Choose a provider and enter its API URL.");
         return;
     }
     Json *settings = cJSON_CreateObject();
-    set(settings,"model",model);
-    put(settings,"stream_usage",cJSON_CreateBool(usage));
-    if (provider != MODEL_CURRENT) {
-        set(settings,"endpoint",provider == MODEL_CUSTOM ? endpoint : model_provider_presets[provider]);
-        if (*key) set(settings,"key_env",key);
+    if (saved_profile) {
+        const Json *entry = cJSON_GetArrayItem(menu->profiles,provider-MODEL_PROVIDER_COUNT);
+        const char *name = cJSON_GetStringValue(entry);
+        if (!name || !*name) {
+            cJSON_Delete(settings);
+            model_menu_error(menu,"Saved provider profile is unavailable.");
+            return;
+        }
+        set(settings,"use_profile",name);
+    } else {
+        set(settings,"model",model);
+        put(settings,"stream_usage",cJSON_CreateBool(usage));
+        if (*save_as) set(settings,"save_as",save_as);
+        if (provider != MODEL_CURRENT) {
+            set(settings,"endpoint",provider == MODEL_CUSTOM ? endpoint : model_provider_presets[provider]);
+            if (*key) set(settings,"key_env",key);
+        }
     }
     clear(&menu->error);
     start_model_api(a,settings,true,true);
@@ -1620,6 +1648,11 @@ static bool tick_model_api(App *a)
                     append(&menu->model,js(response,"model"));
                     menu->authenticated = cJSON_IsTrue(at(response,"authenticated"));
                     menu->usage = cJSON_IsTrue(at(response,"stream_usage"));
+                    clear(&menu->active_profile);
+                    append(&menu->active_profile,js(response,"active_profile"));
+                    cJSON_Delete(menu->profiles);
+                    const Json *profiles = at(response,"profiles");
+                    menu->profiles = cJSON_IsArray(profiles) ? cJSON_Duplicate(profiles,true) : nullptr;
                     menu->caret = menu->model.len;
                 }
             } else {
@@ -2584,6 +2617,7 @@ static Text *model_field_text(ModelMenu *menu)
     case MODEL_ENDPOINT_FIELD: return &menu->endpoint;
     case MODEL_ID_FIELD: return &menu->model;
     case MODEL_KEY_FIELD: return &menu->key;
+    case MODEL_NAME_FIELD: return &menu->name;
     default: return nullptr;
     }
 }
@@ -2595,7 +2629,8 @@ static void model_menu_key(App *a, int key)
     if (model_menu_busy(a)) return;
     if (key == KEY_UP || key == KEY_DOWN || key == 9 || key == KEY_BACKTAB || key == 13 || key == 10) {
         if ((key == 13 || key == 10) && menu->field == MODEL_APPLY_FIELD) {
-            apply_model_menu(a,menu->provider,str(&menu->endpoint),str(&menu->model),str(&menu->key),menu->usage);
+            apply_model_menu(a,menu->provider,str(&menu->endpoint),str(&menu->model),str(&menu->key),menu->usage,
+                             str(&menu->name));
             return;
         }
         const int step = key == KEY_UP || key == KEY_BACKTAB ? MODEL_FIELD_COUNT-1 : 1;
@@ -2606,8 +2641,10 @@ static void model_menu_key(App *a, int key)
         return;
     }
     if (menu->field == MODEL_PROVIDER_FIELD) {
-        if (key == KEY_LEFT || key == KEY_RIGHT || key == ' ')
-            menu->provider = (menu->provider+(key == KEY_LEFT ? MODEL_PROVIDER_COUNT-1 : 1))%MODEL_PROVIDER_COUNT;
+        if (key == KEY_LEFT || key == KEY_RIGHT || key == ' ') {
+            int count = MODEL_PROVIDER_COUNT+cJSON_GetArraySize(menu->profiles);
+            menu->provider = (menu->provider+(key == KEY_LEFT ? count-1 : 1))%count;
+        }
         return;
     }
     if (menu->field == MODEL_USAGE_FIELD) {
@@ -2634,7 +2671,7 @@ static void model_menu_key(App *a, int key)
         if (key >= 32 && key <= 0x10ffff && !(key >= 127 && key < 160)) {
             char chars[4];
             const int n = utf_encode(key,chars);
-            const size_t limit = menu->field == MODEL_ENDPOINT_FIELD ? 2048 : 160;
+            const size_t limit = menu->field == MODEL_ENDPOINT_FIELD ? 2048 : menu->field == MODEL_NAME_FIELD ? 48 : 160;
             if (input->len+(size_t)n <= limit) insert_bytes(input,caret,chars,(size_t)n);
         }
     }
@@ -2812,6 +2849,8 @@ static Json *browser_state(const App *a)
         set(value,"endpoint",str(&menu->endpoint));
         set(value,"model",str(&menu->model));
         set(value,"error",str(&menu->error));
+        set(value,"active_profile",str(&menu->active_profile));
+        if (menu->profiles) put(value,"profiles",cJSON_Duplicate(menu->profiles,true));
     }
     if (a->roleplay) {
         put(state, "messages", browser_messages(a, 80));
@@ -2852,12 +2891,13 @@ static int browser_action(App *a, const Json *input, Text *error)
                cJSON_IsNumber(at(input,"provider")) && cJSON_IsString(at(input,"endpoint")) &&
                cJSON_IsString(at(input,"model")) && cJSON_IsString(at(input,"key")) &&
                cJSON_IsBool(at(input,"usage"))) {
-        if (strlen(js(input,"endpoint")) > 2048 || strlen(js(input,"key")) > 160) {
+        if (strlen(js(input,"endpoint")) > 2048 || strlen(js(input,"key")) > 160 || strlen(js(input,"name")) > 48 ||
+            (at(input,"name") && !cJSON_IsString(at(input,"name")))) {
             append(error,"The API URL or key variable is too long.");
             return 400;
         }
         apply_model_menu(a,number(input,"provider"),js(input,"endpoint"),js(input,"model"),js(input,"key"),
-                         cJSON_IsTrue(at(input,"usage")));
+                         cJSON_IsTrue(at(input,"usage")),js(input,"name"));
     } else if (!strcmp(action, "open") && cJSON_IsBool(at(input, "roleplay"))) {
         const char *id = js(input, "id");
         bool switching = !cJSON_IsString(at(input, "id"));
@@ -3102,6 +3142,9 @@ static int run(int argc, char **argv)
     release(&a.model_menu.endpoint);
     release(&a.model_menu.model);
     release(&a.model_menu.key);
+    release(&a.model_menu.name);
+    release(&a.model_menu.active_profile);
+    cJSON_Delete(a.model_menu.profiles);
     release(&a.model_menu.error);
     release(&a.neo.error);
     for (int i = 0; i < a.history_count; i++) free(a.history[i]);

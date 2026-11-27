@@ -278,6 +278,8 @@ Set `NEUTRINO_PROVIDER_ADMIN_TOKEN` to the same secret in the gateway and in eac
 
 Open `/model` to choose a provider and edit its model ID, key variable, and streaming usage setting. In the terminal, use Tab to move, the arrow keys to change choices, and Enter on Apply. Choosing **Current provider** keeps its endpoint and gateway credential. Without admin access, the menu can select the workspace narrator model.
 
+Fill in **Save as** and apply to save a named provider, or reuse its name to update it. Saved names appear in the **Provider** list. Select a name and choose **Switch provider** to load all of its settings. With provider administration enabled, the gateway stores the profiles and the last saved selection in `.neutrino-providers.json` in its working directory. Set `NEUTRINO_PROVIDERS_FILE` to choose a different path. The file stores key variable names only. Keep their values in the gateway environment across restarts.
+
 ```text
 /model provider ollama | your-installed-model-id
 /model provider https://provider.example/v1 | model-id | NEUTRINO_PROVIDER_KEY_HOSTED
@@ -285,7 +287,7 @@ Open `/model` to choose a provider and edit its model ID, key variable, and stre
 /model api usage on
 ```
 
-Set custom key variables such as `NEUTRINO_PROVIDER_KEY_HOSTED` in the gateway environment. The command takes the variable's name. The `openai` preset uses the gateway's `OPENAI_API_KEY` when the key variable is omitted. `/model api usage off` disables the optional stream-usage request. Provider settings apply to everyone using that gateway and last until it restarts. Start a web process with the admin token only when its users should have permission to manage the gateway.
+Set custom key variables such as `NEUTRINO_PROVIDER_KEY_HOSTED` in the gateway environment. The command takes the variable's name. The `openai` preset uses the gateway's `OPENAI_API_KEY` when the key variable is omitted. `/model api usage off` disables the optional stream-usage request. Provider settings apply to everyone using that gateway. Unsaved changes last until it restarts. Start a web process with the admin token only when its users should have permission to manage the gateway.
 
 Open the TUI in a second terminal. Its default server address is `http://127.0.0.1:4783/v1`. The TUI sends prompts to Neutrino's server, which opens the upstream provider connection and streams the reply back.
 

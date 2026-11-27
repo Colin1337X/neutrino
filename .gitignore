@@ -2,3 +2,4 @@
 /.neutrino*
 *.obj
 *.exe
+.neutrino-providers.json*

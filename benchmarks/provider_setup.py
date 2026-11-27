@@ -85,7 +85,8 @@ def live_switch(binary, folder, base, endpoint, received):
     admin = "synthetic-provider-admin-token"
     ordinary = "synthetic-inference-token"
     settings = base | {"NEUTRINO_PROVIDER_ADMIN_TOKEN": admin, "NEUTRINO_SERVER_TOKEN": ordinary,
-                       "NEUTRINO_PROVIDER_KEY_FIXTURE": "synthetic-runtime-key"}
+                       "NEUTRINO_PROVIDER_KEY_FIXTURE": "synthetic-runtime-key",
+                       "NEUTRINO_PROVIDERS_FILE": str(folder / "providers.json")}
     gateway_port, web_port = free_port(), free_port()
     gateway = f"http://127.0.0.1:{gateway_port}/v1"
     web = f"http://127.0.0.1:{web_port}/api"
@@ -135,20 +136,20 @@ def live_switch(binary, folder, base, endpoint, received):
             submit("/model")
             return wait(lambda: menu if (menu := request(web+"/state").get("modelMenu")) and not menu["busy"] else None)
 
-        def apply_menu(provider, url, model, usage):
+        def apply_menu(provider, url="", model="", usage=False, name=""):
             request(web+"/action",{"action":"model-apply","provider":provider,"endpoint":url,
-                                   "model":model,"key":"","usage":usage})
+                                   "model":model,"key":"","usage":usage,"name":name})
             wait(lambda: "modelMenu" not in request(web+"/state"))
 
         menu = show_menu()
         assert menu["endpoint"] == endpoint and menu["model"] == "local/first" and menu["authenticated"]
         assert "synthetic-runtime-key" not in json.dumps(menu)
-        apply_menu(0,"","local/current",False)
+        apply_menu(0,"","local/current",False,"Private relay")
         stream()
         assert received[-1] == ("/v1/chat/completions","local/current","Bearer synthetic-runtime-key",None)
 
         show_menu()
-        apply_menu(4,endpoint+"/second","local/second",True)
+        apply_menu(4,endpoint+"/second","local/second",True,"Public relay")
         stream()
         assert received[-1] == ("/v1/second/chat/completions","local/second",None,{"include_usage": True})
         panel = finish("/model api","Gateway API settings ready")["panel"]["text"]
@@ -156,7 +157,34 @@ def live_switch(binary, folder, base, endpoint, received):
         finish("/model api usage off","Gateway API settings ready")
         stream()
         assert received[-1] == ("/v1/second/chat/completions","local/second",None,None)
-        print("Live /model menu, provider switching, API settings, and separate admin authorization verified")
+        menu = show_menu()
+        assert menu["profiles"] == ["Private relay","Public relay"]
+        apply_menu(5)
+        stream()
+        assert received[-1] == ("/v1/chat/completions","local/current","Bearer synthetic-runtime-key",None)
+        saved = (folder/"providers.json").read_text(encoding="utf-8")
+        assert "synthetic-runtime-key" not in saved
+        profiles = json.loads(saved)
+        assert profiles["active"] == "Private relay"
+        assert profiles["profiles"]["Private relay"]["key_env"] == "NEUTRINO_PROVIDER_KEY_FIXTURE"
+
+    gateway_port, web_port = free_port(), free_port()
+    gateway = f"http://127.0.0.1:{gateway_port}/v1"
+    web = f"http://127.0.0.1:{web_port}/api"
+    settings["NEUTRINO_PROVIDER_KEY_FIXTURE"] = "synthetic-rotated-key"
+    with process(binary,["--serve","--port",str(gateway_port)],settings,folder/"restart-gateway.log"), \
+         process(binary,["--web","--port",str(web_port),"--server",gateway,"--workspace",str(workspace)],
+                 settings,folder/"restart-web.log"):
+        wait(lambda: request(web+"/state"))
+        stream()
+        assert received[-1] == ("/v1/chat/completions","local/current","Bearer synthetic-rotated-key",None)
+        menu = show_menu()
+        assert menu["active_profile"] == "Private relay" and menu["profiles"] == ["Private relay","Public relay"]
+        assert "synthetic-rotated-key" not in json.dumps(menu)
+        apply_menu(6)
+        stream()
+        assert received[-1] == ("/v1/second/chat/completions","local/second",None,{"include_usage": True})
+        print("Named provider profiles, live switching, restart restore, and gateway-only keys verified")
 
 
 if __name__ == "__main__":
