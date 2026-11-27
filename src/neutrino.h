@@ -13,7 +13,7 @@
 
 typedef cJSON Json;
 typedef struct { char *data; size_t len, cap; } Text;
-#define NEUTRINO_VERSION "0.18.1"
+#define NEUTRINO_VERSION "0.19.0"
 #define FILE_LIMIT (32u * 1024u * 1024u)
 #define EDIT_LIMIT (2u * 1024u * 1024u)
 
@@ -133,7 +133,8 @@ void inference_cancel(Inference *job);
 void inference_free(Inference *job);
 uint64_t monotonic_ms(void);
 void pause_ms(unsigned milliseconds);
-int inference_server(int port, const volatile sig_atomic_t *stop);
+typedef struct { const char *endpoint, *model, *key_env; } ProviderSetup;
+int inference_server(int port, const ProviderSetup *setup, const volatile sig_atomic_t *stop);
 int bench_ttft(const char *server, const char *token, int trials, const volatile sig_atomic_t *stop);
 
 #endif

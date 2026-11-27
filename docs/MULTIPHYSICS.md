@@ -72,6 +72,8 @@ CPU worker groups divide CFD grids, ray batches, recursive sound and light path 
 
 `/trace` shows the worker count and selection inputs beside each scheduled physics step. Automatic decisions show estimated work, work per worker, available CPU count, and job cap. Manual decisions show the request and any limit from independent work units. The trace can include a player-run `/sim` plan alongside the model prompt. The narrator receives the tool results without the scheduler diagnostics. `/neofetch` displays the physics scheduler mode for the process running the simulation.
 
+Use `/sim workers auto` or `/sim workers 1–16` to change scheduling while Neutrino is running. `/sim workers` reports the current mode. The command overrides the startup environment for the current process and applies to newly dispatched physics work. Browser tabs served by the same process share the setting.
+
 With `solid_geometry:true`, the default `"raster":"center"` marks cells whose centers fall inside geometry and reports any boxes that occupy zero cells. Select `"raster":"conservative"` to mark every cell with positive-volume overlap. This resolves thin walls at coarse resolution and can widen a wall or close a sub-cell opening. The [sealed-room fixture](../benchmarks/closed-cfd.json) exercises both exterior modes and both raster rules.
 
 ### Character conversations

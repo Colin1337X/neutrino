@@ -6,6 +6,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <string.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -56,6 +57,7 @@ static const struct {
 };
 
 static _Thread_local Text *scheduler_trace;
+static atomic_int live_workers = -1;
 
 Text *parallel_trace_to(Text *out)
 {
@@ -155,9 +157,8 @@ static unsigned available_cpus(void)
 #endif
 }
 
-unsigned parallel_override(void)
+static unsigned parse_workers(const char *setting)
 {
-    const char *setting = getenv("NEUTRINO_PHYSICS_WORKERS");
     if (setting && *setting) {
         char *end;
         const unsigned long requested = strtoul(setting,&end,10);
@@ -165,6 +166,20 @@ unsigned parallel_override(void)
             return (unsigned)requested;
     }
     return 0;
+}
+
+bool parallel_set_workers(const char *mode)
+{
+    const unsigned requested = parse_workers(mode);
+    if (strcmp(mode,"auto") && (!requested || mode[strspn(mode,"0123456789")])) return false;
+    atomic_store_explicit(&live_workers,(int)requested,memory_order_relaxed);
+    return true;
+}
+
+unsigned parallel_override(void)
+{
+    const int live = atomic_load_explicit(&live_workers,memory_order_relaxed);
+    return live >= 0 ? (unsigned)live : parse_workers(getenv("NEUTRINO_PHYSICS_WORKERS"));
 }
 
 void parallel_mode(Text *out)

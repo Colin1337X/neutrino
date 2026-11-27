@@ -257,12 +257,20 @@ See the [dependency audit](docs/DEPENDENCIES.md) for the build, runtime, and dep
 
 ## Connect the inference server
 
-Start Neutrino's server in a terminal on the machine that can reach the provider. For example, in PowerShell with Ollama running locally:
+Start the gateway on the machine that can reach the provider. Use a preset for local Ollama or llama.cpp, or give the full OpenAI-compatible API URL and model ID.
 
 ```powershell
-$env:NEUTRINO_MODEL = 'your-installed-model-id'
-.\build\neutrino.exe --serve
+.\build\neutrino.exe --serve --provider ollama --model 'your-installed-model-id'
+.\build\neutrino.exe --serve --provider http://127.0.0.1:8080/v1 --model 'your-model-id'
 ```
+
+For a hosted provider, put its key in the gateway process environment and give the variable name. The `openai` preset defaults to `OPENAI_API_KEY`.
+
+```powershell
+.\build\neutrino.exe --serve --provider 'https://provider.example/v1' --model 'model-id' --api-key-env MY_PROVIDER_KEY
+```
+
+An explicitly chosen endpoint uses the named key variable or the preset's default. Existing environment-only launches still use `NEUTRINO_ENDPOINT`, `NEUTRINO_MODEL`, and `NEUTRINO_API_KEY`.
 
 Open the TUI in a second terminal. Its default server address is `http://127.0.0.1:4783/v1`. The TUI sends prompts to Neutrino's server, which opens the upstream provider connection and streams the reply back.
 
@@ -273,13 +281,13 @@ Open the TUI in a second terminal. Its default server address is `http://127.0.0
 | Server setting | Purpose |
 | --- | --- |
 | `NEUTRINO_ENDPOINT` | OpenAI-compatible provider base URL. Defaults to `http://127.0.0.1:11434/v1`. |
-| `NEUTRINO_MODEL` | Narrator and manuscript model ID. Required. |
+| `NEUTRINO_MODEL` | Narrator and manuscript model ID when `--model` is omitted. |
 | `NEUTRINO_API_KEY` | Upstream bearer credential, when required. Keep it in the server process. |
 | `NEUTRINO_AGENT_MODEL` | Filing and historian model. Defaults to the narrator model. |
 | `NEUTRINO_RECALL_MODEL` | Recall model. Defaults to the agent model. |
 | `NEUTRINO_RECALL_ENDPOINT`, `NEUTRINO_RECALL_API_KEY` | Optional dedicated recall provider and its bearer credential. |
 | `NEUTRINO_WORKERS` | Parallel upstream requests for the default provider when unpinned. Set 1–4, default 2. A pinned llama.cpp slot or a dedicated recall endpoint runs one request at a time. |
-| `NEUTRINO_PHYSICS_WORKERS` | Defaults to `auto`, which sizes each physics worker group using the work to be done and the CPUs available to Neutrino. Set 1–16 to request a specific group size, including the caller. The override can exceed the available CPUs and is limited by the independent work units. |
+| `NEUTRINO_PHYSICS_WORKERS` | Startup scheduler setting. Defaults to `auto`. Use `/sim workers auto` or `/sim workers 1–16` to change it for the current TUI or web process. A manual count includes the caller and is limited by independent work units. |
 | `NEUTRINO_STREAM_USAGE` | Optional. Set to `1` if the default upstream provider supports OpenAI-compatible `stream_options.include_usage` and only returns token counts when asked. llama.cpp timing metrics work without this setting. |
 | `NEUTRINO_SERVER_TOKEN` | Optional credential between the TUI and Neutrino's server. Set it in both processes when enabled. |
 | `NEUTRINO_SERVER_BIND` | Inference gateway IPv4 listen address. Defaults to `127.0.0.1`. |

@@ -52,7 +52,7 @@ const Command commands[] = {
     {"exits", "", "List exits and their destination descriptions"},
     {"stats", " [on|off]", "Show tracked scene and character state or toggle narrator tools"},
     {"time", " [set|auto|advance]", "Inspect or adjust the branch clock"},
-    {"sim", " [tool JSON]", "Run a physics calculation or edit tracked state"},
+    {"sim", " [workers auto|N|tool JSON]", "Set physics workers, run a calculation, or edit tracked state"},
     {"room", " NAME | DESCRIPTION", "Define a room"},
     {"connect", " ROOM | ROOM", "Link two rooms"},
     {"go", " ROOM", "Move through an exit"},
@@ -2205,7 +2205,7 @@ static void slash_command(App *a, char *line)
             status(a, "Inference server set for this session");
         }
     } else if (!strcmp(line, "endpoint")) {
-        status(a, "Set the provider endpoint in the server process. /server sets this client's address.");
+        status(a, "Start the gateway with --serve --provider URL --model ID. /server sets the client address.");
     } else status(a, "Unknown command · Ctrl+P opens the palette");
 }
 
@@ -2665,6 +2665,7 @@ int app_browser_response(App *a, BrowserRoute route, const Text *input, Text *ou
 static int run(int argc, char **argv)
 {
     App a = {0};
+    ProviderSetup provider = {0};
     const char *path = env("NEUTRINO_WORKSPACE", ".neutrino.json"), *import = NULL;
     bool dump = false, serve = false;
     int port = 0, bench = 0, code = 0;
@@ -2679,6 +2680,9 @@ static int run(int argc, char **argv)
             if (port < 0) { fputs("Invalid port.\n", stderr); return 2; }
         }
         else if (!strcmp(argv[i], "--server") && i + 1 < argc) a.server_override = argv[++i];
+        else if (!strcmp(argv[i], "--provider") && i + 1 < argc) provider.endpoint = argv[++i];
+        else if (!strcmp(argv[i], "--model") && i + 1 < argc) provider.model = argv[++i];
+        else if (!strcmp(argv[i], "--api-key-env") && i + 1 < argc) provider.key_env = argv[++i];
         else if (!strcmp(argv[i], "--bench-ttft") || (!strcmp(argv[i], "bench") &&
                  i + 1 < argc && !strcmp(argv[i + 1], "ttft"))) {
             if (!strcmp(argv[i], "bench")) i++;
@@ -2697,7 +2701,8 @@ static int run(int argc, char **argv)
             if (!help) fprintf(out, "Unexpected argument: %s\n", argv[i]);
             fputs("Usage: neutrino [--workspace FILE] [--import FILE] [--demo] [--snapshot] [--server URL]\n"
                   "       neutrino --ssh-session --workspace FILE [--server URL]\n"
-                  "       neutrino --serve [--port PORT]\n"
+                  "       neutrino --serve [--port PORT] [--provider ollama|llamacpp|openai|URL]\n"
+                  "                        [--model MODEL_ID] [--api-key-env VARIABLE]\n"
                   "       neutrino --web [--port 7000] [--workspace FILE] [--server URL] [--demo]\n"
                   "       neutrino bench ttft [ROUNDS] [--server URL]\n", out);
             return help ? 0 : 2;
@@ -2714,7 +2719,11 @@ static int run(int argc, char **argv)
         fputs("Choose one launch mode per process.\n", stderr);
         return 2;
     }
-    if (serve) return inference_server(port ? port : 4783, &interrupted);
+    if (!serve && (provider.endpoint || provider.model || provider.key_env)) {
+        fputs("Provider flags configure the gateway. Use them with --serve.\n",stderr);
+        return 2;
+    }
+    if (serve) return inference_server(port ? port : 4783, &provider, &interrupted);
     if (bench) return bench_ttft(ui_endpoint(&a), env("NEUTRINO_SERVER_TOKEN", ""), bench, &interrupted);
     if (!workspace_open(&a.ws, a.demo ? NULL : path, !dump || import != NULL)) {
         fprintf(stderr, "Could not open workspace: %s (locked, inaccessible, or invalid JSON)\n", path);

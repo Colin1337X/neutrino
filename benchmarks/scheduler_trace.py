@@ -48,9 +48,9 @@ def cases():
     return [(exhaust, 1), (reflectors, 2)]
 
 
-def verify(binary, mode):
+def verify(binary):
     environment = {key: value for key, value in os.environ.items() if not key.startswith("NEUTRINO_")}
-    environment.update(NEUTRINO_PHYSICS_WORKERS=mode, NEUTRINO_WEB_BIND="127.0.0.1")
+    environment.update(NEUTRINO_PHYSICS_WORKERS="4", NEUTRINO_WEB_BIND="127.0.0.1")
     with tempfile.TemporaryDirectory(prefix="neutrino-scheduler-trace-") as scratch:
         folder = Path(scratch)
         build(folder, 1)
@@ -62,22 +62,32 @@ def verify(binary, mode):
             wait(lambda: request(web + "/state"))
 
             def submit(text):
-                return request(web + "/action", {"action": "submit", "text": text})["panel"]
+                return request(web + "/action", {"action": "submit", "text": text})
 
-            scheduler = submit("/neofetch")["neofetch"]["physicsScheduler"]
-            assert scheduler == ("Automatic" if mode == "auto" else f"Manual ({mode} requested)"), scheduler
-            result = {"neofetch": scheduler, "cases": []}
-            for plan, count in cases():
-                submit("/sim " + json.dumps(plan, separators=(",", ":")))
-                trace = submit("/trace")["text"]
-                decisions = [line for line in trace.splitlines() if line.startswith("Physics scheduler")]
-                assert len(decisions) == count, trace
-                assert all("available CPUs" in line if mode == "auto" else f"{mode} workers (manual; {mode} requested" in line
-                           for line in decisions), decisions
-                report = next(json.loads(line) for line in trace.splitlines() if line.startswith('{"simulation":'))
-                assert report["status"] == "completed" and all(entry["result"] == "TRUE"
-                                                              for entry in report["consequences"]), report
-                result["cases"].append({"report": report, "scheduler": decisions, "trace": trace})
+            def neofetch():
+                return submit("/neofetch")["panel"]["neofetch"]["physicsScheduler"]
+
+            result = {"startupMode": neofetch(), "runs": []}
+            assert result["startupMode"] == "Manual (4 requested)"
+            for mode in ("auto", "3", "auto"):
+                scheduler = "Automatic" if mode == "auto" else f"Manual ({mode} requested)"
+                assert submit(f"/sim workers {mode}")["status"].endswith(scheduler)
+                assert submit("/sim workers")["status"].endswith(scheduler)
+                assert "Use /sim workers" in submit("/sim workers 17")["status"]
+                assert neofetch() == scheduler
+                run = {"neofetch": scheduler, "cases": []}
+                for plan, count in cases():
+                    submit("/sim " + json.dumps(plan, separators=(",", ":")))
+                    trace = submit("/trace")["panel"]["text"]
+                    decisions = [line for line in trace.splitlines() if line.startswith("Physics scheduler")]
+                    assert len(decisions) == count, trace
+                    assert all("available CPUs" in line if mode == "auto" else
+                               f"{mode} workers (manual; {mode} requested" in line for line in decisions), decisions
+                    report = next(json.loads(line) for line in trace.splitlines() if line.startswith('{"simulation":'))
+                    assert report["status"] == "completed" and all(entry["result"] == "TRUE"
+                                                                  for entry in report["consequences"]), report
+                    run["cases"].append({"report": report, "scheduler": decisions, "trace": trace})
+                result["runs"].append(run)
             return result
 
 
@@ -86,7 +96,8 @@ if __name__ == "__main__":
     parser.add_argument("binary", type=Path)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
-    automatic, manual = (verify(args.binary.resolve(), mode) for mode in ("auto", "3"))
-    assert [case["report"] for case in automatic["cases"]] == [case["report"] for case in manual["cases"]]
-    args.out.write_text(json.dumps({"automatic": automatic, "manual": manual}, indent=2, ensure_ascii=False) + "\n",
+    result = verify(args.binary.resolve())
+    first, *later = ([case["report"] for case in run["cases"]] for run in result["runs"])
+    assert all(reports == first for reports in later)
+    args.out.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n",
                         encoding="utf-8", newline="\n")

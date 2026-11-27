@@ -1593,6 +1593,21 @@ static void budget_command(App *a, const char *arg)
 
 void simulation_command(App *a, const char *verb, const char *arg)
 {
+    if (!strcmp(verb,"sim") && (!strcmp(arg,"workers") ||
+        (!strncmp(arg,"workers",7) && isspace((unsigned char)arg[7])))) {
+        const char *mode = arg+7;
+        while (isspace((unsigned char)*mode)) ++mode;
+        if (*mode && !parallel_set_workers(mode)) {
+            app_status(a,"Use /sim workers auto or /sim workers 1–16.");
+            return;
+        }
+        Text summary = {0};
+        append(&summary,"Physics scheduler · ");
+        parallel_mode(&summary);
+        app_status(a,str(&summary));
+        release(&summary);
+        return;
+    }
     if (!a->story || !a->roleplay) { app_status(a, "Open a roleplay story first."); return; }
     const int head = number(a->story, "head");
     const bool stats = !strcmp(verb, "stats"), clock = !strcmp(verb, "time");
@@ -1606,6 +1621,7 @@ void simulation_command(App *a, const char *verb, const char *arg)
             format(&a->info, "\n/sim checkpoint on|off|EVENTS · interval %d (0 disables)\n",
                    checkpoint_interval(a->story));
             append(&a->info, "/sim budget [KEY VALUE|reset] · view or edit resource ceilings\n");
+            append(&a->info, "/sim workers [auto|1–16] · set physics scheduling for this process\n");
         }
         else {
             Json *state = simulation_state(a->story, head);

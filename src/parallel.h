@@ -19,6 +19,7 @@ typedef enum {
 Parallel *parallel_open(ParallelWorkload workload, uint64_t work, size_t units);
 unsigned parallel_count(const Parallel *group);
 unsigned parallel_override(void);
+bool parallel_set_workers(const char *mode);
 void parallel_mode(Text *out);
 /* Diagnostics belong to the calling thread. Restore the previous sink after the operation. */
 Text *parallel_trace_to(Text *out);

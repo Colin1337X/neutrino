@@ -1,6 +1,7 @@
 #include "neutrino.h"
 #include "socket_io.h"
 
+#include <curl/curl.h>
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
@@ -41,21 +42,23 @@ typedef struct {
     bool closing;
 } Client;
 typedef struct {
+    const char *endpoint, *model, *key;
+} Provider;
+typedef struct {
     Client clients[CLIENTS];
     const char *host;
+    Provider provider;
     int workers;
     uint64_t last_provider_result;
     bool provider_ok;
 } Gateway;
 
-static const char *server_model(void) { return env("NEUTRINO_MODEL", ""); }
-
-static bool route_for(const char *name, Route *route)
+static bool route_for(const Provider *provider, const char *name, Route *route)
 {
-    const char *base = env("NEUTRINO_ENDPOINT", "http://127.0.0.1:11434/v1");
-    const char *key = env("NEUTRINO_API_KEY", "");
+    const char *base = provider->endpoint;
+    const char *key = provider->key;
     const bool slots = !strcmp(env("NEUTRINO_LLAMA_SLOTS", ""), "1");
-    *route = (Route){.endpoint = base, .key = key, .model = server_model(),
+    *route = (Route){.endpoint = base, .key = key, .model = provider->model,
         .options = {.slot = slots ? 0 : -1,
                     .include_usage = !strcmp(env("NEUTRINO_STREAM_USAGE", ""), "1")}, .lane = 0};
     if (!strcmp(name, "web-search") || !strcmp(name, "web-read")) {
@@ -104,13 +107,13 @@ static bool route_for(const char *name, Route *route)
     const char *recall_model = env("NEUTRINO_RECALL_MODEL", route->model);
     if (name[6] == '/') {
         const char *binding = name + 7;
-        if (!strncmp(binding, "default:", 8) && !strcmp(binding + 8, server_model())) {
+        if (!strncmp(binding, "default:", 8) && !strcmp(binding + 8, provider->model)) {
             route->endpoint = base;
             route->key = key;
             route->lane = slots ? 1 : 0;
             route->options.slot = slots ? 1 : -1;
             route->options.include_usage = !strcmp(env("NEUTRINO_STREAM_USAGE", ""), "1");
-            recall_model = server_model();
+            recall_model = provider->model;
         } else if (strncmp(binding, "recall:", 7) || strcmp(binding + 7, recall_model)) {
             return false;
         }
@@ -188,7 +191,7 @@ static void respond_status(Client *c, const Gateway *gateway)
     Json *status = cJSON_CreateObject();
     set(status, "service", "neutrino");
     set(status, "version", NEUTRINO_VERSION);
-    set(status, "model", server_model());
+    set(status, "model", gateway->provider.model);
     set(status, "provider", !gateway->last_provider_result ? "untested" : gateway->provider_ok ? "ok" : "failed");
     if (gateway->last_provider_result)
         put(status, "provider_age_s", cJSON_CreateNumber((double)((monotonic_ms() - gateway->last_provider_result) / 1000)));
@@ -297,7 +300,7 @@ static void parse_request(Client *c, const char *token, const Gateway *gateway)
     Json *messages = at(body, "messages");
     if (!cJSON_IsArray(messages) || !messages->child ||
         cJSON_GetArraySize(messages) > NEUTRINO_GATEWAY_MESSAGE_LIMIT ||
-        !route_for(js(body, "model"), &c->route)) {
+        !route_for(&gateway->provider,js(body, "model"), &c->route)) {
         http_error(c, 400, "Invalid Messages Or Unconfigured Model");
     } else {
         Json *message;
@@ -465,12 +468,58 @@ static void dispatch(Client clients[CLIENTS], int workers)
     }
 }
 
-int inference_server(int port, const volatile sig_atomic_t *stop)
+static bool provider_url(const char *url)
 {
-    if (!*server_model()) {
-        fputs("Set NEUTRINO_MODEL in the server environment before starting Neutrino.\n", stderr);
-        return 2;
+    if ((strncmp(url,"http://",7) && strncmp(url,"https://",8)) || strpbrk(url," \t\r\n?#@")) return false;
+    CURLU *parsed = curl_url();
+    if (!parsed) return false;
+    const bool valid = curl_url_set(parsed,CURLUPART_URL,url,CURLU_DISALLOW_USER) == CURLUE_OK;
+    curl_url_cleanup(parsed);
+    return valid;
+}
+
+static bool provider_setup(Provider *provider, const ProviderSetup *setup)
+{
+    const char *model = setup->model ? setup->model : env("NEUTRINO_MODEL","");
+    if (!*model || (setup->model && strpbrk(model," \t\r\n"))) {
+        fputs("Pass --model MODEL_ID or set NEUTRINO_MODEL before starting the gateway.\n",stderr);
+        return false;
     }
+    const char *endpoint = setup->endpoint ? setup->endpoint : env("NEUTRINO_ENDPOINT","http://127.0.0.1:11434/v1");
+    const char *key_env = setup->key_env;
+    if (setup->endpoint) {
+        if (!strcmp(endpoint,"ollama")) endpoint = "http://127.0.0.1:11434/v1";
+        else if (!strcmp(endpoint,"llamacpp")) endpoint = "http://127.0.0.1:8080/v1";
+        else if (!strcmp(endpoint,"openai")) {
+            endpoint = "https://api.openai.com/v1";
+            if (!key_env) key_env = "OPENAI_API_KEY";
+        }
+        if (!provider_url(endpoint)) {
+            fputs("Use a provider preset or an HTTP(S) API URL without credentials, query, or fragment.\n",stderr);
+            return false;
+        }
+    }
+    const char *key = setup->endpoint ? "" : env("NEUTRINO_API_KEY","");
+    if (key_env) {
+        const size_t letters = strspn(key_env,"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_");
+        if (!letters || key_env[letters + strspn(key_env+letters,"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_0123456789")]) {
+            fputs("--api-key-env takes the name of an environment variable.\n",stderr);
+            return false;
+        }
+        key = env(key_env,"");
+        if (!*key || strpbrk(key,"\r\n")) {
+            fputs("The provider API key environment variable is empty or invalid.\n",stderr);
+            return false;
+        }
+    }
+    *provider = (Provider){endpoint,model,key};
+    return true;
+}
+
+int inference_server(int port, const ProviderSetup *setup, const volatile sig_atomic_t *stop)
+{
+    Provider provider;
+    if (!provider_setup(&provider,setup)) return 2;
     const char *configured_workers = env("NEUTRINO_WORKERS", "2");
     if (strlen(configured_workers) != 1 || configured_workers[0] < '1' || configured_workers[0] > '4') {
         fputs("NEUTRINO_WORKERS must be a number from 1 to 4.\n", stderr);
@@ -510,7 +559,7 @@ int inference_server(int port, const volatile sig_atomic_t *stop)
     } else {
         printf("Neutrino server listening on http://%s:%d/v1\n", bind_to, port);
         fflush(stdout);
-        Gateway gateway = {.host = host, .workers = workers};
+        Gateway gateway = {.host = host, .provider = provider, .workers = workers};
         Client *clients = gateway.clients;
         for (int i = 0; i < CLIENTS; i++) clients[i].socket = BAD_SOCKET;
         while (!*stop) {
