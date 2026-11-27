@@ -104,11 +104,11 @@ typedef struct {
 } Neofetch;
 
 typedef struct {
-    Text endpoint, model, key, name, active_profile, error;
-    Json *profiles, *profile_details;
-    int provider, field;
+    Text endpoint, model, key, name, active_profile, error, notice;
+    Json *profiles, *profile_details, *models;
+    int provider, field, model_index;
     size_t caret;
-    bool open, admin, authenticated, usage, editing, confirming, managing;
+    bool open, admin, authenticated, usage, editing, confirming, managing, discovering;
 } ModelMenu;
 
 static inline bool preview_busy(const Preview *preview)
@@ -140,7 +140,8 @@ typedef struct {
 } App;
 
 enum { MODEL_CURRENT, MODEL_OLLAMA, MODEL_LLAMACPP, MODEL_OPENAI, MODEL_CUSTOM, MODEL_PROVIDER_COUNT };
-enum { MODEL_PROVIDER_FIELD, MODEL_ENDPOINT_FIELD, MODEL_ID_FIELD, MODEL_KEY_FIELD, MODEL_USAGE_FIELD, MODEL_NAME_FIELD,
+enum { MODEL_PROVIDER_FIELD, MODEL_ENDPOINT_FIELD, MODEL_ID_FIELD, MODEL_KEY_FIELD, MODEL_TEST_FIELD,
+       MODEL_CATALOG_FIELD, MODEL_USAGE_FIELD, MODEL_NAME_FIELD,
        MODEL_APPLY_FIELD, MODEL_EDIT_FIELD, MODEL_DELETE_FIELD, MODEL_FIELD_COUNT };
 extern const char *const model_provider_labels[MODEL_PROVIDER_COUNT];
 bool model_field_enabled(const ModelMenu *menu, int field);

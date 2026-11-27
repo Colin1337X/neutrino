@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(neutrino VERSION 0.20.2 LANGUAGES C)
+project(neutrino VERSION 0.20.3 LANGUAGES C)
 
 if(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
     message(FATAL_ERROR "Neutrino requires C23. Use a C23-capable GCC or Clang, including clang-cl on Windows.")
@@ -95,11 +95,13 @@ if(BUILD_TESTING)
     add_test(NAME physics_parallel_parity COMMAND "${CMAKE_COMMAND}"
         "-DPROGRAM=$<TARGET_FILE:scene_physics_test>" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/parallel_parity.cmake")
 
-    add_executable(ray_scaling_bench EXCLUDE_FROM_ALL benchmarks/ray_scaling.c src/ray_gpu.c)
-    target_include_directories(ray_scaling_bench PRIVATE src)
-    if(NOT WIN32)
-        target_compile_definitions(ray_scaling_bench PRIVATE _POSIX_C_SOURCE=200809L)
-        target_link_libraries(ray_scaling_bench PRIVATE m ${CMAKE_DL_LIBS})
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/ray_scaling.c")
+        add_executable(ray_scaling_bench EXCLUDE_FROM_ALL benchmarks/ray_scaling.c src/ray_gpu.c)
+        target_include_directories(ray_scaling_bench PRIVATE src)
+        if(NOT WIN32)
+            target_compile_definitions(ray_scaling_bench PRIVATE _POSIX_C_SOURCE=200809L)
+            target_link_libraries(ray_scaling_bench PRIVATE m ${CMAKE_DL_LIBS})
+        endif()
     endif()
 
     add_executable(web_reader_test tests/web_reader.c src/web.c src/workspace.c third_party/cjson/cJSON.c)

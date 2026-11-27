@@ -1,1 +1,0 @@
-OpenCL pressure projection matches CPU; Windows mapped memory matches CPU.

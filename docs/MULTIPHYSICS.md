@@ -2,7 +2,7 @@
 
 Run a typed experiment in the terminal or web composer with /sim followed by the plan JSON. Narrator tools use the same executor when /stats on is active. Production solvers run in native C23. The optional development benchmark uses Python and psutil.
 
-The [scenario fixtures](../benchmarks/multiphysics-scenarios.json) contain runnable experiments. Copy a plan object after /sim. A minimal example is:
+The release packages contain runnable experiments under `benchmarks/`. Copy a plan object from `benchmarks/multiphysics-scenarios.json` after `/sim`. A minimal example is:
 
     {
       "neutrino_tool": "sim_plan",
@@ -66,7 +66,7 @@ Use `"boundary":"no_slip"` for stationary exterior walls and `boundaries` to ove
 
 An inlet prescribes inward normal speed and upstream tracer concentration. An outlet prescribes outward normal flow. Supply `speed_m_s` for a fixed exhaust or omit it to balance the remaining inlet flow over the available exhaust area. The solver uses uncovered face cells for the balance and rejects unresolved openings or unbalanced, disconnected compartments. Exterior no-slip enforces zero normal flow and zero tangential velocity at stationary walls. Internal voxel solids use the slip stencil. Ventilated tracer transport accounts for tracer entering and leaving by advection. The trace reports flow rates in m³/s and the tracer balance over the step.
 
-Replace the example outlet with `{"type":"pressure","pressure_pa":0,"backflow_tracer":0}` to solve for its flow. Pressure is exterior gauge pressure in pascals. Each opening cell can independently admit or discharge air, and an entering cell uses the exterior `backflow_tracer` concentration. The incompressible CPU projection uses a reference air density of 1.2 kg/m³. Pair pressure openings with other pressure openings, prescribed inlets, or fixed-speed exhausts. An automatically balanced exhaust requires a room without pressure openings. The `flow.backflow_exceeds` predicate measures total inward flow through pressure openings. The [pressure-opening fixtures](../benchmarks/pressure-openings.json) exercise discharge and reversal.
+Replace the example outlet with `{"type":"pressure","pressure_pa":0,"backflow_tracer":0}` to solve for its flow. Pressure is exterior gauge pressure in pascals. Each opening cell can independently admit or discharge air, and an entering cell uses the exterior `backflow_tracer` concentration. The incompressible CPU projection uses a reference air density of 1.2 kg/m³. Pair pressure openings with other pressure openings, prescribed inlets, or fixed-speed exhausts. An automatically balanced exhaust requires a room without pressure openings. The `flow.backflow_exceeds` predicate measures total inward flow through pressure openings. The pressure-opening fixtures (`benchmarks/pressure-openings.json`) exercise discharge and reversal.
 
 CPU worker groups divide CFD grids, ray batches, recursive sound and light path evaluation, rigid collision searches, spill updates, runoff grids, and soft-body node integration. The automatic scheduler sizes each group from the workload and available CPUs. It uses grid cells for CFD, ray–object intersections for raycasts, candidate paths and medium sampling for reflections, potential pairs for collision searches, grid cells and spill sources for runoff, and nodes for soft bodies. Small jobs can run on the calling thread. Set `NEUTRINO_PHYSICS_WORKERS` to a number from 1 to 16 to request that many workers, including the caller. It uses fewer when there are fewer independent work units or worker creation fails. Set it to `auto` or unset it to restore automatic selection. Pressure iterations, collision resolution, soft-body spring projection, and scene commits run in order.
 
@@ -74,7 +74,7 @@ CPU worker groups divide CFD grids, ray batches, recursive sound and light path 
 
 Use `/sim workers auto` or `/sim workers 1–16` to change scheduling while Neutrino is running. `/sim workers` reports the current mode. The command overrides the startup environment for the current process and applies to newly dispatched physics work. Browser tabs served by the same process share the setting.
 
-With `solid_geometry:true`, the default `"raster":"center"` marks cells whose centers fall inside geometry and reports any boxes that occupy zero cells. Select `"raster":"conservative"` to mark every cell with positive-volume overlap. This resolves thin walls at coarse resolution and can widen a wall or close a sub-cell opening. The [sealed-room fixture](../benchmarks/closed-cfd.json) exercises both exterior modes and both raster rules.
+With `solid_geometry:true`, the default `"raster":"center"` marks cells whose centers fall inside geometry and reports any boxes that occupy zero cells. Select `"raster":"conservative"` to mark every cell with positive-volume overlap. This resolves thin walls at coarse resolution and can widen a wall or close a sub-cell opening. The sealed-room fixture (`benchmarks/closed-cfd.json`) exercises both exterior modes and both raster rules.
 
 ### Character conversations
 
@@ -146,7 +146,7 @@ An object's registered material may specify mechanical.fracture_j. A normal coll
 
 At fracture, 25 equal-volume water parcels sample the jug's oriented footprint and inherit its post-impact linear and tangential velocities. Gravity carries the parcels to upward static surfaces. Side contacts stop the corresponding velocity component. The parcels and their landing surfaces are stored in the room on the same branch as the fracture. The scene_spill tool accepts entity and optional target to inspect the initial landing volume, centroid and footprint.
 
-The [original falling container](../benchmarks/falling-container.json) fixture remains a regression control. The [rotating container](../benchmarks/rotating-container.json) adds balanced off-center impulses and two named floor sections. Both fixtures measure optical and acoustic paths from the final impact location. These paths test propagation to receiver coordinates. Detection, source identification and private knowledge require additional character models.
+The original falling container (`benchmarks/falling-container.json`) fixture remains a regression control. The rotating container (`benchmarks/rotating-container.json`) adds balanced off-center impulses and two named floor sections. Both fixtures measure optical and acoustic paths from the final impact location. These paths test propagation to receiver coordinates. Detection, source identification and private knowledge require additional character models.
 
 End the current player turn with Simulation setup: followed by a complete hypothetical sim_plan to attach a long experiment. The model can select it with the short object {"neutrino_tool":"sim_plan"}. The simulator validates and runs the supplied actions. Stage-mode plans cannot be attached this way. The raw trace records the selection and the executed actions.
 
@@ -166,7 +166,7 @@ Set method to cfd and solid_geometry to true in scene_medium to use the room's b
 
 ## Porous flow and material uptake
 
-Each model accepts explicit parameters with SI units. Run the [material transport fixture](../benchmarks/material-transport.json) through /sim to exercise all four models and inspect their typed results.
+Each model accepts explicit parameters with SI units. Run the material transport fixture (`benchmarks/material-transport.json`) through /sim to exercise all four models and inspect their typed results.
 
 | Tool | Parameters and model |
 | --- | --- |

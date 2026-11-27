@@ -1463,10 +1463,11 @@ bool model_field_enabled(const ModelMenu *menu, int field)
 {
     if (menu->provider >= MODEL_PROVIDER_COUNT) {
         if (menu->editing) return field != MODEL_PROVIDER_FIELD && field < MODEL_EDIT_FIELD;
-        return field == MODEL_PROVIDER_FIELD || field >= MODEL_APPLY_FIELD;
+        return field == MODEL_PROVIDER_FIELD || field == MODEL_TEST_FIELD || field >= MODEL_APPLY_FIELD;
     }
     switch (field) {
-    case MODEL_PROVIDER_FIELD: case MODEL_USAGE_FIELD: case MODEL_NAME_FIELD: return menu->admin;
+    case MODEL_PROVIDER_FIELD: case MODEL_USAGE_FIELD: case MODEL_NAME_FIELD:
+    case MODEL_TEST_FIELD: case MODEL_CATALOG_FIELD: return menu->admin;
     case MODEL_ENDPOINT_FIELD: return menu->admin && menu->provider == MODEL_CUSTOM;
     case MODEL_KEY_FIELD: return menu->admin && menu->provider != MODEL_CURRENT;
     case MODEL_EDIT_FIELD: case MODEL_DELETE_FIELD: return false;
@@ -1503,6 +1504,14 @@ static bool start_model_api(App *a, const Json *settings, bool switching, bool m
     return false;
 }
 
+static void clear_model_catalog(ModelMenu *menu)
+{
+    cJSON_Delete(menu->models);
+    menu->models = nullptr;
+    menu->model_index = 0;
+    clear(&menu->notice);
+}
+
 static void open_model_menu(App *a)
 {
     if (a->provider_job) { status(a,"Wait for the active model API request."); return; }
@@ -1514,6 +1523,8 @@ static void open_model_menu(App *a)
     menu->authenticated = false;
     menu->usage = false;
     menu->editing = menu->confirming = menu->managing = false;
+    menu->discovering = false;
+    clear_model_catalog(menu);
     clear(&menu->endpoint);
     clear(&menu->model);
     clear(&menu->key);
@@ -1536,6 +1547,39 @@ static void open_model_menu(App *a)
 static bool model_menu_busy(const App *a)
 {
     return a->provider_job && a->provider_menu_request;
+}
+
+static void discover_models(App *a, int provider, const char *editing, const char *endpoint, const char *key)
+{
+    ModelMenu *menu = &a->model_menu;
+    if (a->provider_job || !menu->admin) return;
+    if (provider < MODEL_CURRENT || provider >= MODEL_PROVIDER_COUNT+cJSON_GetArraySize(menu->profiles) ||
+        strlen(endpoint)>2048 || strlen(key)>160 ||
+        ((provider == MODEL_CUSTOM || *editing) && !*endpoint)) {
+        model_menu_error(menu,"Choose a provider and enter its API URL.");
+        return;
+    }
+    Json *settings = cJSON_CreateObject();
+    put(settings,"discover",cJSON_CreateTrue());
+    if (provider >= MODEL_PROVIDER_COUNT || *editing) {
+        const char *name = *editing ? editing :
+            cJSON_GetStringValue(cJSON_GetArrayItem(menu->profiles,provider-MODEL_PROVIDER_COUNT));
+        if (!name || !at(menu->profile_details,name)) {
+            cJSON_Delete(settings);
+            model_menu_error(menu,"Saved profile is unavailable.");
+            return;
+        }
+        set(settings,"profile",name);
+    }
+    if (*editing || (provider != MODEL_CURRENT && provider < MODEL_PROVIDER_COUNT)) {
+        set(settings,"endpoint",*editing || provider == MODEL_CUSTOM ? endpoint : model_provider_presets[provider]);
+        if (*editing && !strcmp(key,"none")) put(settings,"clear_key",cJSON_CreateTrue());
+        else if (*key) set(settings,"key_env",key);
+    }
+    clear(&menu->error);
+    clear_model_catalog(menu);
+    menu->discovering = start_model_api(a,settings,false,true);
+    cJSON_Delete(settings);
 }
 
 static void manage_model_profile(App *a, const char *profile, bool remove, const char *name,
@@ -1659,13 +1703,23 @@ static bool tick_model_api(App *a)
         inference_free(a->provider_job);
         a->provider_job = nullptr;
         Json *response = cJSON_ParseWithOpts(str(&body),nullptr,true);
+        ModelMenu *menu = &a->model_menu;
         const char *problem = error.len ? str(&error) : js(response,"error");
-        if (!*problem && !cJSON_IsBool(at(response,"authenticated"))) problem = "Unrecognized gateway API response.";
+        const Json *models = at(response,"models");
+        if (!*problem && !(menu->discovering ? cJSON_IsArray(models) : cJSON_IsBool(at(response,"authenticated"))))
+            problem = "Unrecognized gateway API response.";
         if (*problem) {
             if (a->provider_menu_request && a->model_menu.open) model_menu_error(&a->model_menu,problem);
             else status(a,problem);
         }
-        else {
+        else if (menu->discovering) {
+            if (menu->open) {
+                menu->models = cJSON_Duplicate(models,true);
+                const int count = cJSON_GetArraySize(models);
+                format(&menu->notice,"Connection OK · %d %s%s",count,count == 1 ? "model" : "models",
+                       cJSON_IsTrue(at(response,"truncated")) ? " shown" : " available");
+            }
+        } else {
             if (a->provider_switching) {
                 select_narrator(a,"");
                 a->neo.count = a->neo.next = 0;
@@ -1673,7 +1727,6 @@ static bool tick_model_api(App *a)
                 save(a);
             }
             if (a->provider_menu_request) {
-                ModelMenu *menu = &a->model_menu;
                 if (a->provider_switching || menu->managing) {
                     menu->open = false;
                     status(a,menu->managing ? "Saved provider profiles updated" : "Gateway model settings applied");
@@ -1705,6 +1758,7 @@ static bool tick_model_api(App *a)
             }
         }
         cJSON_Delete(response);
+        a->model_menu.discovering = false;
         a->model_menu.managing = false;
     }
     release(&body);
@@ -2672,11 +2726,23 @@ static void model_menu_key(App *a, int key)
     }
     if (model_menu_busy(a)) return;
     if (key == KEY_UP || key == KEY_DOWN || key == 9 || key == KEY_BACKTAB || key == 13 || key == 10) {
+        if ((key == 13 || key == 10) &&
+            (menu->field == MODEL_TEST_FIELD || menu->field == MODEL_CATALOG_FIELD)) {
+            if (menu->field == MODEL_CATALOG_FIELD && cJSON_GetArraySize(menu->models)) {
+                const char *id = cJSON_GetStringValue(cJSON_GetArrayItem(menu->models,menu->model_index));
+                if (id) { clear(&menu->model); append(&menu->model,id); }
+                menu->field = MODEL_ID_FIELD;
+                menu->caret = menu->model.len;
+            } else discover_models(a,menu->provider,menu->editing ? model_provider_label(menu) : "",
+                                  str(&menu->endpoint),str(&menu->key));
+            return;
+        }
         if ((key == 13 || key == 10) && menu->field == MODEL_EDIT_FIELD) {
             const char *name = model_provider_label(menu);
             const Json *profile = at(menu->profile_details,name);
             if (!profile) { model_menu_error(menu,"Saved profile is unavailable."); return; }
             menu->editing = true;
+            clear_model_catalog(menu);
             menu->field = MODEL_NAME_FIELD;
             menu->usage = cJSON_IsTrue(at(profile,"stream_usage"));
             clear(&menu->name); append(&menu->name,name);
@@ -2713,7 +2779,15 @@ static void model_menu_key(App *a, int key)
         if (key == KEY_LEFT || key == KEY_RIGHT || key == ' ') {
             int count = MODEL_PROVIDER_COUNT+cJSON_GetArraySize(menu->profiles);
             menu->provider = (menu->provider+(key == KEY_LEFT ? count-1 : 1))%count;
+            clear_model_catalog(menu);
+            clear(&menu->error);
         }
+        return;
+    }
+    if (menu->field == MODEL_CATALOG_FIELD) {
+        const int count = cJSON_GetArraySize(menu->models);
+        if (count && (key == KEY_LEFT || key == KEY_RIGHT || key == ' '))
+            menu->model_index = (menu->model_index+(key == KEY_LEFT ? count-1 : 1))%count;
         return;
     }
     if (menu->field == MODEL_USAGE_FIELD) {
@@ -2722,6 +2796,11 @@ static void model_menu_key(App *a, int key)
     }
     Text *input = model_field_text(menu);
     if (!input) return;
+    if ((menu->field == MODEL_ENDPOINT_FIELD || menu->field == MODEL_KEY_FIELD) &&
+        (key == 21 || key == 8 || key == 127 || key == KEY_DEL || (key >= 32 && key <= 0x10ffff))) {
+        clear_model_catalog(menu);
+        clear(&menu->error);
+    }
     size_t *caret = &menu->caret;
     switch (key) {
     case KEY_LEFT: *caret = utf_prev(str(input),*caret); break;
@@ -2918,6 +2997,8 @@ static Json *browser_state(const App *a)
         set(value,"endpoint",str(&menu->endpoint));
         set(value,"model",str(&menu->model));
         set(value,"error",str(&menu->error));
+        set(value,"notice",str(&menu->notice));
+        if (menu->models) put(value,"models",cJSON_Duplicate(menu->models,true));
         set(value,"active_profile",str(&menu->active_profile));
         if (menu->profiles) put(value,"profiles",cJSON_Duplicate(menu->profiles,true));
         if (menu->profile_details) put(value,"profile_details",cJSON_Duplicate(menu->profile_details,true));
@@ -2957,6 +3038,8 @@ static int browser_action(App *a, const Json *input, Text *error)
         submit(a);
     } else if (!strcmp(action,"model-close")) {
         a->model_menu.open = false;
+    } else if (!strcmp(action,"model-catalog") && a->model_menu.open && cJSON_IsNumber(at(input,"provider"))) {
+        discover_models(a,number(input,"provider"),js(input,"profile"),js(input,"endpoint"),js(input,"key"));
     } else if ((!strcmp(action,"model-profile-edit") || !strcmp(action,"model-profile-delete")) &&
                a->model_menu.open && cJSON_IsString(at(input,"profile"))) {
         manage_model_profile(a,js(input,"profile"),!strcmp(action,"model-profile-delete"),js(input,"name"),
@@ -3221,6 +3304,7 @@ static int run(int argc, char **argv)
     cJSON_Delete(a.model_menu.profiles);
     cJSON_Delete(a.model_menu.profile_details);
     release(&a.model_menu.error);
+    clear_model_catalog(&a.model_menu);
     release(&a.neo.error);
     for (int i = 0; i < a.history_count; i++) free(a.history[i]);
     release(&a.screen);

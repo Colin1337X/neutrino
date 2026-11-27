@@ -1,0 +1,43 @@
+cmake_minimum_required(VERSION 3.25)
+
+if(NOT DEFINED BENCHMARK_DEST)
+    message(FATAL_ERROR "Set BENCHMARK_DEST to a directory for the benchmark suite")
+endif()
+file(MAKE_DIRECTORY "${BENCHMARK_DEST}")
+file(REAL_PATH "${BENCHMARK_DEST}" BENCHMARK_DEST)
+set(seed "${BENCHMARK_DEST}/benchmark-seed.zip")
+file(DOWNLOAD
+    "https://github.com/Colin1337X/neutrino/releases/download/v0.20.2/neutrino-v0.20.2-windows-x64.zip"
+    "${seed}"
+    EXPECTED_HASH SHA256=733781d903d3455faab83455e9c70af3e89fe5ef9778e86c1004532cfb7468f4
+    TLS_VERIFY ON TIMEOUT 120)
+file(ARCHIVE_EXTRACT INPUT "${seed}" DESTINATION "${BENCHMARK_DEST}" PATTERNS "benchmarks/*")
+file(REMOVE "${seed}")
+if(NOT EXISTS "${BENCHMARK_DEST}/benchmarks/PACKAGE-NOTES.txt")
+    message(FATAL_ERROR "The release seed is missing the benchmark suite")
+endif()
+
+if(DEFINED PACKAGE_DIR)
+    file(GLOB packages "${PACKAGE_DIR}/neutrino-*.zip" "${PACKAGE_DIR}/neutrino-*.tar.gz")
+    list(LENGTH packages package_count)
+    if(NOT package_count EQUAL 5)
+        message(FATAL_ERROR "Expected five platform packages in ${PACKAGE_DIR}, got ${package_count}")
+    endif()
+    foreach(package IN LISTS packages)
+        get_filename_component(name "${package}" NAME)
+        set(stage "${BENCHMARK_DEST}/${name}.stage")
+        file(MAKE_DIRECTORY "${stage}")
+        file(ARCHIVE_EXTRACT INPUT "${package}" DESTINATION "${stage}")
+        file(COPY "${BENCHMARK_DEST}/benchmarks" DESTINATION "${stage}")
+        file(GLOB entries RELATIVE "${stage}" "${stage}/*")
+        if(name MATCHES "\\.zip$")
+            set(archive cf "${package}.new" --format=zip)
+        else()
+            set(archive czf "${package}.new" --format=gnutar)
+        endif()
+        execute_process(COMMAND "${CMAKE_COMMAND}" -E tar ${archive} ${entries}
+            WORKING_DIRECTORY "${stage}" COMMAND_ERROR_IS_FATAL ANY)
+        file(RENAME "${package}.new" "${package}")
+        file(REMOVE_RECURSE "${stage}")
+    endforeach()
+endif()

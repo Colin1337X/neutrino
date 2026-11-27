@@ -38,6 +38,8 @@ Push a new `vMAJOR.MINOR.PATCH` or `build-NNN` tag from a commit that contains t
 
 For a build without publishing, run the **Release packages** workflow manually from the Actions tab and download its `release-packages-and-checksums` artifact. The Windows ZIP bundles libcurl. The Linux archives use system libcurl on a glibc distribution, and the macOS archives target macOS 15 or later.
 
+Release packages include `benchmarks/` beside the executable. See `benchmarks/README.md` inside the archive for the comparison harness, fixtures, recorded runs, and their optional runtime dependencies. See `benchmarks/PACKAGE-NOTES.txt` for the suite version when running against an older binary.
+
 The TUI centers a reading column and reflows when the terminal resizes. Wider terminals show the library and context beside it. On narrow or short terminals, **F3** opens the library in place of the reading pane. The composer expands to three lines when there is room and scrolls on one line in compact terminals. Use `/focus` to hide the side panes at any width.
 
 ## Use the workspace
@@ -281,6 +283,8 @@ Open `/model` to choose a provider and edit its model ID, key variable, and stre
 Fill in **Save as** and apply to save a named provider, or reuse its name to update it. Saved names appear in the **Provider** list. Select a name and choose **Switch provider** to load all of its settings. With provider administration enabled, the gateway stores the profiles and the last saved selection in `.neutrino-providers.json` in its working directory. Set `NEUTRINO_PROVIDERS_FILE` to choose a different path. The file stores key variable names only. Keep their values in the gateway environment across restarts.
 
 Select a saved provider to open **Edit / rename** or **Delete profile**. Edits to the active profile apply immediately. Inactive profiles keep their edits for the next time you select them. In the editor, a blank key field keeps the existing key for the same URL. Enter `none` to clear the key or enter a gateway key variable to replace it. Changing an authenticated URL requires one of those choices. Deleting the active profile keeps its live connection for the current gateway session and clears the saved selection.
+
+Select **Test connection** or **Fetch available models** to query the provider's OpenAI-compatible `/models` endpoint through the gateway. A successful test fills **Available models**. Choose an ID there or enter one manually. In the terminal, use the arrow keys to browse the fetched models and Enter to use the highlighted ID. To change a saved profile's model, first choose **Edit / rename**. Lookups use the selected or draft provider settings and leave the active provider unchanged.
 
 ```text
 /model provider ollama | your-installed-model-id

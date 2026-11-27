@@ -791,28 +791,38 @@ static void palette(App *a, const Layout *l)
 static void model_popup(App *a, int *cx, int *cy)
 {
     const ModelMenu *menu = &a->model_menu;
-    const int w = minimum(74,a->cols-4), h = minimum(11,a->rows), x = (a->cols-w)/2, y = (a->rows-h)/2;
+    const int w = minimum(74,a->cols-4), h = minimum(13,a->rows), x = (a->cols-w)/2, y = (a->rows-h)/2;
     const int label_width = w >= 45 ? 15 : 8, input_x = x+2+label_width, input_width = w-label_width-4;
     const bool busy = a->provider_job && a->provider_menu_request;
-    const char *const labels[] = {"Provider", "API URL", "Model ID", "Key variable", "Stream usage",
+    const char *const labels[] = {"Provider", "API URL", "Model ID", "Key variable", "", "Models", "Stream usage",
                                   menu->editing ? "Name" : "Save as", "", "", ""};
-    const char *const compact[] = {"Server", "URL", "Model", "Key env", "Usage",
+    const char *const compact[] = {"Server", "URL", "Model", "Key env", "", "Models", "Usage",
                                    menu->editing ? "Name" : "Save as", "", "", ""};
     const char *key = menu->provider == MODEL_CURRENT && menu->authenticated ? "Configured on gateway" : str(&menu->key);
+    const char *id = cJSON_GetStringValue(cJSON_GetArrayItem(menu->models,menu->model_index));
     const char *const values[] = {model_provider_label(menu),str(&menu->endpoint),str(&menu->model),
-                                  key,menu->usage ? "On" : "Off",str(&menu->name),
+                                  key,"Test connection",id ? id : "Fetch available models",
+                                  menu->usage ? "On" : "Off",str(&menu->name),
                                   menu->editing ? "Save changes" :
                                   menu->provider >= MODEL_PROVIDER_COUNT ? "Switch provider" : "Apply",
                                   "Edit / rename", menu->confirming ? "Confirm delete" : "Delete profile"};
     card(a,x,y,w,h,RAIL MINT NORMAL);
     cell(a,x+2,y,w-4,RAIL MINT BOLD,menu->editing ? " Edit provider " : " Model settings ");
     *cx = *cy = -1;
-    int row = y;
+    int fields[MODEL_FIELD_COUNT], count = 0, focused = 0;
     for (int i = 0; i < MODEL_FIELD_COUNT; ++i) {
+        const bool shown = model_field_enabled(menu,i) ||
+            (menu->provider < MODEL_PROVIDER_COUNT && (i == MODEL_ENDPOINT_FIELD || i == MODEL_KEY_FIELD));
+        if (!shown) continue;
+        if (i == menu->field) focused = count;
+        fields[count++] = i;
+    }
+    const int capacity = h-4;
+    const int first = maximum(0,focused-capacity+1);
+    for (int n = first; n < minimum(count,first+capacity); ++n) {
+        const int i = fields[n], row = y+1+n-first;
         const bool active = i == menu->field && !busy;
         const bool enabled = model_field_enabled(menu,i);
-        if (!enabled && (menu->provider >= MODEL_PROVIDER_COUNT || i >= MODEL_EDIT_FIELD)) continue;
-        ++row;
         if (active) paint(a,x+1,row,w-2,PICK);
         const char *style = active ? PICK TXT BOLD : enabled ? RAIL TXT NORMAL : RAIL DIM NORMAL;
         clipped_cell(a,x+2,row,label_width,style,(w >= 45 ? labels : compact)[i]);
@@ -828,12 +838,13 @@ static void model_popup(App *a, int *cx, int *cy)
         clipped_cell(a,input_x,row,input_width,style,value);
     }
     const char *message = busy ? "Contacting gateway…" : menu->error.len ? str(&menu->error) :
+                          menu->notice.len ? str(&menu->notice) :
                           menu->confirming ? "Enter deletes this profile · Esc cancels" :
                           menu->editing ? "Key: blank keeps it · none clears it" :
                           !menu->admin ? "API settings require gateway admin access" :
                           menu->provider == MODEL_CURRENT ? str(&menu->active_profile) : "";
-    clipped_cell(a,x+2,y+8,w-4,RAIL GOLD NORMAL,message);
-    if (h == 11) clipped_cell(a,x+2,y+9,w-4,RAIL DIM NORMAL,w >= 56 ?
+    clipped_cell(a,x+2,y+h-3,w-4,RAIL GOLD NORMAL,message);
+    clipped_cell(a,x+2,y+h-2,w-4,RAIL DIM NORMAL,w >= 56 ?
                   "Tab move   ←→ choose   Enter next/apply   Esc close" : "Tab · Enter · Esc");
 }
 

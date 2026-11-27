@@ -46,7 +46,7 @@ struct Inference {
     Text out, reasoning, error;
     InferenceMetrics metrics;
     atomic_bool cancel;
-    bool done, started, probe, configuration, from_gateway;
+    bool done, started, probe, large_response, from_gateway;
 #ifdef _WIN32
     SRWLOCK lock;
     HANDLE thread;
@@ -151,7 +151,7 @@ static bool receive(Response *r, const char *data, size_t n)
 {
     if (cancelled(r->job) || r->pending.len + n > FILE_LIMIT) return false;
     if (r->job->probe) {
-        if (r->pending.len + n > (r->job->configuration ? 512*1024 : 16384) || memchr(data, 0, n)) return false;
+        if (r->pending.len + n > (r->job->large_response ? 512*1024 : 16384) || memchr(data, 0, n)) return false;
         append_n(&r->pending, data, n);
         return true;
     }
@@ -230,7 +230,7 @@ static bool transfer(Inference *j, Response *r, long *status)
         WinHttpSetTimeouts(session, setup, setup, setup, read);
     }
     HINTERNET conn = session ? WinHttpConnect(session, host, parts.nPort, 0) : NULL;
-    HINTERNET req = conn ? WinHttpOpenRequest(conn, j->probe && !j->configuration ? L"GET" : L"POST", path, NULL, WINHTTP_NO_REFERER,
+    HINTERNET req = conn ? WinHttpOpenRequest(conn, j->body ? L"POST" : L"GET", path, NULL, WINHTTP_NO_REFERER,
                         WINHTTP_DEFAULT_ACCEPT_TYPES, parts.nScheme == INTERNET_SCHEME_HTTPS
                         ? WINHTTP_FLAG_SECURE : 0) : NULL;
     DWORD redirect = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
@@ -501,16 +501,16 @@ Inference *inference_probe(const char *endpoint, const char *key)
 {
     return start_request(endpoint, key, "", nullptr, (RequestOptions){.timeout_ms = 2500}, true, false);
 }
-Inference *inference_provider(const char *endpoint, const char *key, const Json *settings)
+static Inference *request_json(const char *endpoint, const char *key, const char *resource, const Json *settings)
 {
     if ((strncmp(endpoint,"http://",7) && strncmp(endpoint,"https://",8)) ||
-        strpbrk(endpoint,"\r\n?#@") || !*key || strpbrk(key,"\r\n")) return nullptr;
+        strpbrk(endpoint,"\r\n?#@") || strpbrk(key,"\r\n")) return nullptr;
 #ifndef _WIN32
     if (!initialize_http()) return nullptr;
 #endif
     Inference *j = new_job();
-    j->probe = j->configuration = true;
-    j->timeout_ms = 5000;
+    j->probe = j->large_response = true;
+    j->timeout_ms = settings ? 7000 : 3500;
     Text url = {0};
     size_t len = strlen(endpoint);
     while (len && endpoint[len-1] == '/') --len;
@@ -518,14 +518,24 @@ Inference *inference_provider(const char *endpoint, const char *key, const Json 
     if (len >= sizeof suffix-1 && !memcmp(endpoint+len-(sizeof suffix-1),suffix,sizeof suffix-1))
         len -= sizeof suffix-1;
     append_n(&url,endpoint,len);
-    append(&url,"/provider");
+    append(&url,resource);
     j->url = url.data;
     j->key = copy(key);
-    char *json = cJSON_PrintUnformatted(settings);
-    if (!json) abort();
-    j->body = copy(json);
-    cJSON_free(json);
+    if (settings) {
+        char *json = cJSON_PrintUnformatted(settings);
+        if (!json) abort();
+        j->body = copy(json);
+        cJSON_free(json);
+    }
     return launch_job(j);
+}
+Inference *inference_provider(const char *endpoint, const char *key, const Json *settings)
+{
+    return *key ? request_json(endpoint,key,"/provider",settings) : nullptr;
+}
+Inference *inference_models(const char *endpoint, const char *key)
+{
+    return request_json(endpoint,key,"/models",nullptr);
 }
 InferenceMetrics inference_metrics(Inference *j)
 {

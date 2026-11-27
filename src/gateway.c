@@ -39,7 +39,7 @@ typedef struct {
     Inference *job;
     Json *messages;
     Route route;
-    bool closing, provider_request;
+    bool closing, provider_request, model_catalog;
 } Client;
 typedef struct {
     const char *endpoint, *model, *key, *key_env;
@@ -58,6 +58,7 @@ typedef struct {
 } Gateway;
 
 static void configure_provider(Client *c, Gateway *gateway, const Json *settings);
+static void finish_model_catalog(Client *c);
 
 static bool route_for(const Provider *provider, const char *name, Route *route)
 {
@@ -385,7 +386,9 @@ static void pump_client(Client *c, const char *token, Gateway *gateway)
     if (c->job) {
         size_t out = c->output.len, thought = c->thinking.len;
         bool done = inference_read(c->job, &c->output, &c->thinking, &c->error);
-        if (c->socket != BAD_SOCKET) {
+        if (c->socket != BAD_SOCKET && c->model_catalog) {
+            if (done) finish_model_catalog(c);
+        } else if (c->socket != BAD_SOCKET) {
             if (out < c->output.len) event(&c->send, "content", c->output.data + out);
             if (thought < c->thinking.len) event(&c->send, "reasoning_content", c->thinking.data + thought);
             if (done) {
@@ -502,6 +505,12 @@ static bool provider_url(const char *url)
     const bool valid = curl_url_set(parsed,CURLUPART_URL,url,CURLU_DISALLOW_USER) == CURLUE_OK;
     curl_url_cleanup(parsed);
     return valid;
+}
+
+static bool provider_key_variable(const char *key)
+{
+    const char prefix[] = "NEUTRINO_PROVIDER_KEY_";
+    return !strncmp(key,prefix,sizeof prefix-1) && key[sizeof prefix-1];
 }
 
 static const char *provider_setup(Provider *provider, const ProviderSetup *setup, bool allow_empty_model)
@@ -683,8 +692,7 @@ static const char *update_provider(Gateway *gateway, const Json *settings)
     if ((*endpoint && !*model) || (*key && !*endpoint))
         return "Set the endpoint and model together.";
     if (strlen(model) > 160 || strpbrk(model," \t\r\n")) return "Enter one model ID.";
-    const char prefix[] = "NEUTRINO_PROVIDER_KEY_";
-    if (*key && (strncmp(key,prefix,sizeof prefix-1) || !key[sizeof prefix-1]))
+    if (*key && !provider_key_variable(key))
         return "Use a gateway key variable named NEUTRINO_PROVIDER_KEY_<NAME>.";
     for (int i = 0; i < CLIENTS; ++i)
         if (gateway->clients[i].job || gateway->clients[i].messages)
@@ -734,8 +742,92 @@ static const char *update_provider(Gateway *gateway, const Json *settings)
     return nullptr;
 }
 
+static const char *start_model_catalog(Client *c, const Gateway *gateway, const Json *settings)
+{
+    const Json *field;
+    cJSON_ArrayForEach(field,settings) {
+        if (!field->string || at(settings,field->string) != field) return "Repeated provider setting.";
+        if ((!strcmp(field->string,"discover") || !strcmp(field->string,"clear_key")) && cJSON_IsBool(field)) continue;
+        if ((!strcmp(field->string,"endpoint") || !strcmp(field->string,"profile") ||
+             !strcmp(field->string,"key_env")) && cJSON_IsString(field) && *field->valuestring) continue;
+        return "Invalid model discovery setting.";
+    }
+    const char *endpoint = js(settings,"endpoint"), *name = js(settings,"profile"), *key = js(settings,"key_env");
+    const bool clear_key = cJSON_IsTrue(at(settings,"clear_key"));
+    if ((*key && (!*endpoint || clear_key)) || (clear_key && (!*name || !*endpoint)))
+        return "Choose an API URL and one key setting.";
+    if (*key && !provider_key_variable(key)) return "Use a gateway key variable named NEUTRINO_PROVIDER_KEY_<NAME>.";
+    Provider provider = gateway->provider;
+    if (*name) {
+        const Json *entry = at(at(gateway->profiles.root,"profiles"),name);
+        if (!entry) return "Saved provider profile not found.";
+        if (!*endpoint) {
+            const char *error = load_profile(&provider,entry);
+            if (error) return error;
+        } else if (!*key && !clear_key && at(entry,"key_env")) {
+            if (strcmp(endpoint,js(entry,"endpoint"))) return "Changing the URL requires a key variable or clearing the key.";
+            key = js(entry,"key_env");
+        }
+    }
+    if (*endpoint) {
+        const ProviderSetup setup = {endpoint,"models",*key ? key : nullptr};
+        const char *error = provider_setup(&provider,&setup,false);
+        if (error) return error;
+    }
+    if (!provider_url(provider.endpoint)) return "Enter a valid provider API URL.";
+    int active = 0;
+    for (int i = 0; i < CLIENTS; ++i)
+        if (gateway->clients[i].job && gateway->clients[i].model_catalog) ++active;
+    if (active >= 2) return "The gateway already has model lookups running.";
+    c->job = inference_models(provider.endpoint,provider.key);
+    if (!c->job) return "Could not start the provider connection test.";
+    c->route.key = provider.key;
+    c->model_catalog = true;
+    return nullptr;
+}
+
+static void finish_model_catalog(Client *c)
+{
+    Json *reply = cJSON_CreateObject();
+    Json *catalog = !c->error.len ? cJSON_ParseWithOpts(str(&c->output),nullptr,true) : nullptr;
+    const Json *data = at(catalog,"data"), *item;
+    if (c->error.len) set(reply,"error",str(&c->error));
+    else if (!cJSON_IsArray(data)) set(reply,"error","The provider did not return an OpenAI-compatible model list.");
+    else {
+        Json *models = cJSON_CreateArray();
+        cJSON_ArrayForEach(item,data) {
+            const char *id = js(item,"id");
+            const unsigned char *p = (const unsigned char *)id;
+            while (*p > 32 && *p != 127) ++p;
+            if (!*id || *p || strlen(id)>160 ||
+                (*c->route.key && strstr(id,c->route.key))) continue;
+            const Json *prior;
+            cJSON_ArrayForEach(prior,models)
+                if (!strcmp(cJSON_GetStringValue(prior),id)) break;
+            if (prior) continue;
+            if (cJSON_GetArraySize(models) == 200) {
+                put(reply,"truncated",cJSON_CreateTrue());
+                break;
+            }
+            cJSON_AddItemToArray(models,cJSON_CreateString(id));
+        }
+        put(reply,"models",models);
+    }
+    cJSON_Delete(catalog);
+    respond_json(c,reply);
+}
+
 static void configure_provider(Client *c, Gateway *gateway, const Json *settings)
 {
+    if (cJSON_IsTrue(at(settings,"discover"))) {
+        const char *problem = start_model_catalog(c,gateway,settings);
+        if (problem) {
+            Json *reply = cJSON_CreateObject();
+            set(reply,"error",problem);
+            respond_json(c,reply);
+        }
+        return;
+    }
     const char *error = update_provider(gateway,settings);
     Json *response = cJSON_CreateObject();
     if (error) set(response,"error",error);

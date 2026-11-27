@@ -13,6 +13,7 @@ let token = "", feedback = "", state, commands = [], revision = 0, mutating = fa
 let editorId = null, libraryKey = "", messageKey = "", panelKey = "", toolMode;
 let earlier = null, uploadKind, mutation = Promise.resolve(), streamText = "";
 let modelRequested = false, modelSeeded = false, modelEditing = "";
+let catalogRequest = null, catalogOptions = "";
 
 function element(tag, text, className) {
     const node = document.createElement(tag);
@@ -99,6 +100,7 @@ function submit(text) {
     modelRequested = true;
     modelSeeded = false;
     modelEditing = "";
+    catalogRequest = null;
     return act("submit", {text}).then(ok => {
         if (!ok || !state?.modelMenu) modelRequested = false;
         return ok;
@@ -153,6 +155,25 @@ function writeModelMenu(menu) {
     byId("model-name-label").textContent = modelEditing ? "Name" : "Save as";
     byId("model-name").required = !!modelEditing;
     key.placeholder = modelEditing ? "Blank keeps key · none clears it" : "NEUTRINO_PROVIDER_KEY_NAME";
+    const catalog = byId("model-catalog"), test = byId("model-test");
+    const catalogMatches = catalogRequest === modelCatalogSource();
+    const modelIds = catalogMatches ? menu.models ?? [] : [];
+    const options = JSON.stringify(modelIds);
+    if (options !== catalogOptions) {
+        catalogOptions = options;
+        catalog.querySelectorAll("[data-model]").forEach(option => option.remove());
+        for (const model of modelIds) {
+            const option = element("option", model);
+            option.value = "id:" + model;
+            option.dataset.model = "";
+            catalog.append(option);
+        }
+    }
+    byId("model-catalog-label").hidden = catalog.hidden = !menu.admin || saved;
+    catalog.disabled = menu.busy || !menu.admin || saved;
+    catalog.value = modelIds.includes(id.value) ? "id:" + id.value : "";
+    test.hidden = !menu.admin;
+    test.disabled = menu.busy;
     for (const button of [byId("model-edit"),byId("model-delete")]) {
         button.hidden = !saved;
         button.disabled = menu.busy;
@@ -161,7 +182,7 @@ function writeModelMenu(menu) {
     id.placeholder = menu.admin ? "Model ID from your provider" : "Server default";
     url.required = custom;
     byId("model-feedback").textContent = menu.busy ? "Contacting gateway…" :
-        menu.error || (menu.admin ? "" : "API settings require gateway admin access.");
+        menu.error || (catalogMatches ? menu.notice : "") || (menu.admin ? "" : "API settings require gateway admin access.");
     if (initialize) (menu.admin ? provider : id).focus();
 }
 
@@ -177,6 +198,27 @@ modelDialog.addEventListener("cancel",event => {
     closeModelMenu();
 });
 byId("model-provider").addEventListener("change",() => writeModelMenu(state?.modelMenu));
+function modelCatalogSource() {
+    return JSON.stringify([byId("model-provider").value,modelEditing,byId("model-url").value.trim(),byId("model-key").value.trim()]);
+}
+function fetchModels() {
+    catalogRequest = modelCatalogSource();
+    writeModelMenu({...state.modelMenu, busy: true});
+    act("model-catalog",{
+        provider: Number(byId("model-provider").value), profile: modelEditing,
+        endpoint: byId("model-url").value.trim(), key: byId("model-key").value.trim()
+    }).then(ok => {
+        if (!ok) writeModelMenu(state?.modelMenu);
+    });
+}
+byId("model-test").addEventListener("click",fetchModels);
+byId("model-catalog").addEventListener("change",event => {
+    const value = event.target.value;
+    if (value === "fetch") fetchModels();
+    else if (value.startsWith("id:")) byId("model-id").value = value.slice(3);
+});
+for (const id of ["model-url","model-key","model-id"])
+    byId(id).addEventListener("input",() => writeModelMenu(state?.modelMenu));
 function selectedProfile() {
     return state?.modelMenu?.profiles?.[Number(byId("model-provider").value)-5];
 }

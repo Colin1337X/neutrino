@@ -95,6 +95,11 @@
       <input id="model-url" type="url" maxlength="2048" autocomplete="off">
       <label for="model-id">Model ID</label>
       <input id="model-id" maxlength="160" autocomplete="off">
+      <label id="model-catalog-label" for="model-catalog">Available models</label>
+      <select id="model-catalog">
+        <option value="">Choose a model</option>
+        <option value="fetch">Fetch available models…</option>
+      </select>
       <label id="model-key-label" for="model-key">Gateway key variable</label>
       <input id="model-key" maxlength="160" autocomplete="off" placeholder="NEUTRINO_PROVIDER_KEY_NAME">
       <label id="model-usage-label"><input id="model-usage" type="checkbox"> Request streaming token usage</label>
@@ -103,6 +108,7 @@
       <p id="model-feedback" role="status"></p>
       <div class="panel-actions">
         <button id="model-edit" type="button" hidden>Edit / rename</button>
+        <button id="model-test" type="button">Test connection</button>
         <button id="model-delete" type="button" hidden>Delete</button>
         <button id="model-apply" class="primary" type="submit">Apply</button>
       </div>
