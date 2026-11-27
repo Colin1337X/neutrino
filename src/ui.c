@@ -1,4 +1,5 @@
 #include "app.h"
+#include "parallel.h"
 #include <ctype.h>
 #include <limits.h>
 #include <stdint.h>
@@ -653,6 +654,9 @@ static void neofetch(App *a, const Layout *l, int x, int y, int width, int heigh
     }
     Text body = {0};
     format(&body, "Gateway  %s%s%s\n", gateway, server ? " · " : "", js(server, "version"));
+    append(&body,"Physics scheduler  ");
+    parallel_mode(&body);
+    append(&body,"\n");
     if (server) {
         const char *provider = js(server, "provider");
         if (!strcmp(provider, "ok") || !strcmp(provider, "failed"))

@@ -777,7 +777,7 @@ static bool scene_rays(const Json *args, const Json *scene, const Box *bounds,
                 free(boxes);
                 engine = "CPU";
                 first_object = nullptr;
-            }
+            } else parallel_trace_serial(PARALLEL_RAYCAST,"shape allocation failed");
             parallel_close(workers);
         }
     }
@@ -1279,6 +1279,7 @@ static void recursive_reflections(ReflectionSearch *search, const double source[
     Parallel *workers = parallel_open(PARALLEL_REFLECTIONS,cost,(work+REFLECTION_TILE-1)/REFLECTION_TILE);
     const bool completed = workers && find_parallel_reflections(search,workers);
     const unsigned used_workers = completed ? parallel_count(workers) : 1;
+    if (workers && !completed) parallel_trace_serial(PARALLEL_REFLECTIONS,"worker result allocation failed");
     parallel_close(workers);
     if (!completed) for (int target = 2; target <= search->max_depth && !search->limited; ++target)
         find_reflections(search,0,target,0);

@@ -485,7 +485,10 @@ static bool persisted_cfd(void)
         "\"queries\":[{\"id\":\"clock\",\"predicate\":\"flow.time_exceeds\",\"step\":2,\"threshold\":0.25}]}";
     Preview p = {.story = a.story, .parent = fork};
     bool ok = simulation_tool_reply(&p, experiment) == SIM_REGENERATE && !p.tool_pending &&
-        strstr(str(&p.tool_feedback), "\"value\":0.5") && strstr(str(&p.tool_feedback), "\"result\":\"TRUE\"");
+        strstr(str(&p.tool_feedback), "\"value\":0.5") && strstr(str(&p.tool_feedback), "\"result\":\"TRUE\"") &&
+        strstr(str(&p.tool_results), "Physics scheduler \xc2\xb7 CFD:") &&
+        strstr(str(&a.simulation_trace), "Physics scheduler \xc2\xb7 CFD:") &&
+        !strstr(str(&p.tool_feedback), "Physics scheduler");
     p.story = nullptr;
     free_protocol(&p);
     p = (Preview){.story = a.story, .parent = fork};
@@ -574,6 +577,7 @@ static bool persisted_cfd(void)
     cJSON_Delete(loaded);
     cJSON_Delete(a.story);
     release(&a.info);
+    release(&a.simulation_trace);
     release(&result);
     return ok;
 }
@@ -718,6 +722,7 @@ static bool sensory_branch_state(void)
     cJSON_Delete(loaded);
     cJSON_free(serialized);
     release(&a.info);
+    release(&a.simulation_trace);
     free_protocol(&p);
     return ok;
 }
@@ -1278,6 +1283,7 @@ static bool geometry_aware_flow_frames(void)
     cJSON_Delete(loaded);
     cJSON_Delete(a.story);
     release(&a.info);
+    release(&a.simulation_trace);
 
     const PhysicsBox boxes[] = {{{2.1,0,0},{2.2,8,8}},{{6,0,0},{7,8,8}}};
     FlowConfig c = {.length={8,8,8}, .center={4.5,4.5,4.5}, .sigma=.3, .density=1, .resolution=8,

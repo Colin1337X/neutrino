@@ -113,7 +113,7 @@ typedef struct {
     bool roleplay, demo, quit, compact, editing, slash, view_panel;
     bool panel_preview, panel_neofetch, selected, ssh_session, browser;
     Focus focus;
-    Text screen, prompt, edit, info, status, trace, server_address;
+    Text screen, prompt, edit, info, status, trace, simulation_trace, server_address;
     Text research_scope, research_pending_scope, research_data, research_reply;
     Inference *research_job;
     char info_title[96];

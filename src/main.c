@@ -1,5 +1,6 @@
 #include "app.h"
 #include "web.h"
+#include "parallel.h"
 #include <ctype.h>
 #include <inttypes.h>
 #include <errno.h>
@@ -182,6 +183,7 @@ static void selection_save(App *a)
 }
 static void show_scene(App *a, Json *scene)
 {
+    clear(&a->simulation_trace);
     a->scene = scene;
     a->roleplay = false;
     a->scroll = 0;
@@ -194,6 +196,7 @@ static void show_scene(App *a, Json *scene)
 }
 static void show_story(App *a, Json *story)
 {
+    if (a->story != story) clear(&a->simulation_trace);
     a->story = story;
     a->roleplay = true;
     a->scroll = INT_MAX;
@@ -1989,12 +1992,19 @@ static void slash_command(App *a, char *line)
     else if (!strcmp(line, "read")) start_research(a, "web-read", arg);
     else if (!strcmp(line, "memory")) memory_command(a, arg);
     else if (!strcmp(line, "trace")) {
-        if (!a->trace.len) status(a, "No model prompt has been prepared in this session.");
-        else if (*arg) status(a, write_file(arg, str(&a->trace), false) ? "Prompt trace exported" :
-                           "Trace export failed. Supply a new filename.");
+        if (!a->trace.len && !a->simulation_trace.len) status(a, "No prompt or simulation trace is available.");
         else {
-            show_info(a, "Prompt trace");
-            append(&a->info, str(&a->trace));
+            Text trace = {0};
+            append(&trace,str(&a->trace));
+            if (a->simulation_trace.len)
+                format(&trace,"%sPlayer simulation\n%s",trace.len ? "\n\n" : "",str(&a->simulation_trace));
+            if (*arg) status(a,write_file(arg,str(&trace),false) ? "Trace exported" :
+                             "Trace export failed. Supply a new filename.");
+            else {
+                show_info(a,a->trace.len ? "Prompt trace" : "Simulation trace");
+                append(&a->info,str(&trace));
+            }
+            release(&trace);
         }
     }
     else if (!strcmp(line, "scene")) {
@@ -2488,6 +2498,10 @@ static Json *browser_library(const App *a)
 static Json *browser_telemetry(const App *a)
 {
     Json *value = cJSON_CreateObject(), *samples = cJSON_CreateArray();
+    Text scheduler = {0};
+    parallel_mode(&scheduler);
+    set(value,"physicsScheduler",str(&scheduler));
+    release(&scheduler);
     set(value, "error", str(&a->neo.error));
     put(value, "samples", samples);
     if (a->neo.server) put(value, "server", cJSON_Duplicate(a->neo.server, true));
@@ -2786,6 +2800,7 @@ static int run(int argc, char **argv)
     release(&a.status);
     release(&a.info);
     release(&a.trace);
+    release(&a.simulation_trace);
     release(&a.server_address);
     if (a.research_job) {
         inference_cancel(a.research_job);

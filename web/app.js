@@ -192,6 +192,7 @@ function telemetry(value) {
     const div = element("div");
     const server = value.server;
     div.append(element("p", server ? "Gateway online" : value.error || "Checking gateway…"));
+    div.append(element("p", "Physics scheduler · " + value.physicsScheduler));
     if (server) div.append(element("p", server.model || "Default model"));
     const metrics = element("div", undefined, "metrics");
     for (const [key, name, unit, digits] of [["rate", "Median throughput", " tok/s", 1], ["ttft", "Median first token", " ms", 0]]) {

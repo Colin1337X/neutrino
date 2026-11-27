@@ -1,5 +1,6 @@
 #include "app.h"
 #include "physics_models.h"
+#include "parallel.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -740,14 +741,17 @@ static bool read_only_tool(const char *tool)
 }
 
 static bool run_sim_read(const char *tool, const Json *op, const Json *story, int head,
-                         const Json *state, Text *result, PhysicsReading *reading, PhysicsCache *cache)
+                         const Json *state, Text *result, PhysicsReading *reading, PhysicsCache *cache, Text *trace)
 {
     if (!strcmp(tool,"world_inspect")) {
         if (reading) *reading = (PhysicsReading){0};
         return world_inspect(story,head,op,result);
     }
-    return cache ? physics_run_cached(tool,op,at(state,"physics"),result,reading,cache) :
+    Text *previous = parallel_trace_to(trace);
+    const bool valid = cache ? physics_run_cached(tool,op,at(state,"physics"),result,reading,cache) :
         physics_run_reading(tool,op,at(state,"physics"),result,reading);
+    parallel_trace_to(previous);
+    return valid;
 }
 static Json *attached_plan(const char *action, const char **attachment)
 {
@@ -935,7 +939,7 @@ static void trace_acoustic_selection(Preview *p, const Json *expanded, const cha
                request);
 }
 
-static bool stage_scenario_edit(Json **scratch, Json *story, int head, Json *state, const Json *op);
+static bool stage_scenario_edit(Json **scratch, Json *story, int head, Json *state, const Json *op, Text *trace);
 
 static bool detect_signal(const Json *op, const Json *sensor, const char *recipient, bool sound,
                           Json *detections, const Json *state, PlanBudget *budget, PhysicsCache *cache,
@@ -950,8 +954,10 @@ static bool detect_signal(const Json *op, const Json *sensor, const char *recipi
     const bool admitted = budget_action(budget, args, state, summary);
     PhysicsReading reading;
     Text detail = {0};
+    Text *previous = parallel_trace_to(trace);
     bool valid = admitted && physics_run_cached(tool, args, at(state, "physics"), &detail, &reading, cache) &&
         !reading.unavailable && !reading.recursive_limited;
+    parallel_trace_to(previous);
     bool fits = reserve_budget(budget, &(PhysicsCost){0}, detail.len, summary);
     cJSON_Delete(args);
     if (trace && fits) format(trace, "\n%s · %s\n%s\n", recipient, sound ? "sound" : "light", str(&detail));
@@ -1059,7 +1065,10 @@ static const Json *prepare_edit(const Json *op, const Json *story, int head, con
     if (!strcmp(tool, observation_event) || !strcmp(tool, flow_frame_event)) return nullptr;
     if (!strcmp(tool, "scene_flow_step")) {
         if (cJSON_GetArraySize(op) != 2 || !cJSON_IsNumber(at(op, "seconds"))) return nullptr;
-        return *owned = physics_prepare_flow_step(at(state, "physics"), op, summary);
+        Text *previous = parallel_trace_to(trace);
+        *owned = physics_prepare_flow_step(at(state, "physics"), op, summary);
+        parallel_trace_to(previous);
+        return *owned;
     }
     if (!strcmp(tool, "scene_emit")) return *owned = resolve_emission(op, story, head, state, budget, summary, trace);
     if (!strcmp(tool, "scene_sensor") && !cJSON_IsTrue(at(op, "off"))) {
@@ -1086,7 +1095,7 @@ static void execute_tool(Preview *p, const Json *op, const char *json, PlanBudge
         PhysicsReading reading;
         Json *world = !strcmp(tool,"world_inspect") ? preview_world(p) : nullptr;
         if (budget_action(budget, op, state, &result)) {
-            if (!run_sim_read(tool,op,world ? world : p->story,p->parent,state,&result,&reading,nullptr))
+            if (!run_sim_read(tool,op,world ? world : p->story,p->parent,state,&result,&reading,nullptr,&detail))
                 append(&result, "Physics tool arguments rejected.");
             else if ((reading.kind == READING_FLUID || reading.kind == READING_ACOUSTIC) &&
                      p->reading_count < SIM_TOOL_LIMIT)
@@ -1099,14 +1108,14 @@ static void execute_tool(Preview *p, const Json *op, const char *json, PlanBudge
         Json *state = simulation_state(p->story, p->parent);
         bool valid = true;
         cJSON_ArrayForEach(pending, p->tool_pending)
-            if (!stage_scenario_edit(&scratch, p->story, p->parent, state, pending)) {
+            if (!stage_scenario_edit(&scratch, p->story, p->parent, state, pending, nullptr)) {
                 valid = false;
                 break;
             }
         Json *owned = nullptr;
         const Json *edit = valid && budget_action(budget, op, state, &result) ?
             prepare_edit(op, scratch ? scratch : p->story, p->parent, state, budget, &result, &detail, &owned) : nullptr;
-        if (edit && stage_scenario_edit(&scratch, p->story, p->parent, state, edit)) {
+        if (edit && stage_scenario_edit(&scratch, p->story, p->parent, state, edit, &detail)) {
             if (!p->tool_pending) p->tool_pending = cJSON_CreateArray();
             cJSON_AddItemToArray(p->tool_pending, cJSON_Duplicate(edit, true));
             append(&result, owned ? "\nChange staged for this reply." : "Change staged for this reply.");
@@ -1153,11 +1162,15 @@ static bool execute_read_only_batch(Preview *p, const Json *batch, const char *j
     return true;
 }
 
-static bool stage_scenario_edit(Json **scratch, Json *story, int head, Json *state, const Json *op)
+static bool stage_scenario_edit(Json **scratch, Json *story, int head, Json *state, const Json *op, Text *trace)
 {
     const char *tool = js(op, "neutrino_tool");
-    if (strcmp(tool, "world") && strcmp(tool, "inventory") && strcmp(tool, "character"))
-        return apply_stat(state, op);
+    if (strcmp(tool, "world") && strcmp(tool, "inventory") && strcmp(tool, "character")) {
+        Text *previous = parallel_trace_to(trace);
+        const bool valid = apply_stat(state, op);
+        parallel_trace_to(previous);
+        return valid;
+    }
     if (!*scratch) *scratch = cJSON_Duplicate(story, true);
     return *scratch && apply_tool(*scratch, head, state, op);
 }
@@ -1189,7 +1202,7 @@ static bool execute_action_order(Preview *p, const Json *plan)
     PhysicsCache cache = {0};
     cJSON_ArrayForEach(op, p->tool_pending) {
         if (!valid || !budget_action(&budget, op, state, &failure) ||
-            !stage_scenario_edit(&scratch, p->story, p->parent, state, op)) {
+            !stage_scenario_edit(&scratch, p->story, p->parent, state, op, nullptr)) {
             valid = false;
             break;
         }
@@ -1224,10 +1237,13 @@ static bool execute_action_order(Preview *p, const Json *plan)
         if (!budget_action(&budget, effective, state, &failure)) valid = false;
         else if (read_only_tool(tool)) {
             PhysicsReading reading;
-            valid = run_sim_read(tool,effective,scratch ? scratch : p->story,p->parent,state,&result,&reading,&cache) &&
+            valid = run_sim_read(tool,effective,scratch ? scratch : p->story,p->parent,state,&result,&reading,&cache,&detail) &&
                 !reading.unavailable;
             if (evidence) evidence[index - 1] = reading;
-            if (reading.unavailable) append(&failure, str(&result));
+            if (reading.unavailable) {
+                append(&failure, str(&result));
+                append(&failure, str(&detail));
+            }
             if (valid && !scenario.hypothetical &&
                 (reading.kind == READING_FLUID || reading.kind == READING_ACOUSTIC)) {
                 if (p->reading_count+measured < SIM_TOOL_LIMIT) readings[measured++] = reading;
@@ -1240,7 +1256,7 @@ static bool execute_action_order(Preview *p, const Json *plan)
             Json *owned = nullptr;
             const Json *edit = *tool ? prepare_edit(effective, scratch ? scratch : p->story, p->parent, state,
                                                      &budget, &result, &detail, &owned) : nullptr;
-            valid = edit && stage_scenario_edit(&scratch, p->story, p->parent, state, edit);
+            valid = edit && stage_scenario_edit(&scratch, p->story, p->parent, state, edit, &detail);
             if (valid) {
                 cJSON_AddItemToArray(pending, cJSON_Duplicate(edit, true));
                 if (owned) format(&staged_feedback, "\n%s\n", str(&result));
@@ -1530,6 +1546,8 @@ static void player_action_order(App *a, const Json *plan, int head)
     app_info(a, "Ordered simulation results");
     append(&a->info, str(&sequence.tool_results));
     if (committed) append(&a->info, "\nChanges committed to the active branch.\n");
+    clear(&a->simulation_trace);
+    format(&a->simulation_trace,"Story %s · parent #%d\n%s",js(a->story,"title"),head,str(&a->info));
     cJSON_Delete(sequence.tool_pending);
     cJSON_Delete(sequence.tool_requests);
     release(&sequence.tool_results);
@@ -1643,13 +1661,16 @@ void simulation_command(App *a, const char *verb, const char *arg)
     if (!budget_action(&budget, op, state, &result)) {
         app_info(a, "Simulation budget");
         append(&a->info, str(&result));
-    } else if (*tool && run_sim_read(tool,op,a->story,head,state,&result,nullptr,nullptr)) {
+    } else if (*tool && run_sim_read(tool,op,a->story,head,state,&result,nullptr,nullptr,&detail)) {
         app_info(a, "Physics result");
         append(&a->info, str(&result));
+        if (detail.len) format(&a->info,"\n%s",str(&detail));
     } else {
         Json *owned = nullptr;
         const Json *edit = *tool ? prepare_edit(op, a->story, head, state, &budget, &result, &detail, &owned) : nullptr;
+        Text *previous = parallel_trace_to(&detail);
         bool saved = edit && apply_tool(a->story, head, state, edit);
+        parallel_trace_to(previous);
         if (saved) {
             checkpoint_commit(a->story, head, state);
             a->ws.dirty = true;
@@ -1658,10 +1679,15 @@ void simulation_command(App *a, const char *verb, const char *arg)
         if (result.len) {
             app_info(a, saved ? "Scene state saved" : "Simulation rejected");
             append(&a->info, str(&result));
-            append(&a->info, str(&detail));
+            if (detail.len) format(&a->info,"\n%s",str(&detail));
         } else if (!saved) app_status(a, clock ? "Use /time set DAY HH:MM, auto MINUTES|off, or advance MINUTES." :
                                       "Tool rejected. Use /sim to view tool arguments.");
         cJSON_Delete(owned);
+    }
+    if (detail.len) {
+        clear(&a->simulation_trace);
+        format(&a->simulation_trace,"Story %s · parent #%d · %s\n%s\n%s",
+               js(a->story,"title"),head,tool,str(&result),str(&detail));
     }
     release(&detail);
     release(&result);

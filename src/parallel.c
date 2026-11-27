@@ -5,6 +5,7 @@
 
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <inttypes.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -42,16 +43,32 @@ typedef pthread_cond_t Event;
 enum { MAX_WORKERS = 16 };
 
 static const struct {
+    const char *name, *measure, *partition;
     unsigned work_per_lane, automatic_limit;
     bool short_batch;
 } policies[] = {
-    [PARALLEL_CFD] = {3456, 4, false},
-    [PARALLEL_RAYCAST] = {32768, 16, true},
-    [PARALLEL_REFLECTIONS] = {4096, 4, true},
-    [PARALLEL_COLLISIONS] = {576, 8, false},
-    [PARALLEL_RUNOFF] = {2048, 4, false},
-    [PARALLEL_SOFTBODY] = {8192, 8, false},
+    [PARALLEL_CFD] = {"CFD", "grid cells", "grid planes", 3456, 4, false},
+    [PARALLEL_RAYCAST] = {"Raycast", "ray–object tests", "rays", 32768, 16, true},
+    [PARALLEL_REFLECTIONS] = {"Recursive reflections", "candidate work units", "candidate tiles", 4096, 4, true},
+    [PARALLEL_COLLISIONS] = {"Rigid collisions", "potential pairs", "bodies", 576, 8, false},
+    [PARALLEL_RUNOFF] = {"Runoff", "cell–spill pairs", "grid cells", 2048, 4, false},
+    [PARALLEL_SOFTBODY] = {"Soft body", "nodes", "movable nodes", 8192, 8, false},
 };
+
+static _Thread_local Text *scheduler_trace;
+
+Text *parallel_trace_to(Text *out)
+{
+    Text *previous = scheduler_trace;
+    scheduler_trace = out;
+    return previous;
+}
+
+void parallel_trace_serial(ParallelWorkload workload, const char *reason)
+{
+    if (scheduler_trace) format(scheduler_trace,"Physics scheduler · %s: used 1 worker (%s).\n",
+                                policies[workload].name,reason);
+}
 
 typedef struct {
     Parallel *group;
@@ -138,26 +155,39 @@ static unsigned available_cpus(void)
 #endif
 }
 
-static unsigned worker_limit(ParallelWorkload workload, uint64_t work, size_t units)
+unsigned parallel_override(void)
 {
     const char *setting = getenv("NEUTRINO_PHYSICS_WORKERS");
     if (setting && *setting) {
         char *end;
         const unsigned long requested = strtoul(setting,&end,10);
         if (!*end && requested > 0 && requested <= MAX_WORKERS)
-            return requested < units ? (unsigned)requested : (unsigned)units;
+            return (unsigned)requested;
     }
+    return 0;
+}
+
+void parallel_mode(Text *out)
+{
+    const unsigned requested = parallel_override();
+    if (requested) format(out,"Manual (%u requested)",requested);
+    else append(out,"Automatic");
+}
+
+static unsigned worker_limit(ParallelWorkload workload, uint64_t work, size_t units,
+                             unsigned requested, unsigned *cpus)
+{
+    if (requested) return requested < units ? requested : (unsigned)units;
     uint64_t lanes = work/policies[workload].work_per_lane;
     if (lanes > policies[workload].automatic_limit) lanes = policies[workload].automatic_limit;
     if (lanes > units) lanes = units;
-    if (lanes < 2) return 1;
-    const unsigned cpus = available_cpus();
-    return lanes < cpus ? (unsigned)lanes : cpus;
+    if (lanes < 2 && !scheduler_trace) return 1;
+    *cpus = available_cpus();
+    return lanes < *cpus ? (unsigned)lanes : *cpus;
 }
 
-Parallel *parallel_open(ParallelWorkload workload, uint64_t work, size_t units)
+static Parallel *open_workers(ParallelWorkload workload, unsigned lanes)
 {
-    const unsigned lanes = worker_limit(workload,work,units);
     if (lanes < 2) return nullptr;
     Parallel *group = calloc(1, sizeof *group);
     if (!group) return nullptr;
@@ -201,6 +231,31 @@ Parallel *parallel_open(ParallelWorkload workload, uint64_t work, size_t units)
     if (group->lanes > 1) return group;
     parallel_close(group);
     return nullptr;
+}
+
+Parallel *parallel_open(ParallelWorkload workload, uint64_t work, size_t units)
+{
+    const unsigned requested = parallel_override();
+    unsigned cpus = 0;
+    const unsigned lanes = worker_limit(workload,work,units,requested,&cpus);
+    Parallel *group = open_workers(workload,lanes);
+    if (!scheduler_trace) return group;
+
+    const unsigned workers = parallel_count(group);
+    format(scheduler_trace,"Physics scheduler · %s: %u %s (%s; ",policies[workload].name,
+           workers,workers == 1 ? "worker" : "workers",requested ? "manual" : "auto");
+    if (requested) {
+        format(scheduler_trace,"%u requested; %zu independent %s",requested,units,policies[workload].partition);
+        if (requested > units) append(scheduler_trace," limited the request");
+    } else {
+        format(scheduler_trace,"%" PRIu64 " %s at %u per worker; %zu %s; job cap %u; %u available CPUs",
+               work,policies[workload].measure,policies[workload].work_per_lane,
+               units,policies[workload].partition,policies[workload].automatic_limit,cpus);
+        if (work/policies[workload].work_per_lane < 2) append(scheduler_trace,"; too little work to split");
+    }
+    if (lanes > workers) append(scheduler_trace,"; worker startup fell back to fewer workers");
+    append(scheduler_trace,").\n");
+    return group;
 }
 
 unsigned parallel_count(const Parallel *group)
