@@ -168,7 +168,7 @@ static char *read_text(const char *path, size_t limit)
 }
 char *read_file(const char *path) { return read_text(path,FILE_LIMIT); }
 
-bool write_file(const char *path, const char *data, bool replace)
+static bool write_atomically(const char *path, bool replace, bool (*write)(FILE *, const void *), const void *value)
 {
     Text temp = {0};
 #ifdef _WIN32
@@ -183,8 +183,7 @@ bool write_file(const char *path, const char *data, bool replace)
 #endif
     bool ok = file != NULL;
     if (file) {
-        size_t len = strlen(data);
-        ok = fwrite(data, 1, len, file) == len && fflush(file) == 0;
+        ok = write(file,value) && fflush(file) == 0;
 #ifdef _WIN32
         if (ok) ok = _commit(_fileno(file)) == 0;
 #else
@@ -206,6 +205,17 @@ bool write_file(const char *path, const char *data, bool replace)
 #endif
     release(&temp);
     return ok;
+}
+
+static bool write_text(FILE *file, const void *value)
+{
+    size_t len = strlen(value);
+    return fwrite(value,1,len,file) == len;
+}
+
+bool write_file(const char *path, const char *data, bool replace)
+{
+    return write_atomically(path,replace,write_text,data);
 }
 
 static Json *ensure(Json *obj, const char *key, bool array)
@@ -414,15 +424,37 @@ static void strip_workspace_secrets(Json *root)
         cJSON_DeleteItemFromObjectCaseSensitive(profile, "api_key");
     }
 }
-Json *workspace_snapshot(const Workspace *ws)
+static Json *public_settings(const Json *source)
 {
-    Json *safe = cJSON_Duplicate(ws->root, true);
-    strip_workspace_secrets(safe);
+    Json *safe = cJSON_CreateObject(), *field;
+    cJSON_ArrayForEach(field,source) {
+        if (!strcmp(field->string,"apiKey") || !strcmp(field->string,"api_key")) continue;
+        if (!cJSON_AddItemReferenceToObject(safe,field->string,field)) abort();
+    }
     return safe;
 }
-bool workspace_replace(Workspace *ws, const Json *root)
+
+Json *workspace_snapshot(const Workspace *ws)
 {
-    Workspace next = {.root = cJSON_Duplicate(root, true), .path = ws->path, .lock = ws->lock, .dirty = true};
+    Json *safe = cJSON_CreateObject(), *field;
+    cJSON_ArrayForEach(field,ws->root) {
+        if (!strcmp(field->string,"config") && cJSON_IsObject(field)) {
+            if (!cJSON_AddItemToObject(safe,field->string,public_settings(field))) abort();
+        } else if (!strcmp(field->string,"profiles") && cJSON_IsArray(field)) {
+            Json *profiles = cJSON_AddArrayToObject(safe,field->string), *profile;
+            if (!profiles) abort();
+            cJSON_ArrayForEach(profile,field) {
+                bool added = cJSON_IsObject(profile) ? cJSON_AddItemToArray(profiles,public_settings(profile)) :
+                    cJSON_AddItemReferenceToArray(profiles,profile);
+                if (!added) abort();
+            }
+        } else if (!cJSON_AddItemReferenceToObject(safe,field->string,field)) abort();
+    }
+    return safe;
+}
+bool workspace_replace(Workspace *ws, Json *root)
+{
+    Workspace next = {.root = root, .path = ws->path, .lock = ws->lock, .dirty = true};
     strip_workspace_secrets(next.root);
     if (!normalize(next.root) || !workspace_save(&next)) {
         cJSON_Delete(next.root);
@@ -432,12 +464,47 @@ bool workspace_replace(Workspace *ws, const Json *root)
     *ws = next;
     return true;
 }
+enum { WORKSPACE_JSON_CHUNK = 4096 };
+
+static bool write_json_leaf(FILE *file, Json *node)
+{
+    char *encoded = cJSON_PrintUnformatted(node);
+    const bool ok = encoded && write_text(file,encoded);
+    cJSON_free(encoded);
+    return ok;
+}
+
+static bool write_json_value(FILE *file, Json *value, char chunk[WORKSPACE_JSON_CHUNK])
+{
+    /* Most messages fit in one chunk. Walk larger containers without building their full encoding. */
+    if (cJSON_PrintPreallocated(value,chunk,WORKSPACE_JSON_CHUNK,false)) return write_text(file,chunk);
+    const bool object = cJSON_IsObject(value);
+    if (!object && !cJSON_IsArray(value)) return write_json_leaf(file,value);
+    if (fputc(object ? '{' : '[',file) == EOF) return false;
+    Json *field;
+    cJSON_ArrayForEach(field,value) {
+        if (field != value->child && fputc(',',file) == EOF) return false;
+        if (object) {
+            Json key = {.type = cJSON_String, .valuestring = field->string};
+            if (!write_json_value(file,&key,chunk) || fputc(':',file) == EOF) return false;
+        }
+        if (!write_json_value(file,field,chunk)) return false;
+    }
+    return fputc(object ? '}' : ']',file) != EOF;
+}
+
+static bool write_workspace_json(FILE *file, const void *value)
+{
+    char chunk[WORKSPACE_JSON_CHUNK];
+    setvbuf(file,nullptr,_IOFBF,65536);
+    /* cJSON_PrintPreallocated reads the tree despite taking a non-const pointer. */
+    return write_json_value(file,(Json *)value,chunk);
+}
+
 static bool save_as(const Workspace *ws, const char *path, bool replace)
 {
     Json *safe = workspace_snapshot(ws);
-    char *data = cJSON_PrintUnformatted(safe);
-    bool ok = data && write_file(path, data, replace);
-    cJSON_free(data);
+    bool ok = write_atomically(path,replace,write_workspace_json,safe);
     cJSON_Delete(safe);
     return ok;
 }
@@ -533,31 +600,51 @@ int story_push(Workspace *ws, Json *story, int parent, const char *role, const c
     ws->dirty = true;
     return id;
 }
-Json *story_path(const Json *story, int head)
+Json *story_path_tail(const Json *story, int head, int limit)
 {
     Json *path = cJSON_CreateArray();
-    int count = cJSON_GetArraySize(at(story, "nodes"));
-    if (head <= 0 || head > count) return path;
-    Json **index = malloc(((size_t)count + 1) * sizeof(*index));
-    if (!index) abort();
-    Json *node;
-    int i = 1;
-    cJSON_ArrayForEach(node, at(story, "nodes")) index[i++] = node;
+    const Json *nodes = at(story,"nodes");
+    Json *tail = nodes && nodes->child ? nodes->child->prev : nullptr;
+    if (!tail || head <= 0 || limit <= 0) return path;
+    Json *node = head == number(tail,"id") ? tail : story_pick(story,head);
     Json *first = NULL, *last = NULL;
-    for (int id = head; id; id = number(index[id], "parent")) {
-        if (cJSON_IsTrue(at(index[id], "hidden"))) continue;
-        Json *ref = cJSON_Duplicate(index[id], false);
-        ref->child = index[id]->child;
-        ref->type |= cJSON_IsReference;
-        ref->next = first;
-        if (first) first->prev = ref;
-        else last = ref;
-        first = ref;
+    Json **index = nullptr;
+    int count = 0;
+    while (node) {
+        if (!cJSON_IsTrue(at(node,"hidden"))) {
+            Json *ref = cJSON_CreateObjectReference(node->child);
+            if (!ref) abort();
+            ref->next = first;
+            if (first) first->prev = ref;
+            else last = ref;
+            first = ref;
+            if (--limit == 0) break;
+        }
+        const int parent = number(node,"parent"), id = number(node,"id");
+        if (parent <= 0 || parent >= id) break;
+        if (parent == id-1) node = node->prev;
+        else {
+            /* Linear paths need no index. Build it only when a branch skips nodes. */
+            if (!index) {
+                count = cJSON_GetArraySize(nodes);
+                index = malloc(((size_t)count+1)*sizeof(*index));
+                if (!index) abort();
+                int i = 1;
+                Json *item;
+                cJSON_ArrayForEach(item,nodes) index[i++] = item;
+            }
+            node = parent <= count ? index[parent] : nullptr;
+        }
     }
     if (first) first->prev = last;
     path->child = first;
     free(index);
     return path;
+}
+
+Json *story_path(const Json *story, int head)
+{
+    return story_path_tail(story,head,INT_MAX);
 }
 
 static size_t u32be(const unsigned char *p)

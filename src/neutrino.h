@@ -64,8 +64,10 @@ bool workspace_lock(Workspace *ws);
 void workspace_close(Workspace *ws);
 bool workspace_save(Workspace *ws);
 bool workspace_export(const Workspace *ws, const char *path);
+/* Owns its top-level view. Referenced values remain owned by the workspace. */
 Json *workspace_snapshot(const Workspace *ws);
-bool workspace_replace(Workspace *ws, const Json *root);
+/* Takes ownership of root, including when validation or saving fails. */
+bool workspace_replace(Workspace *ws, Json *root);
 void workspace_sync_mark(Json *root);
 Json *workspace_import(Workspace *ws, const char *path, Text *error);
 Json *workspace_import_data(Workspace *ws, const char *name, const char *data, size_t size, Text *error);
@@ -79,6 +81,7 @@ int story_push(Workspace *ws, Json *story, int parent, const char *role, const c
 bool story_lorebook(const Json *input);
 void story_expand_names(const Json *story, const char *source, Text *out);
 Json *story_path(const Json *story, int head);
+Json *story_path_tail(const Json *story, int head, int limit);
 int workspace_context_budget(const Workspace *ws);
 void narrator_add_history(Json *messages, const Json *path, int covered, int insertion,
                           int budget, Text *trace);

@@ -146,6 +146,7 @@ static void sync_workspace(App *a);
 static void admin_command(App *a, const char *arg);
 static void login_key(App *a, int key);
 static void clear_password_form(Session *session);
+static void encode_session_json(Json *value, Text *output);
 
 static const char *server_token(const App *a)
 {
@@ -3013,13 +3014,13 @@ static bool push_workspace(App *a)
     return saved;
 }
 
-static bool apply_host_workspace(App *a, const Json *reply)
+static bool apply_host_workspace(App *a, Json *reply)
 {
     const char *revision = js(reply,"revision");
     if (!*revision || strlen(revision) > 80 || !cJSON_IsObject(at(reply,"workspace"))) return false;
     if (!strcmp(revision,str(&a->session.revision))) return true;
     Workspace mirror = {0};
-    if (!workspace_replace(&mirror,at(reply,"workspace"))) return false;
+    if (!workspace_replace(&mirror,cJSON_DetachItemFromObjectCaseSensitive(reply,"workspace"))) return false;
     mirror.dirty = false;
     workspace_close(&a->ws);
     a->ws = mirror;
@@ -3425,15 +3426,13 @@ static Json *browser_messages(const App *a, int limit)
 {
     Json *result = cJSON_CreateArray();
     if (!a->roleplay) return result;
-    Json *path = story_path(a->story, number(a->story, "head")), *node;
-    int remaining = cJSON_GetArraySize(path);
+    Json *path = story_path_tail(a->story, number(a->story, "head"), limit), *node;
     cJSON_ArrayForEach(node, path) {
-        if (remaining-- > limit) continue;
         Json *entry = cJSON_CreateObject();
         integer(entry, "id", number(node, "id"));
         set(entry, "role", js(node, "role"));
         set(entry, "speaker", js(node, "speaker"));
-        set(entry, "text", js(node, "content"));
+        put(entry, "text", cJSON_CreateStringReference(js(node,"content")));
         cJSON_AddItemToArray(result, entry);
     }
     cJSON_Delete(path);
@@ -3655,11 +3654,7 @@ static int browser_workspace_response(App *a, BrowserRoute route, const Text *in
         }
         put(value, "commands", list);
     }
-    char *encoded = cJSON_PrintUnformatted(value);
-    cJSON_Delete(value);
-    if (!encoded) abort();
-    append(output, encoded);
-    cJSON_free(encoded);
+    encode_session_json(value,output);
     return 200;
 }
 
@@ -3667,8 +3662,15 @@ static void encode_session_json(Json *value, Text *output)
 {
     char *data = cJSON_PrintUnformatted(value);
     if (!data) abort();
-    append(output,data);
-    cJSON_free(data);
+    if (output->len) {
+        append(output,data);
+        cJSON_free(data);
+    } else {
+        /* The bundled cJSON and Text both use the process allocator. */
+        release(output);
+        const size_t length = strlen(data);
+        *output = (Text){.data = data, .len = length, .cap = length+1};
+    }
     cJSON_Delete(value);
 }
 
@@ -3702,7 +3704,7 @@ static int hosted_sync(App *a, BrowserRoute route, const Text *input, Text *outp
             return 409;
         }
         workspace_sync_mark(root);
-        if (!workspace_replace(&a->ws,root)) {
+        if (!workspace_replace(&a->ws,cJSON_DetachItemViaPointer(change,root))) {
             cJSON_Delete(change);
             cJSON_Delete(result);
             append(output,"The workspace is invalid or could not be saved.");

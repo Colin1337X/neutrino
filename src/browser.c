@@ -11,7 +11,9 @@ enum { WEB_CLIENTS = 8, WEB_HEADERS = 8192 };
 typedef struct {
     Socket socket;
     uint64_t deadline;
-    Text request, response;
+    Text request, response, response_body;
+    const char *body;
+    size_t body_length;
     size_t offset, length, sent;
     size_t admin_offset;
     uint64_t password_epoch;
@@ -34,6 +36,7 @@ static void close_client(BrowserClient *client)
     if (client->socket != BAD_SOCKET) close_socket(client->socket);
     forget_secret(&client->request);
     release(&client->response);
+    release(&client->response_body);
     *client = (BrowserClient){.socket = BAD_SOCKET};
 }
 
@@ -52,7 +55,8 @@ static void reply(BrowserClient *client, int status, const char *type, const cha
            status, reason, type, length);
     if (name) format(&client->response, "Content-Disposition: attachment; filename=\"%s\"\r\n", name);
     append(&client->response, "\r\n");
-    append_n(&client->response, body, length);
+    client->body = body;
+    client->body_length = length;
     forget_secret(&client->request);
     client->ready = true;
     client->deadline = monotonic_ms() + 10000;
@@ -205,7 +209,7 @@ static void handle_request(const Browser *web, BrowserClient *client, App *app)
         name = client->route == BROWSER_TRACE ? "neutrino-trace.txt" : "neutrino-candidate.txt";
     }
     reply(client, status, type, name, str(&output), output.len);
-    release(&output);
+    client->response_body = output;
 }
 
 static void pump(const Browser *web, BrowserClient *client, App *app)
@@ -224,10 +228,21 @@ static void pump(const Browser *web, BrowserClient *client, App *app)
             handle_request(web, client, app);
     }
     if (client->ready) {
-        size_t left = client->response.len - client->sent;
-        Count n = send(client->socket, client->response.data + client->sent, left > 131072 ? 131072 : (int)left, 0);
-        if (n > 0) client->sent += (size_t)n;
-        if ((n < 0 && !would_block()) || client->sent == client->response.len) close_client(client);
+        const size_t headers = client->response.len, total = headers + client->body_length;
+        for (int part = 0; part < 2 && client->sent < total; ++part) {
+            const bool sending_headers = client->sent < headers;
+            const char *data = sending_headers ? client->response.data + client->sent :
+                client->body + (client->sent-headers);
+            const size_t left = (sending_headers ? headers : total)-client->sent;
+            Count n = send(client->socket,data,left > 131072 ? 131072 : (int)left,0);
+            if (n <= 0) {
+                if (!n || !would_block()) close_client(client);
+                return;
+            }
+            client->sent += (size_t)n;
+            if ((size_t)n < left || !sending_headers) break;
+        }
+        if (client->sent == total) close_client(client);
     }
 }
 

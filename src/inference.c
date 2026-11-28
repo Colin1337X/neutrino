@@ -404,7 +404,7 @@ static char *request_body(const char *model, const Json *messages, RequestOption
 {
     Json *body = cJSON_CreateObject();
     set(body, "model", model);
-    put(body, "messages", cJSON_Duplicate(messages, true));
+    if (!cJSON_AddItemReferenceToObject(body,"messages",(Json *)messages)) abort();
     put(body, "stream", cJSON_CreateTrue());
     if (options.include_usage) {
         Json *stream_options = cJSON_CreateObject();
