@@ -31,7 +31,7 @@ endforeach()
 file(GENERATE OUTPUT "${browser_header}" CONTENT "${browser_assets}")
 add_executable(neutrino src/main.c src/workspace.c src/terminal.c src/inference.c src/gateway.c src/memory.c src/facts.c src/world.c src/ui.c src/web.c
     src/simulation.c src/scenario.c src/physics.c src/rigid.c src/rigid_spin.c src/spill.c src/runoff.c
-    src/physics_flow.c src/physics_models.c src/mass_transfer.c src/measurements.c src/ray_gpu.c src/parallel.c src/prose.c src/prompt.c src/browser.c
+    src/physics_flow.c src/physics_models.c src/mass_transfer.c src/measurements.c src/ray_gpu.c src/parallel.c src/prose.c src/prompt.c src/browser.c src/session.c
     third_party/cjson/cJSON.c)
 target_include_directories(neutrino PRIVATE third_party/cjson "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(neutrino PRIVATE CURL::libcurl)

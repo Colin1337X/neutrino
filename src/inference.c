@@ -39,7 +39,8 @@ void pause_ms(unsigned ms)
 }
 
 struct Inference {
-    char *url, *key, *body;
+    char *url, *key, *body, *session_admin;
+    const char *session_path;
     Json *web_request;
     const char *web_mode;
     int timeout_ms;
@@ -337,11 +338,21 @@ static void *worker(void *arg)
 #endif
 {
     Inference *j = arg;
-    if (j->web_mode) {
+    if (j->web_mode || j->session_path) {
         Text result = {0};
-        web_research(j->web_mode, j->web_request, &j->cancel, &result);
+        int status = 200;
+        if (j->web_mode) web_research(j->web_mode, j->web_request, &j->cancel, &result);
+        else {
+            Text body = {.data = j->body, .len = j->body ? strlen(j->body) : 0};
+            status = session_http(j->url,j->session_path,j->key,j->session_admin,j->body ? &body : nullptr,&result);
+        }
         lock(j);
-        j->out = result;
+        if (status == 200) j->out = result;
+        else {
+            release(&result);
+            append(&j->error,status == 401 || status == 403 ? "The host rejected the credentials." :
+                   "The workspace host did not complete the request.");
+        }
         j->done = true;
         unlock(j);
 #ifdef _WIN32
@@ -461,6 +472,19 @@ Inference *inference_web(const char *mode, const Json *messages)
     return launch_job(j);
 }
 
+Inference *session_request(const char *url, const char *path, const char *password, const char *admin,
+                           const Json *settings)
+{
+    if (!initialize_http()) return nullptr;
+    Inference *j = new_job();
+    j->url = copy(url);
+    j->session_path = path;
+    j->key = copy(password);
+    j->session_admin = copy(admin);
+    if (settings && !(j->body = cJSON_PrintUnformatted(settings))) abort();
+    return launch_job(j);
+}
+
 static Inference *start_request(const char *endpoint, const char *key, const char *model,
                                 const Json *messages, RequestOptions options, bool probe, bool from_gateway)
 {
@@ -576,7 +600,16 @@ void inference_free(Inference *j)
     pthread_mutex_destroy(&j->lock);
 #endif
     free(j->url);
+    if (j->key) {
+        volatile char *key = j->key;
+        for (size_t i = 0, n = strlen(j->key); i < n; ++i) key[i] = 0;
+    }
+    if (j->session_admin) {
+        volatile char *admin = j->session_admin;
+        for (size_t i = 0, n = strlen(j->session_admin); i < n; ++i) admin[i] = 0;
+    }
     free(j->key);
+    free(j->session_admin);
     cJSON_free(j->body);
     cJSON_Delete(j->web_request);
     release(&j->out);

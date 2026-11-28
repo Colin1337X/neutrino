@@ -241,6 +241,12 @@ static void assign_id(Json *record)
     set(record, "id", id);
     free(id);
 }
+void workspace_sync_mark(Json *root)
+{
+    char *id = new_id();
+    set(root,"neutrinoSyncRevision",id);
+    free(id);
+}
 
 static int path_depth(const char *path)
 {
@@ -398,16 +404,37 @@ bool workspace_open(Workspace *ws, const char *path, bool writable)
     }
     return true;
 }
-static bool save_as(const Workspace *ws, const char *path, bool replace)
+static void strip_workspace_secrets(Json *root)
 {
-    Json *safe = cJSON_Duplicate(ws->root, true);
-    cJSON_DeleteItemFromObjectCaseSensitive(at(safe, "config"), "apiKey");
-    cJSON_DeleteItemFromObjectCaseSensitive(at(safe, "config"), "api_key");
+    cJSON_DeleteItemFromObjectCaseSensitive(at(root, "config"), "apiKey");
+    cJSON_DeleteItemFromObjectCaseSensitive(at(root, "config"), "api_key");
     Json *profile;
-    cJSON_ArrayForEach(profile, at(safe, "profiles")) {
+    cJSON_ArrayForEach(profile, at(root, "profiles")) {
         cJSON_DeleteItemFromObjectCaseSensitive(profile, "apiKey");
         cJSON_DeleteItemFromObjectCaseSensitive(profile, "api_key");
     }
+}
+Json *workspace_snapshot(const Workspace *ws)
+{
+    Json *safe = cJSON_Duplicate(ws->root, true);
+    strip_workspace_secrets(safe);
+    return safe;
+}
+bool workspace_replace(Workspace *ws, const Json *root)
+{
+    Workspace next = {.root = cJSON_Duplicate(root, true), .path = ws->path, .lock = ws->lock, .dirty = true};
+    strip_workspace_secrets(next.root);
+    if (!normalize(next.root) || !workspace_save(&next)) {
+        cJSON_Delete(next.root);
+        return false;
+    }
+    cJSON_Delete(ws->root);
+    *ws = next;
+    return true;
+}
+static bool save_as(const Workspace *ws, const char *path, bool replace)
+{
+    Json *safe = workspace_snapshot(ws);
     char *data = cJSON_PrintUnformatted(safe);
     bool ok = data && write_file(path, data, replace);
     cJSON_free(data);

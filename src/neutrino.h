@@ -64,6 +64,9 @@ bool workspace_lock(Workspace *ws);
 void workspace_close(Workspace *ws);
 bool workspace_save(Workspace *ws);
 bool workspace_export(const Workspace *ws, const char *path);
+Json *workspace_snapshot(const Workspace *ws);
+bool workspace_replace(Workspace *ws, const Json *root);
+void workspace_sync_mark(Json *root);
 Json *workspace_import(Workspace *ws, const char *path, Text *error);
 Json *workspace_import_data(Workspace *ws, const char *name, const char *data, size_t size, Text *error);
 Json *scene_find(const Workspace *ws, const char *path);
@@ -110,6 +113,10 @@ size_t utf_encode(int cp, char bytes[4]);
 int utf_width(const char *s, size_t n);
 
 typedef struct Inference Inference;
+int session_http(const char *url, const char *path, const char *password, const char *admin,
+                 const Text *input, Text *output);
+Inference *session_request(const char *url, const char *path, const char *password, const char *admin,
+                           const Json *settings);
 enum { NEUTRINO_GATEWAY_MESSAGE_LIMIT = 512 };
 typedef struct {
     int slot, max_tokens, timeout_ms;
@@ -137,6 +144,10 @@ void inference_free(Inference *job);
 uint64_t monotonic_ms(void);
 void pause_ms(unsigned milliseconds);
 typedef struct { const char *endpoint, *model, *key_env; } ProviderSetup;
+typedef struct Gateway Gateway;
+Gateway *local_gateway_open(const char *password, const char *admin, const char *profiles, int *port);
+void gateway_poll(Gateway *gateway);
+void gateway_close(Gateway *gateway);
 int inference_server(int port, const ProviderSetup *setup, const volatile sig_atomic_t *stop);
 int bench_ttft(const char *server, const char *token, int trials, const volatile sig_atomic_t *stop);
 

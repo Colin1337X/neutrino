@@ -101,6 +101,8 @@ dialog::backdrop { background: #080b0dc9; }
 .dialog-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: .7rem; }
 dialog h2 { font: 1.6rem Georgia, serif; }
 #login form { display: grid; gap: .75rem; }
+#connection form, #elevation form, .connection-fields { display: grid; gap: .65rem; }
+#connection p, #elevation p { color: var(--muted); margin-block: .15rem; }
 #model-form { display: grid; gap: .45rem; }
 #model-form select { font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--border); border-radius: 7px; padding: .45rem; }
 #model-form p { margin: 0; overflow-wrap: anywhere; color: var(--muted); }

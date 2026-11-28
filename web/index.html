@@ -116,11 +116,56 @@
   </dialog>
   <dialog id="login" aria-labelledby="login-title">
     <form id="login-form">
-      <h2 id="login-title">Open workspace</h2>
-      <label for="token">Browser access token</label>
+      <h2 id="login-title">Connect to this host</h2>
+      <p>This workspace stores data and runs processing on the host.</p>
+      <label for="token">Host password</label>
       <input id="token" type="password" autocomplete="off" required>
       <p id="login-error" role="status"></p>
       <button class="primary" type="submit">Connect</button>
+    </form>
+  </dialog>
+  <dialog id="connection" aria-labelledby="connection-title">
+    <form id="connection-form">
+      <h2 id="connection-title">Connect to Neutrino</h2>
+      <label for="connection-kind">Connection</label>
+      <select id="connection-kind">
+        <option value="host">A. Connect to a host</option>
+        <option value="local">B. Set up a local server</option>
+      </select>
+      <div id="connection-host-fields" class="connection-fields">
+        <label for="connection-host">Host URL</label>
+        <input id="connection-host" type="url" maxlength="1024" placeholder="https://neutrino.example">
+        <label for="connection-processing">Processing</label>
+        <select id="connection-processing">
+          <option value="client">Run on this client</option>
+          <option value="server">Run on the host</option>
+        </select>
+        <p>Workspace data syncs to the host. Use /admin to elevate after connecting.</p>
+      </div>
+      <label for="connection-password">Password (optional)</label>
+      <input id="connection-password" type="password" maxlength="256" autocomplete="off">
+      <div id="connection-local-fields" class="connection-fields" hidden>
+        <label for="connection-admin">Create an admin password</label>
+        <input id="connection-admin" type="password" minlength="16" maxlength="256" autocomplete="new-password">
+        <p>Open /model after setup to configure the provider.</p>
+      </div>
+      <p id="connection-error" role="status"></p>
+      <div class="panel-actions">
+        <button id="connection-skip" type="button">Continue without connecting</button>
+        <button id="connection-submit" class="primary" type="submit">Connect</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="elevation" aria-labelledby="elevation-title">
+    <form id="elevation-form">
+      <h2 id="elevation-title">Admin access</h2>
+      <label for="elevation-password">Admin password</label>
+      <input id="elevation-password" type="password" maxlength="256" autocomplete="off" required>
+      <p id="elevation-error" role="status"></p>
+      <div class="panel-actions">
+        <button id="elevation-cancel" type="button">Cancel</button>
+        <button class="primary" type="submit">Elevate</button>
+      </div>
     </form>
   </dialog>
   <input id="upload" type="file" hidden>

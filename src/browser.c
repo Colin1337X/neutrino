@@ -13,6 +13,7 @@ typedef struct {
     uint64_t deadline;
     Text request, response;
     size_t offset, length, sent;
+    size_t admin_offset;
     BrowserRoute route;
     bool ready;
 } BrowserClient;
@@ -20,14 +21,15 @@ typedef struct {
 struct Browser {
     Socket listener;
     int port;
-    const char *token, *host;
+    Text token;
+    const char *host;
     BrowserClient clients[WEB_CLIENTS];
 };
 
 static void close_client(BrowserClient *client)
 {
     if (client->socket != BAD_SOCKET) close_socket(client->socket);
-    release(&client->request);
+    forget_secret(&client->request);
     release(&client->response);
     *client = (BrowserClient){.socket = BAD_SOCKET};
 }
@@ -37,7 +39,8 @@ static void reply(BrowserClient *client, int status, const char *type, const cha
 {
     const char *reason = status == 200 ? "OK" : status == 401 ? "Unauthorized" :
         status == 403 ? "Forbidden" : status == 404 ? "Not Found" :
-        status == 409 ? "Conflict" : status == 413 ? "Content Too Large" : "Bad Request";
+        status == 409 ? "Conflict" : status == 413 ? "Content Too Large" :
+        status == 502 ? "Bad Gateway" : "Bad Request";
     format(&client->response, "HTTP/1.1 %d %s\r\nConnection: close\r\nContent-Type: %s\r\n"
            "Content-Length: %zu\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
            "Cross-Origin-Resource-Policy: same-origin\r\nReferrer-Policy: no-referrer\r\n"
@@ -47,7 +50,7 @@ static void reply(BrowserClient *client, int status, const char *type, const cha
     if (name) format(&client->response, "Content-Disposition: attachment; filename=\"%s\"\r\n", name);
     append(&client->response, "\r\n");
     append_n(&client->response, body, length);
-    release(&client->request);
+    forget_secret(&client->request);
     client->ready = true;
     client->deadline = monotonic_ms() + 10000;
 }
@@ -76,11 +79,12 @@ static bool host_allowed(const Browser *web, const char *host)
 
 static bool authorized(const Browser *web, const char *value)
 {
-    size_t length = strlen(web->token);
+    const char *token = str(&web->token);
+    size_t length = web->token.len;
     if (!length) return true;
     if (!value || strlen(value) != length + 7 || strncmp(value, "Bearer ", 7)) return false;
     unsigned int diff = 0;
-    for (size_t i = 0; i < length; ++i) diff |= (unsigned char)(value[i + 7] ^ web->token[i]);
+    for (size_t i = 0; i < length; ++i) diff |= (unsigned char)(value[i + 7] ^ token[i]);
     return diff == 0;
 }
 
@@ -104,7 +108,7 @@ static void parse_headers(const Browser *web, BrowserClient *client)
         return;
     }
     *version = 0;
-    const char *host = NULL, *auth = NULL, *marker = NULL, *length = NULL;
+    const char *host = NULL, *auth = NULL, *marker = NULL, *length = NULL, *admin = NULL;
     for (line += 2; line <= end && line[0] != '\r';) {
         char *next = strstr(line, "\r\n"), *colon = strchr(line, ':');
         if (!next || !colon || colon >= next) { web_error(client, 400, "Invalid header field."); return; }
@@ -113,6 +117,7 @@ static void parse_headers(const Browser *web, BrowserClient *client)
         while (*value == ' ' || *value == '\t') ++value;
         const char **field = equal_field(line, "Host") ? &host :
             equal_field(line, "Authorization") ? &auth :
+            equal_field(line, "X-Neutrino-Admin") ? &admin :
             equal_field(line, "X-Neutrino-Web") ? &marker :
             equal_field(line, "Content-Length") ? &length : NULL;
         if ((field && *field) || equal_field(line, "Transfer-Encoding") || equal_field(line, "Expect")) {
@@ -148,12 +153,18 @@ static void parse_headers(const Browser *web, BrowserClient *client)
         {"/api/action", true, BROWSER_ACTION}, {"/api/import", true, BROWSER_IMPORT},
         {"/api/lore", true, BROWSER_LORE}, {"/api/preset", true, BROWSER_PRESET},
         {"/api/export", false, BROWSER_EXPORT}, {"/api/trace", false, BROWSER_TRACE},
-        {"/api/candidate", false, BROWSER_CANDIDATE}
+        {"/api/candidate", false, BROWSER_CANDIDATE},
+        {"/api/connect", true, BROWSER_CONNECT}, {"/api/admin", true, BROWSER_ADMIN},
+        {"/api/sync", false, BROWSER_SYNC}, {"/api/sync", true, BROWSER_SYNC_WRITE},
+        {"/api/terminal", true, BROWSER_TERMINAL}, {"/api/sync/revision", false, BROWSER_REVISION},
+        {"/api/provider", true, BROWSER_PROVIDER}
     };
     for (size_t i = 0; i < sizeof routes / sizeof *routes; ++i) {
         if (routes[i].post != post || strcmp(path, routes[i].path)) continue;
         if (!marker || strcmp(marker, "1")) { web_error(client, 403, "Use the Neutrino browser client."); return; }
-        if (!authorized(web, auth)) { web_error(client, 401, "Enter the browser access token."); return; }
+        if (!authorized(web, auth)) { web_error(client, 401, "Enter the host password."); return; }
+        if (admin && !session_secret(admin,false)) { web_error(client,400,"Invalid admin password."); return; }
+        client->admin_offset = admin ? (size_t)(admin-headers) : 0;
         client->route = routes[i].route;
         client->offset = offset;
         client->length = size;
@@ -171,7 +182,8 @@ static void handle_request(BrowserClient *client, App *app)
     }
     Text input = {.data = client->request.data + client->offset, .len = client->length};
     Text output = {0};
-    int status = app_browser_response(app, client->route, &input, &output);
+    const char *admin = client->admin_offset ? client->request.data + client->admin_offset : nullptr;
+    int status = app_browser_response(app, client->route, &input, admin, &output);
     const char *type = "application/json; charset=utf-8", *name = NULL;
     if (status != 200) type = "text/plain; charset=utf-8";
     else if (client->route == BROWSER_EXPORT) name = "neutrino-workspace.json";
@@ -206,16 +218,16 @@ static void pump(const Browser *web, BrowserClient *client, App *app)
     }
 }
 
-Browser *browser_open(int port)
+static Browser *open_browser(int *port, const char *bind_to, const char *host, const char *token)
 {
-    const char *bind_to = env("NEUTRINO_WEB_BIND", "127.0.0.1");
-    const char *host = env("NEUTRINO_WEB_HOST", ""), *token = env("NEUTRINO_WEB_TOKEN", "");
-    struct sockaddr_in address = {.sin_family = AF_INET, .sin_port = htons((unsigned short)port)};
+    struct sockaddr_in address = {.sin_family = AF_INET, .sin_port = htons((unsigned short)*port)};
 #ifdef _WIN32
     WSADATA data;
     if (WSAStartup(MAKEWORD(2, 2), &data)) return NULL;
+    int address_length = sizeof address;
 #else
     signal(SIGPIPE, SIG_IGN);
+    socklen_t address_length = sizeof address;
 #endif
     Socket listener = BAD_SOCKET;
     if (inet_pton(AF_INET, bind_to, &address.sin_addr) != 1 ||
@@ -228,22 +240,46 @@ Browser *browser_open(int port)
         if (listener != BAD_SOCKET) setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof reuse);
 #endif
         if (listener != BAD_SOCKET && nonblocking(listener) &&
-            !bind(listener, (struct sockaddr *)&address, sizeof address) && !listen(listener, WEB_CLIENTS)) {
+            !bind(listener, (struct sockaddr *)&address, sizeof address) && !listen(listener, WEB_CLIENTS) &&
+            !getsockname(listener,(struct sockaddr *)&address,&address_length)) {
             Browser *web = malloc(sizeof *web);
             if (!web) abort();
-            *web = (Browser){.listener = listener, .port = port, .token = token, .host = host};
+            *port = ntohs(address.sin_port);
+            *web = (Browser){.listener = listener, .port = *port, .host = host};
+            append(&web->token,token);
             for (int i = 0; i < WEB_CLIENTS; ++i) web->clients[i].socket = BAD_SOCKET;
-            printf("Neutrino browser listening on http://%s:%d\n", bind_to, port);
-            fflush(stdout);
             return web;
         }
-        fprintf(stderr, "Could not open browser listener on %s:%d.\n", bind_to, port);
+        fprintf(stderr, "Could not open browser listener on %s:%d.\n", bind_to, *port);
     }
     if (listener != BAD_SOCKET) close_socket(listener);
 #ifdef _WIN32
     WSACleanup();
 #endif
     return NULL;
+}
+
+Browser *browser_open(int port)
+{
+    const char *bind_to = env("NEUTRINO_WEB_BIND", "127.0.0.1");
+    Browser *web = open_browser(&port,bind_to,env("NEUTRINO_WEB_HOST",""),env("NEUTRINO_WEB_TOKEN",""));
+    if (web) {
+        printf("Neutrino browser listening on http://%s:%d\n",bind_to,port);
+        fflush(stdout);
+    }
+    return web;
+}
+
+Browser *browser_open_local(int *port, const char *password)
+{
+    return open_browser(port,"127.0.0.1","",password);
+}
+
+bool browser_set_local_password(Browser *web, const char *password)
+{
+    if (web->token.len || !*password) return false;
+    append(&web->token,password);
+    return true;
 }
 
 void browser_poll(Browser *web, App *app)
@@ -265,6 +301,7 @@ void browser_close(Browser *web)
 {
     for (int i = 0; i < WEB_CLIENTS; ++i) close_client(&web->clients[i]);
     close_socket(web->listener);
+    forget_secret(&web->token);
     free(web);
 #ifdef _WIN32
     WSACleanup();

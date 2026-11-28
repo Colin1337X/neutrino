@@ -5,15 +5,18 @@ const workspace = byId("workspace");
 const editor = byId("editor");
 const prompt = byId("prompt");
 const login = byId("login");
+const connection = byId("connection");
+const elevation = byId("elevation");
 const commandDialog = byId("commands");
 const modelDialog = byId("model-menu");
 const content = byId("content");
 const drafts = new Map();
-let token = "", feedback = "", state, commands = [], revision = 0, mutating = false;
+let token = "", admin = "", feedback = "", state, commands = [], revision = 0, mutating = false;
 let editorId = null, libraryKey = "", messageKey = "", panelKey = "", toolMode;
 let earlier = null, uploadKind, mutation = Promise.resolve(), streamText = "";
 let modelRequested = false, modelSeeded = false, modelEditing = "";
 let catalogRequest = null, catalogOptions = "";
+let connecting = false;
 
 function element(tag, text, className) {
     const node = document.createElement(tag);
@@ -29,9 +32,10 @@ function button(label, handle) {
     return node;
 }
 
-async function request(route, body) {
+async function request(route, body, credential = admin) {
     const headers = {"X-Neutrino-Web": "1"};
     if (token) headers.Authorization = "Bearer " + token;
+    if (credential) headers["X-Neutrino-Admin"] = credential;
     const options = {headers, cache: "no-store"};
     if (body !== undefined) {
         options.method = "POST";
@@ -44,8 +48,9 @@ async function request(route, body) {
     const response = await fetch("/api/" + route, options);
     if (response.status === 401) {
         token = "";
+        admin = "";
         if (!login.open) login.showModal();
-        throw new Error("Enter the browser access token.");
+        throw new Error("Enter the host password.");
     }
     if (!response.ok) throw new Error(await response.text());
     return response;
@@ -69,7 +74,7 @@ async function refresh() {
 }
 
 async function poll() {
-    if (!mutating && !login.open) await refresh();
+    if (!mutating && !login.open && !connecting) await refresh();
     setTimeout(poll, state?.busy || state?.researching ? 220 : 1100);
 }
 
@@ -96,7 +101,28 @@ function mutate(route, payload, beforeRender) {
 
 const act = (action, fields) => mutate("action", {action, ...fields});
 function submit(text) {
-    if (text.trim() !== "/model") return act("submit", {text});
+    const command = text.trim();
+    if (command === "/login" && state?.canConnect) {
+        if (!connection.open) connection.showModal();
+        return Promise.resolve(true);
+    }
+    if (command === "/admin") {
+        byId("elevation-error").textContent = "";
+        elevation.showModal();
+        return Promise.resolve(true);
+    }
+    if (command === "/admin off") {
+        admin = "";
+        feedback = "Admin mode ended.";
+        byId("status").textContent = feedback;
+        return Promise.resolve(true);
+    }
+    if (command.startsWith("/admin ")) {
+        feedback = "Use /admin to enter the password in a masked field.";
+        byId("status").textContent = feedback;
+        return Promise.resolve(true);
+    }
+    if (command !== "/model") return act("submit", {text});
     modelRequested = true;
     modelSeeded = false;
     modelEditing = "";
@@ -182,7 +208,7 @@ function writeModelMenu(menu) {
     id.placeholder = menu.admin ? "Model ID from your provider" : "Server default";
     url.required = custom;
     byId("model-feedback").textContent = menu.busy ? "Contacting gateway…" :
-        menu.error || (catalogMatches ? menu.notice : "") || (menu.admin ? "" : "API settings require gateway admin access.");
+        menu.error || (catalogMatches ? menu.notice : "") || (menu.admin ? "" : "Use /admin to manage provider settings.");
     if (initialize) (menu.admin ? provider : id).focus();
 }
 
@@ -399,6 +425,7 @@ function quickTools(roleplay) {
 }
 
 function render(next) {
+    if (next.loginSetup && !connection.open && !login.open && !connecting) connection.showModal();
     const switched = !state || state.id !== next.id || state.roleplay !== next.roleplay;
     const showPanel = next.panel && (!state?.panel || state.panel.title !== next.panel.title);
     state = next;
@@ -561,5 +588,73 @@ login.addEventListener("cancel", event => event.preventDefault());
 window.addEventListener("beforeunload", event => {
     if (drafts.size) event.preventDefault();
 });
+
+function connectionFields() {
+    const local = byId("connection-kind").value === "local";
+    byId("connection-host-fields").hidden = local;
+    byId("connection-local-fields").hidden = !local;
+    byId("connection-host").disabled = local;
+    byId("connection-host").required = !local;
+    byId("connection-admin").disabled = !local;
+    byId("connection-admin").required = local;
+    byId("connection-submit").textContent = local ? "Start local server" : "Connect";
+}
+async function closeConnection(fields) {
+    ++revision;
+    connecting = true;
+    byId("connection-error").textContent = "";
+    byId("connection-submit").disabled = byId("connection-skip").disabled = true;
+    try {
+        const result = await (await request("connect",fields,"")).json();
+        admin = result.localServer ? fields.admin : "";
+        if (result.newWebPassword) token = fields.password;
+        connection.close();
+        libraryKey = messageKey = panelKey = "";
+        await refresh();
+    } catch (error) {
+        byId("connection-error").textContent = error.message;
+    } finally {
+        connecting = false;
+        byId("connection-submit").disabled = byId("connection-skip").disabled = false;
+        byId("connection-password").value = byId("connection-admin").value = "";
+    }
+}
+byId("connection-kind").addEventListener("change",connectionFields);
+byId("connection-form").addEventListener("submit",event => {
+    event.preventDefault();
+    const kind = byId("connection-kind").value;
+    closeConnection({
+        kind, host: byId("connection-host").value.trim(),
+        server: byId("connection-processing").value === "server",
+        password: byId("connection-password").value,
+        admin: kind === "local" ? byId("connection-admin").value : ""
+    });
+});
+byId("connection-skip").addEventListener("click",() => closeConnection({kind:"skip"}));
+connection.addEventListener("cancel",event => {
+    event.preventDefault();
+    if (!byId("connection-skip").disabled) closeConnection({kind:"skip"});
+});
+byId("elevation-cancel").addEventListener("click",() => elevation.close());
+elevation.addEventListener("close",() => { byId("elevation-password").value = ""; });
+byId("elevation-form").addEventListener("submit",async event => {
+    event.preventDefault();
+    const password = byId("elevation-password").value;
+    if (!/^[!-~]{16,256}$/.test(password)) {
+        byId("elevation-error").textContent = "Use 16–256 printable ASCII characters without spaces.";
+        return;
+    }
+    try {
+        await request("admin",{},password);
+        admin = password;
+        elevation.close();
+        feedback = "Admin mode enabled for this tab.";
+        await refresh();
+    } catch (error) {
+        byId("elevation-error").textContent = error.message;
+        byId("elevation-password").value = "";
+    }
+});
+connectionFields();
 
 poll();

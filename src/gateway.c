@@ -45,9 +45,10 @@ typedef struct {
     const char *endpoint, *model, *key, *key_env;
     bool stream_usage;
 } Provider;
-typedef struct {
+struct Gateway {
     Client clients[CLIENTS];
-    const char *host, *provider_admin;
+    Socket listener;
+    const char *host, *provider_admin, *token;
     Provider provider;
     char *provider_endpoint, *provider_model, *provider_key_env;
     Workspace profiles;
@@ -55,7 +56,7 @@ typedef struct {
     int workers;
     uint64_t last_provider_result;
     bool provider_ok;
-} Gateway;
+};
 
 static void configure_provider(Client *c, Gateway *gateway, const Json *settings);
 static void finish_model_catalog(Client *c);
@@ -575,10 +576,10 @@ static const char *load_profile(Provider *provider, const Json *entry)
     return error;
 }
 
-static bool open_profiles(Gateway *gateway)
+static bool open_profiles(Gateway *gateway, const char *path)
 {
     Workspace *store = &gateway->profiles;
-    store->path = env("NEUTRINO_PROVIDERS_FILE",".neutrino-providers.json");
+    store->path = path;
     if (!workspace_lock(store)) return false;
     char *text = read_file(store->path);
     if (!text && errno != ENOENT) return false;
@@ -856,90 +857,124 @@ static void configure_provider(Client *c, Gateway *gateway, const Json *settings
     respond_json(c,response);
 }
 
-int inference_server(int port, const ProviderSetup *setup, const volatile sig_atomic_t *stop)
+static Gateway *gateway_open(const ProviderSetup *setup, const char *token, const char *admin,
+                             const char *bind_to, const char *host, const char *profiles, int *port, int *code)
 {
     Provider provider;
-    const char *admin = env("NEUTRINO_PROVIDER_ADMIN_TOKEN","");
-    if (*admin && (strlen(admin) < 16 || strpbrk(admin," \t\r\n"))) {
-        fputs("Use a provider admin token of at least 16 characters without whitespace.\n",stderr);
-        return 2;
-    }
-    if (*admin && !strcmp(admin,env("NEUTRINO_SERVER_TOKEN",""))) {
-        fputs("Use a separate provider admin token.\n",stderr);
-        return 2;
+    *code = 2;
+    if (*admin && (strlen(admin) < 16 || strpbrk(admin," \t\r\n") || !strcmp(admin,token))) {
+        fputs("Use a separate provider admin password of at least 16 characters without whitespace.\n", stderr);
+        return nullptr;
     }
     const char *error = provider_setup(&provider,setup,*admin && !setup->model);
-    if (error) { fprintf(stderr,"%s\n",error); return 2; }
+    if (error) { fprintf(stderr,"%s\n",error); return nullptr; }
     const char *configured_workers = env("NEUTRINO_WORKERS", "2");
     if (strlen(configured_workers) != 1 || configured_workers[0] < '1' || configured_workers[0] > '4') {
         fputs("NEUTRINO_WORKERS must be a number from 1 to 4.\n", stderr);
-        return 2;
+        return nullptr;
     }
-    const int workers = configured_workers[0] - '0';
-    const char *token = env("NEUTRINO_SERVER_TOKEN", "");
-    const char *bind_to = env("NEUTRINO_SERVER_BIND", "127.0.0.1");
-    const char *host = env("NEUTRINO_SERVER_HOST", "");
+    struct sockaddr_in address = {.sin_family = AF_INET, .sin_port = htons((unsigned short)*port)};
 #ifdef _WIN32
     WSADATA data;
-    if (WSAStartup(MAKEWORD(2, 2), &data)) return 1;
+    if (WSAStartup(MAKEWORD(2, 2), &data)) { *code = 1; return nullptr; }
 #else
     signal(SIGPIPE, SIG_IGN);
 #endif
-    struct sockaddr_in address = {0};
-    address.sin_family = AF_INET;
-    address.sin_port = htons((unsigned short)port);
+    Socket listener = BAD_SOCKET;
     if (inet_pton(AF_INET, bind_to, &address.sin_addr) != 1 ||
         ((*host || (ntohl(address.sin_addr.s_addr) >> 24) != 127) && (!*host || strlen(token) < 16))) {
         fputs("Configure an IPv4 gateway bind. Remote access requires NEUTRINO_SERVER_HOST and a token of at least 16 characters.\n", stderr);
-#ifdef _WIN32
-        WSACleanup();
-#endif
-        return 2;
-    }
-    Socket listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-#ifndef _WIN32
-    int reuse = 1;
-    if (listener != BAD_SOCKET) setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof reuse);
-#endif
-    int code = 0;
-    if (listener == BAD_SOCKET || !nonblocking(listener) ||
-        bind(listener, (struct sockaddr *)&address, sizeof address) || listen(listener, CLIENTS)) {
-        fprintf(stderr, "Could not listen on %s:%d.\n", bind_to, port);
-        code = 1;
     } else {
-        Gateway gateway = {.host = host, .provider_admin = admin, .provider = provider, .workers = workers};
-        if (*admin && !open_profiles(&gateway)) {
-            fputs("Could not open the gateway provider profile file. Check its path, format, and active profile key.\n",stderr);
-            workspace_close(&gateway.profiles);
-            close_socket(listener);
-#ifdef _WIN32
-            WSACleanup();
+        listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+#ifndef _WIN32
+        int reuse = 1;
+        if (listener != BAD_SOCKET) setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof reuse);
 #endif
-            return 2;
+#ifdef _WIN32
+        int address_length = sizeof address;
+#else
+        socklen_t address_length = sizeof address;
+#endif
+        if (listener != BAD_SOCKET && nonblocking(listener) &&
+            !bind(listener, (struct sockaddr *)&address, sizeof address) && !listen(listener, CLIENTS) &&
+            !getsockname(listener, (struct sockaddr *)&address, &address_length)) {
+            Gateway *gateway = calloc(1,sizeof *gateway);
+            if (!gateway) abort();
+            gateway->listener = listener;
+            gateway->host = host;
+            gateway->provider_admin = copy(admin);
+            gateway->token = copy(token);
+            gateway->provider = provider;
+            gateway->workers = configured_workers[0] - '0';
+            for (int i = 0; i < CLIENTS; ++i) gateway->clients[i].socket = BAD_SOCKET;
+            if (*admin && !open_profiles(gateway,profiles)) {
+                fputs("Could not open the gateway provider profile file. Check its path, format, and active profile key.\n",stderr);
+                gateway_close(gateway);
+                return nullptr;
+            }
+            if (gateway->profile_active) replace_provider(gateway,gateway->provider);
+            *port = ntohs(address.sin_port);
+            *code = 0;
+            return gateway;
         }
-        if (gateway.profile_active) replace_provider(&gateway,gateway.provider);
-        printf("Neutrino server listening on http://%s:%d/v1\n", bind_to, port);
-        fflush(stdout);
-        Client *clients = gateway.clients;
-        for (int i = 0; i < CLIENTS; i++) clients[i].socket = BAD_SOCKET;
-        while (!*stop) {
-            for (int i = 0; i < CLIENTS; i++) pump_client(&clients[i], token, &gateway);
-            Socket incoming = accept(listener, NULL, NULL);
-            if (incoming != BAD_SOCKET) accept_client(&gateway, incoming);
-            dispatch(clients, workers);
-            pause_ms(12);
-        }
-        for (int i = 0; i < CLIENTS; i++) discard_socket(&clients[i]);
-        for (int i = 0; i < CLIENTS; i++) reset_client(&clients[i]);
-        free(gateway.provider_endpoint);
-        free(gateway.provider_model);
-        free(gateway.provider_key_env);
-        workspace_close(&gateway.profiles);
+        fprintf(stderr, "Could not listen on %s:%d.\n", bind_to, *port);
+        *code = 1;
     }
     if (listener != BAD_SOCKET) close_socket(listener);
 #ifdef _WIN32
     WSACleanup();
 #endif
+    return nullptr;
+}
+
+Gateway *local_gateway_open(const char *password, const char *admin, const char *profiles, int *port)
+{
+    int code;
+    const ProviderSetup setup = {0};
+    return gateway_open(&setup,password,admin,"127.0.0.1","",profiles,port,&code);
+}
+
+void gateway_poll(Gateway *gateway)
+{
+    Client *clients = gateway->clients;
+    for (int i = 0; i < CLIENTS; ++i) pump_client(&clients[i], gateway->token, gateway);
+    Socket incoming = accept(gateway->listener, NULL, NULL);
+    if (incoming != BAD_SOCKET) accept_client(gateway, incoming);
+    dispatch(clients, gateway->workers);
+}
+
+void gateway_close(Gateway *gateway)
+{
+    if (!gateway) return;
+    for (int i = 0; i < CLIENTS; ++i) discard_socket(&gateway->clients[i]);
+    for (int i = 0; i < CLIENTS; ++i) reset_client(&gateway->clients[i]);
+    free(gateway->provider_endpoint);
+    free(gateway->provider_model);
+    free(gateway->provider_key_env);
+    workspace_close(&gateway->profiles);
+    free((char *)gateway->provider_admin);
+    free((char *)gateway->token);
+    close_socket(gateway->listener);
+    free(gateway);
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+int inference_server(int port, const ProviderSetup *setup, const volatile sig_atomic_t *stop)
+{
+    const char *bind_to = env("NEUTRINO_SERVER_BIND", "127.0.0.1");
+    int code;
+    Gateway *gateway = gateway_open(setup,env("NEUTRINO_SERVER_TOKEN",""),env("NEUTRINO_PROVIDER_ADMIN_TOKEN",""),
+        bind_to,env("NEUTRINO_SERVER_HOST",""),env("NEUTRINO_PROVIDERS_FILE",".neutrino-providers.json"),&port,&code);
+    if (!gateway) return code;
+    printf("Neutrino server listening on http://%s:%d/v1\n", bind_to, port);
+    fflush(stdout);
+    while (!*stop) {
+        gateway_poll(gateway);
+        pause_ms(12);
+    }
+    gateway_close(gateway);
     return code;
 }
 

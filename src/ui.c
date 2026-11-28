@@ -841,11 +841,61 @@ static void model_popup(App *a, int *cx, int *cy)
                           menu->notice.len ? str(&menu->notice) :
                           menu->confirming ? "Enter deletes this profile · Esc cancels" :
                           menu->editing ? "Key: blank keeps it · none clears it" :
-                          !menu->admin ? "API settings require gateway admin access" :
+                          !menu->admin ? "Use /admin to manage provider settings" :
                           menu->provider == MODEL_CURRENT ? str(&menu->active_profile) : "";
     clipped_cell(a,x+2,y+h-3,w-4,RAIL GOLD NORMAL,message);
     clipped_cell(a,x+2,y+h-2,w-4,RAIL DIM NORMAL,w >= 56 ?
                   "Tab move   ←→ choose   Enter next/apply   Esc close" : "Tab · Enter · Esc");
+}
+
+static void session_popup(App *a, int *cx, int *cy)
+{
+    const Session *s = &a->session;
+    const bool admin = s->admin_prompt;
+    const int width = minimum(76,a->cols-4), height = admin ? 7 : 10;
+    const int x = (a->cols-width)/2, y = (a->rows-height)/2;
+    const int label_width = width >= 60 ? 17 : 12, field_width = width-label_width-5;
+    card(a,x,y,width,height,RAIL MINT NORMAL);
+    cell(a,x+2,y,width-4,RAIL MINT BOLD,admin ? " Admin access " : " Connect to Neutrino ");
+    const char *const values[] = {
+        s->form_local ? "B. Set up a local server" : "A. Connect to a host",
+        str(&s->form_host), "", "",
+        s->form_server ? "Run processing on the host" : "Run processing on this client",
+        s->form_local ? "Start local server" : "Connect"
+    };
+    const char *const labels[] = {"Connection","Host URL","Password","Admin password","Processing",""};
+    int row = y+2;
+    *cx = *cy = -1;
+    for (int i = admin ? 3 : 0; i < (admin ? 4 : 6); ++i) {
+        if (!admin && (s->form_local ? i == 1 || i == 4 : i == 3)) continue;
+        bool selected = admin || s->field == i;
+        const char *style = selected ? PICK TXT BOLD : RAIL TXT NORMAL;
+        if (selected) paint(a,x+1,row,width-2,PICK);
+        clipped_cell(a,x+2,row,label_width,style,labels[i]);
+        const char *value = values[i];
+        char masked[257];
+        if (i == 2 || i == 3) {
+            size_t len = i == 2 ? s->form_password.len : s->form_admin.len;
+            memset(masked,'*',len);
+            masked[len] = 0;
+            value = len || i == 3 ? masked : "Optional";
+        }
+        if (selected && (i == 1 || i == 2 || i == 3)) {
+            size_t typed = i == 1 ? s->form_host.len : i == 2 ? s->form_password.len : s->form_admin.len;
+            const size_t visible = (size_t)maximum(0,field_width-1);
+            if (typed > visible) value += typed-visible;
+            *cx = x+2+label_width+(int)(typed < visible ? typed : visible);
+            *cy = row;
+        }
+        clipped_cell(a,x+2+label_width,row,field_width,style,value);
+        ++row;
+    }
+    clipped_cell(a,x+2,y+height-3,width-4,RAIL GOLD NORMAL,
+        s->error.len ? str(&s->error) : admin ? "Password is only used for this session." :
+        s->form_local ? "Set your admin password here. Open /model after setup." :
+                        "Workspaces sync to the host. Use /admin to elevate.");
+    clipped_cell(a,x+2,y+height-2,width-4,RAIL DIM NORMAL,admin ? "Enter verify   Esc cancel" :
+        width >= 56 ? "A/B or arrows choose   Tab move   Enter   Esc continue" : "A/B   Tab   Enter   Esc");
 }
 
 static void frame(App *a)
@@ -896,14 +946,19 @@ static void frame(App *a)
     clipped_cell(a, l.left + 2, a->rows - 1, l.width - reserve - 3,
                  preview_busy(&a->preview) || a->research_job ? RAIL GOLD NORMAL : RAIL DIM NORMAL, state);
     right(a, l.left + l.width - 2, a->rows - 1, reserve, RAIL QUIET NORMAL, keys);
-    if (a->model_menu.open) model_popup(a,&cx,&cy);
+    if (a->session.open || a->session.admin_prompt) session_popup(a,&cx,&cy);
+    else if (a->model_menu.open) model_popup(a,&cx,&cy);
     else palette(a, &l);
     styled(a, ROOT TXT NORMAL);
     if (cx >= 0 && cy >= 0) editor_cursor(a, cx, cy);
 }
-void ui_draw(App *a)
+void ui_frame(App *a)
 {
     frame(a);
+}
+void ui_draw(App *a)
+{
+    ui_frame(a);
     terminal_write(str(&a->screen), a->screen.len);
 }
 void ui_dump(App *a, int cols, int rows)

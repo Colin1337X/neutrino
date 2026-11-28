@@ -111,6 +111,20 @@ typedef struct {
     bool open, admin, authenticated, usage, editing, confirming, managing, discovering;
 } ModelMenu;
 
+typedef struct Browser Browser;
+typedef struct {
+    Text host, password, revision, refresh_base, admin, validated_admin, local_admin, local_password, profiles;
+    Text form_host, form_password, form_admin, error;
+    Gateway *gateway;
+    Browser *browser;
+    Inference *refresh;
+    uint64_t refresh_at, retry_at;
+    bool open, elevated, server_processing, serving, linked, form_local, form_server;
+    bool admin_prompt, admin_requested, admin_disabled, admin_off, remote_terminal, browser_setup, new_web_password;
+    int field;
+    int web_port;
+} Session;
+
 static inline bool preview_busy(const Preview *preview)
 {
     return preview->recall_job != nullptr || preview->auto_research_job != nullptr || preview->active > 0;
@@ -127,6 +141,8 @@ typedef struct {
     Inference *provider_job;
     bool provider_switching, provider_menu_request;
     ModelMenu model_menu;
+    Session session;
+    const char *request_admin;
     char info_title[96];
     size_t cursor, caret, mark, selection_a, selection_b;
     int cols, rows, scroll, scroll_max, panel_scroll, rail_cursor, rail_offset, command_cursor;
@@ -147,13 +163,21 @@ extern const char *const model_provider_labels[MODEL_PROVIDER_COUNT];
 bool model_field_enabled(const ModelMenu *menu, int field);
 const char *model_provider_label(const ModelMenu *menu);
 
-typedef struct Browser Browser;
 typedef enum { BROWSER_STATE, BROWSER_HISTORY, BROWSER_ACTION, BROWSER_IMPORT,
-               BROWSER_LORE, BROWSER_PRESET, BROWSER_EXPORT, BROWSER_TRACE, BROWSER_CANDIDATE } BrowserRoute;
+               BROWSER_LORE, BROWSER_PRESET, BROWSER_EXPORT, BROWSER_TRACE, BROWSER_CANDIDATE,
+               BROWSER_CONNECT, BROWSER_ADMIN, BROWSER_SYNC, BROWSER_SYNC_WRITE, BROWSER_TERMINAL,
+               BROWSER_REVISION, BROWSER_PROVIDER } BrowserRoute;
 Browser *browser_open(int port);
+Browser *browser_open_local(int *port, const char *password);
+bool browser_set_local_password(Browser *web, const char *password);
 void browser_poll(Browser *web, App *app);
 void browser_close(Browser *web);
-int app_browser_response(App *app, BrowserRoute route, const Text *input, Text *output);
+int app_browser_response(App *app, BrowserRoute route, const Text *input, const char *admin, Text *output);
+bool session_host(const char *url);
+bool session_frame_safe(const char *frame);
+bool session_secret(const char *value, bool optional);
+bool session_secret_matches(const char *actual, const char *expected);
+void forget_secret(Text *secret);
 
 typedef struct { const char *name, *args, *summary; } Command;
 enum { COMMAND_MATCH_LIMIT = 96 };
@@ -162,6 +186,7 @@ extern const size_t command_count;
 extern const char *const operation_names[OP_COUNT];
 
 void ui_draw(App *app);
+void ui_frame(App *app);
 void ui_dump(App *app, int cols, int rows);
 size_t ui_move_editor(const App *app, int delta);
 int ui_command_matches(const App *app, int *results, int cap);

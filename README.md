@@ -36,6 +36,18 @@ Start the inference gateway separately as described under **Connect the inferenc
 
 The web listener defaults to IPv4 loopback and port 7000. Use `--port PORT` to override the port. To use a phone or tablet over HTTPS, forward a private hostname to the loopback listener through a TLS reverse proxy. Preserve the public `Host` header, forward using HTTP/1.1 with a content length for uploads, and set `NEUTRINO_WEB_HOST` to the exact host (including the port if the browser sends one). Set `NEUTRINO_WEB_TOKEN` to a secret of at least 16 characters and enter it in the browser. `NEUTRINO_WEB_BIND` can change the listener's IPv4 address when a separate proxy host needs to reach it. The browser assets are embedded in the executable.
 
+### Choose a host or start a local server
+
+The connection menu opens when you run `neutrino` or `neutrino --web` without other options. Use `--login` to open it with a custom workspace or port, or enter `/login` in a local workspace. Browser setup runs through the Neutrino process on your machine.
+
+- **A. Connect to a host.** Enter the workspace host URL and its password if required. **Run on this client** is the default. Your Neutrino process runs the workspace, narrator orchestration, and simulation, and uses its configured inference gateway. The host saves workspace changes and clients refresh when idle. Use `/sync` to refresh on demand. If the host has changed while you were editing, Neutrino keeps your changes in memory and reports a conflict. Export a backup before closing.
+- **Run on the host** sends workspace actions to the host's Neutrino process. The host uses its gateway and runs the tools. You can also open the host URL directly in a browser for host processing.
+- **B. Set up a local server.** Create an admin password of at least 16 characters. The optional connection password must also have at least 16 characters and differ from the admin password. Neutrino starts a loopback workspace listener and inference gateway for this session. In the TUI, the connection address appears after setup. Open `/model` to configure the provider. Saved provider profiles use the workspace path with `.providers.json` appended, unless `NEUTRINO_PROVIDERS_FILE` is set. Enter the local server passwords again when you start a new session.
+
+Use `/admin` to enter the admin password in a masked prompt, or `/admin off` to leave admin mode. In a hosted session, this grants access to the host's provider settings. It is scoped to the terminal session or browser tab.
+
+To host a persistent workspace, start the gateway as described below and run `neutrino --web --host --workspace FILE --server URL`. Set `NEUTRINO_WEB_TOKEN` on the workspace host to its connection password and `NEUTRINO_PROVIDER_ADMIN_TOKEN` on the gateway to its separate admin password. Use the workspace host URL in the menu. Remote connections use HTTPS. Loopback connections can use HTTP.
+
 ### GitHub release builds
 
 Push a new `vMAJOR.MINOR.PATCH` or `build-NNN` tag from a commit that contains the release workflow. The workflow runs CTest and a demo smoke check on Windows x64, Linux x64 and ARM64, and macOS Intel and Apple Silicon. After every build passes, GitHub publishes the five archives and `SHA256SUMS.txt` on the tagged release. A tag such as `v0.16.0-rc.1` publishes as a prerelease.
@@ -286,7 +298,7 @@ An explicitly chosen endpoint uses the named key variable or the preset's defaul
 
 ### Switch providers with /model
 
-Set `NEUTRINO_PROVIDER_ADMIN_TOKEN` to the same secret in the gateway and in each trusted TUI or web process that will manage it. Use at least 16 characters and a different value from `NEUTRINO_SERVER_TOKEN`. A gateway started with an admin token can accept its first provider through `/model`.
+For a standalone gateway, set `NEUTRINO_PROVIDER_ADMIN_TOKEN` on the gateway to an admin password of at least 16 characters. Choose a different value from `NEUTRINO_SERVER_TOKEN`. Elevate with `/admin`, then open `/model`. A gateway started with an admin password can accept its first provider through `/model`. Trusted legacy clients can also receive the token through their process environment.
 
 Open `/model` in the terminal or web composer to choose a provider and edit its model ID, key variable, and streaming usage setting. Choosing **Current provider** keeps its endpoint and gateway credential. Without gateway admin access, the menu can select the workspace narrator model.
 
@@ -306,7 +318,7 @@ Select a saved provider to test its connection. To pick a different model for th
 /model api usage on
 ```
 
-Set custom key variables such as `NEUTRINO_PROVIDER_KEY_HOSTED` in the gateway environment. The command takes the variable's name. The `openai` preset uses the gateway's `OPENAI_API_KEY` when the key variable is omitted. `/model api usage off` disables the optional stream-usage request. Provider settings apply to everyone using that gateway. Unsaved changes last until it restarts. Start a web process with the admin token only when its users should have permission to manage the gateway.
+Set custom key variables such as `NEUTRINO_PROVIDER_KEY_HOSTED` in the gateway environment. The command takes the variable's name. The `openai` preset uses the gateway's `OPENAI_API_KEY` when the key variable is omitted. `/model api usage off` disables the optional stream-usage request. Provider settings apply to everyone using that gateway. Unsaved changes last until it restarts.
 
 Open the TUI in a second terminal. Its default server address is `http://127.0.0.1:4783/v1`. The TUI sends prompts to Neutrino's server, which opens the upstream provider connection and streams the reply back.
 

@@ -124,6 +124,9 @@ const Command commands[] = {
     {"import", " file", "Import a workspace, chat, character card, or lorebook"},
     {"export", " file", "Write a new workspace backup"},
     {"save", "", "Save the workspace"},
+    {"login", "", "Connect to a hosted workspace or set up a local server"},
+    {"admin", " [off]", "Enter an admin password or leave admin mode"},
+    {"sync", "", "Refresh the linked workspace"},
     {"model", " [MODEL|api|provider|recall]", "Select models, switch providers, or configure API settings"},
     {"server", " [URL]", "Set the Neutrino inference server"},
     {"neofetch", "", "Show server status and generation performance"},
@@ -137,6 +140,24 @@ static const char *const bible_types[] = {"character", "location", "organization
 static volatile sig_atomic_t interrupted;
 
 static void on_signal(int sig) { (void)sig; interrupted = 1; }
+static void initial_selection(App *a);
+static bool push_workspace(App *a);
+static void sync_workspace(App *a);
+static void admin_command(App *a, const char *arg);
+static void login_key(App *a, int key);
+
+static const char *server_token(const App *a)
+{
+    return a->session.gateway ? str(&a->session.local_password) : env("NEUTRINO_SERVER_TOKEN","");
+}
+
+static const char *admin_token(const App *a)
+{
+    if (a->request_admin) return a->request_admin;
+    if (!a->browser && a->session.elevated) return str(&a->session.admin);
+    if (a->session.serving || a->session.gateway || a->session.linked || a->session.admin_disabled) return "";
+    return env("NEUTRINO_PROVIDER_ADMIN_TOKEN","");
+}
 
 const char *ui_model(const App *a)
 {
@@ -145,6 +166,7 @@ const char *ui_model(const App *a)
 }
 const char *ui_endpoint(const App *a)
 {
+    if (a->session.gateway) return str(&a->server_address);
     if (a->server_override) return a->server_override;
     return env("NEUTRINO_SERVER", a->server_address.len ? str(&a->server_address) : "http://127.0.0.1:4783/v1");
 }
@@ -155,7 +177,7 @@ Inference *app_inference(const App *a, const char *role, const Json *messages)
     const char *model = js(a->ws.root, "serverNarrator");
     if ((!strcmp(role, "narrator") || !strcmp(role, "narrator-acoustic")) && *model)
         format(&route, "/%s", model);
-    Inference *job = inference_start(ui_endpoint(a), env("NEUTRINO_SERVER_TOKEN", ""), str(&route), messages);
+    Inference *job = inference_start(ui_endpoint(a), server_token(a), str(&route), messages);
     release(&route);
     return job;
 }
@@ -170,6 +192,12 @@ static void status(App *a, const char *s) { clear(&a->status); append(&a->status
 void app_status(App *a, const char *s) { status(a, s); }
 static void save(App *a)
 {
+    if (!a->ws.dirty) return;
+    if (a->session.linked) {
+        if (!a->session.server_processing && monotonic_ms() >= a->session.retry_at) push_workspace(a);
+        return;
+    }
+    if (a->session.serving) workspace_sync_mark(a->ws.root);
     if (!workspace_save(&a->ws)) status(a, "Save failed. Your changes are in memory; /export can write a backup.");
 }
 static void selection_save(App *a)
@@ -418,7 +446,7 @@ static bool tick_neofetch(App *a)
         return done && shown;
     }
     if (shown && now >= neo->refresh_at) {
-        neo->probe = inference_probe(ui_endpoint(a), env("NEUTRINO_SERVER_TOKEN", ""));
+        neo->probe = inference_probe(ui_endpoint(a), server_token(a));
         neo->refresh_at = now + 3000;
         if (!neo->probe && !neo->error.len) {
             append(&neo->error, "Could not start the status check.");
@@ -1442,7 +1470,7 @@ static void model_api_help(App *a)
         "/model provider PRESET_OR_URL | MODEL [| KEY_ENV] · switch gateway provider\n"
         "/model api usage on|off · request streaming token usage\n\n"
         "Presets: ollama, llamacpp, openai. Custom key variables start with NEUTRINO_PROVIDER_KEY_.\n"
-        "Set NEUTRINO_PROVIDER_ADMIN_TOKEN in the gateway and trusted client processes.");
+        "Use /admin to enter the gateway's admin password.");
 }
 
 const char *const model_provider_labels[MODEL_PROVIDER_COUNT] = {
@@ -1495,7 +1523,10 @@ static void model_menu_error(ModelMenu *menu, const char *message)
 
 static bool start_model_api(App *a, const Json *settings, bool switching, bool menu)
 {
-    a->provider_job = inference_provider(ui_endpoint(a),env("NEUTRINO_PROVIDER_ADMIN_TOKEN",""),settings);
+    const char *token = admin_token(a);
+    a->provider_job = a->session.linked && *token ?
+        session_request(str(&a->session.host),"/api/provider",str(&a->session.password),token,settings) :
+        inference_provider(ui_endpoint(a),token,settings);
     a->provider_switching = switching;
     a->provider_menu_request = menu;
     if (a->provider_job) return true;
@@ -1517,7 +1548,7 @@ static void open_model_menu(App *a)
     if (a->provider_job) { status(a,"Wait for the active model API request."); return; }
     ModelMenu *menu = &a->model_menu;
     menu->open = true;
-    menu->admin = *env("NEUTRINO_PROVIDER_ADMIN_TOKEN","") != 0;
+    menu->admin = *admin_token(a) != 0;
     menu->provider = MODEL_CURRENT;
     menu->field = menu->admin ? MODEL_PROVIDER_FIELD : MODEL_ID_FIELD;
     menu->authenticated = false;
@@ -1664,8 +1695,8 @@ static void apply_model_menu(App *a, int provider, const char *endpoint, const c
 static void model_api(App *a, char *arg)
 {
     if (!strcmp(arg,"help")) { model_api_help(a); return; }
-    const char *token = env("NEUTRINO_PROVIDER_ADMIN_TOKEN","");
-    if (!*token) { model_api_help(a); status(a,"Model API configuration needs the provider admin token."); return; }
+    const char *token = admin_token(a);
+    if (!*token) { model_api_help(a); status(a,"Use /admin to manage provider settings."); return; }
     if (a->provider_job) { status(a,"A model API request is already running."); return; }
     Json *settings = cJSON_CreateObject();
     bool switching = false;
@@ -1720,7 +1751,7 @@ static bool tick_model_api(App *a)
                        cJSON_IsTrue(at(response,"truncated")) ? " shown" : " available");
             }
         } else {
-            if (a->provider_switching) {
+            if (a->provider_switching && !a->session.linked) {
                 select_narrator(a,"");
                 a->neo.count = a->neo.next = 0;
                 reset_neofetch_server(&a->neo);
@@ -2085,6 +2116,8 @@ static void quit(App *a)
     if (preview_busy(&a->preview)) {
         cancel_preview(&a->preview);
         status(a, "Cancelling generation. Quit after the connection closes.");
+    } else if (a->session.linked && !a->session.server_processing && a->ws.dirty) {
+        if (push_workspace(a)) a->quit = true;
     } else if (workspace_save(&a->ws)) a->quit = true;
     else status(a, "Save failed. /export can write a backup before closing.");
 }
@@ -2508,7 +2541,14 @@ static void slash_command(App *a, char *line)
     else if (!strcmp(line, "export")) {
         status(a, *arg && workspace_export(&a->ws, arg) ? "Workspace backup exported" :
             "Export failed. Use the path to a new file.");
-    } else if (!strcmp(line, "model")) {
+    } else if (!strcmp(line,"login")) {
+        if (a->ssh_session || a->session.serving || a->session.linked || a->session.gateway || a->demo)
+            status(a,"Open a new Neutrino session to choose a host.");
+        else if (a->browser) status(a,"Open /login in your browser to choose a host.");
+        else { a->session.open = true; a->session.field = 0; clear(&a->session.error); }
+    } else if (!strcmp(line,"admin")) admin_command(a,arg);
+    else if (!strcmp(line,"sync")) sync_workspace(a);
+    else if (!strcmp(line, "model")) {
         if (!strncmp(arg, "recall", 6) && (!arg[6] || isspace((unsigned char)arg[6])))
             memory_binding(a, trim_left(arg + 6));
         else if (!strncmp(arg,"api",3) && (!arg[3] || isspace((unsigned char)arg[3])))
@@ -2595,7 +2635,7 @@ static void submit(App *a)
         free(data);
         return;
     }
-    remember(a, data);
+    if (strncmp(data,"/admin",6) && strncmp(data,"/login",6)) remember(a, data);
     clear(&a->prompt);
     a->cursor = 0;
     a->slash = false;
@@ -2828,6 +2868,7 @@ static void model_menu_key(App *a, int key)
 static void key_event(App *a, int key)
 {
     if (key == KEY_CLOSED) { a->quit = true; return; }
+    if (a->session.open || a->session.admin_prompt) { login_key(a,key); return; }
     if (a->model_menu.open && key != 17) { model_menu_key(a,key); return; }
     if (a->editing && key != 17) { edit_key(a, key); return; }
     switch (key) {
@@ -2911,6 +2952,344 @@ static void initial_selection(App *a)
     if (a->roleplay) a->scroll = INT_MAX;
     ui_clamp_rail(a);
 }
+static const char *workspace_revision(const Json *root)
+{
+    const char *revision = js(root,"neutrinoSyncRevision");
+    return *revision ? revision : "initial";
+}
+
+static bool session_busy(const App *a)
+{
+    return a->editing || a->preview.open || preview_busy(&a->preview) ||
+           a->memory.job || a->research_job || a->provider_job;
+}
+
+static bool push_workspace(App *a)
+{
+    Session *s = &a->session;
+    Json *payload = cJSON_CreateObject();
+    set(payload,"revision",str(&s->revision));
+    put(payload,"workspace",workspace_snapshot(&a->ws));
+    char *data = cJSON_PrintUnformatted(payload);
+    cJSON_Delete(payload);
+    if (!data) abort();
+    Text request = {.data = data, .len = strlen(data)}, response = {0};
+    const int result = request.len <= FILE_LIMIT ? session_http(str(&s->host),"/api/sync",
+        str(&s->password),"",&request,&response) : 413;
+    cJSON_free(data);
+    Json *reply = result == 200 ? cJSON_ParseWithOpts(str(&response),nullptr,true) : nullptr;
+    const char *revision = js(reply,"revision");
+    const bool saved = *revision && strlen(revision) <= 80;
+    if (saved) {
+        clear(&s->revision);
+        append(&s->revision,revision);
+        a->ws.dirty = false;
+        s->retry_at = 0;
+    } else {
+        s->retry_at = monotonic_ms()+4000;
+        status(a,result == 409 ? "Sync conflict or host busy. Keep this session open or export a backup." :
+                 result == 413 ? "Workspace is too large to sync. Export a backup." :
+                 "Workspace could not sync. Your changes are still in memory.");
+    }
+    release(&response);
+    cJSON_Delete(reply);
+    return saved;
+}
+
+static bool apply_host_workspace(App *a, const Json *reply)
+{
+    const char *revision = js(reply,"revision");
+    if (!*revision || strlen(revision) > 80 || !cJSON_IsObject(at(reply,"workspace"))) return false;
+    if (!strcmp(revision,str(&a->session.revision))) return true;
+    Workspace mirror = {0};
+    if (!workspace_replace(&mirror,at(reply,"workspace"))) return false;
+    mirror.dirty = false;
+    workspace_close(&a->ws);
+    a->ws = mirror;
+    clear(&a->session.revision);
+    append(&a->session.revision,revision);
+    a->scene = a->story = nullptr;
+    close_panel(a);
+    clear(&a->trace);
+    clear(&a->simulation_trace);
+    initial_selection(a);
+    return true;
+}
+
+static bool read_host_workspace(App *a, const char *host, const char *password, bool load, Text *error)
+{
+    Text response = {0};
+    int result = session_http(host,load ? "/api/sync" : "/api/sync/revision",password,"",nullptr,&response);
+    Json *reply = result == 200 ? cJSON_ParseWithOpts(str(&response),nullptr,true) : nullptr;
+    const char *revision = js(reply,"revision");
+    bool valid = *revision && strlen(revision) <= 80;
+    if (!valid) append(error,result == 401 ? "The host password was rejected." :
+        "Could not open a hosted workspace at that address.");
+    else if (load && !(valid = apply_host_workspace(a,reply))) append(error,"The host sent an invalid workspace.");
+    cJSON_Delete(reply);
+    release(&response);
+    return valid;
+}
+
+static bool tick_workspace_sync(App *a)
+{
+    Session *s = &a->session;
+    const bool idle = !a->ws.dirty && !session_busy(a) && !a->prompt.len && !a->model_menu.open;
+    if (!s->linked || s->server_processing) return false;
+    if (!s->refresh) {
+        if (idle && monotonic_ms() >= s->refresh_at) {
+            clear(&s->refresh_base);
+            append(&s->refresh_base,str(&s->revision));
+            s->refresh = session_request(str(&s->host),"/api/sync/revision",str(&s->password),"",nullptr);
+            s->refresh_at = monotonic_ms()+5000;
+        }
+        return false;
+    }
+    Text reply = {0}, unused = {0}, error = {0};
+    bool changed = false;
+    if (inference_read(s->refresh,&reply,&unused,&error)) {
+        inference_free(s->refresh);
+        s->refresh = nullptr;
+        Json *value = error.len ? nullptr : cJSON_ParseWithOpts(str(&reply),nullptr,true);
+        const char *revision = js(value,"revision");
+        if (idle && !strcmp(str(&s->refresh_base),str(&s->revision)) &&
+            *revision && strcmp(revision,str(&s->revision))) {
+            if (at(value,"workspace")) changed = apply_host_workspace(a,value);
+            else s->refresh = session_request(str(&s->host),"/api/sync",str(&s->password),"",nullptr);
+        }
+        cJSON_Delete(value);
+    }
+    release(&reply);
+    release(&unused);
+    release(&error);
+    return changed;
+}
+
+static void sync_workspace(App *a)
+{
+    Session *s = &a->session;
+    if (!s->linked || s->server_processing) { status(a,"No client-processed workspace is linked."); return; }
+    if (session_busy(a)) { status(a,"Finish editing or generation before syncing."); return; }
+    if (a->ws.dirty && !push_workspace(a)) return;
+    Text error = {0};
+    const bool ok = read_host_workspace(a,str(&s->host),str(&s->password),true,&error);
+    status(a,ok ? "Workspace is in sync." : str(&error));
+    release(&error);
+}
+
+static bool connect_session(App *a, bool local, const char *host, bool server, const char *password,
+                            const char *admin, Text *error)
+{
+    Session *s = &a->session;
+    if (a->ssh_session || s->serving || a->demo || s->linked || s->gateway) {
+        append(error,"Open a new Neutrino session to choose another host.");
+        return false;
+    }
+    if (session_busy(a) || a->ws.dirty) {
+        append(error,"Finish active work and save before connecting.");
+        return false;
+    }
+    if (!session_secret(password,true)) {
+        append(error,"Use a password of up to 256 printable ASCII characters without spaces.");
+        return false;
+    }
+    if (local) {
+        if (!session_secret(admin,false) || strlen(admin)<16 || !strcmp(admin,password) ||
+            (*password && strlen(password)<16)) {
+            append(error,"Use a separate admin password of 16–256 characters. An optional local server password also needs 16.");
+            return false;
+        }
+        const char *configured = env("NEUTRINO_PROVIDERS_FILE","");
+        if (*configured) append(&s->profiles,configured);
+        else format(&s->profiles,"%s.providers.json",a->ws.path);
+        int port = 0;
+        s->gateway = local_gateway_open(password,admin,str(&s->profiles),&port);
+        if (!s->gateway) {
+            clear(&s->profiles);
+            append(error,"Could not start the local gateway. Check the provider profile file and terminal output.");
+            return false;
+        }
+        if (!s->browser) {
+            s->browser = browser_open_local(&s->web_port,password);
+            if (!s->browser) {
+                gateway_close(s->gateway);
+                s->gateway = nullptr;
+                clear(&s->profiles);
+                append(error,"Could not start the local workspace listener.");
+                return false;
+            }
+        } else s->new_web_password = browser_set_local_password(s->browser,password);
+        s->serving = true;
+        clear(&a->server_address);
+        format(&a->server_address,"http://127.0.0.1:%d/v1",port);
+        append(&s->local_password,password);
+        append(&s->local_admin,admin);
+        if (!a->browser) {
+            append(&s->admin,admin);
+            s->elevated = true;
+        }
+        clear(&a->status);
+        format(&a->status,"Local server ready · http://127.0.0.1:%d · /model",s->web_port);
+    } else {
+        if (!session_host(host)) {
+            append(error,"Enter the workspace host's HTTPS URL (HTTP is available on loopback).");
+            return false;
+        }
+        Text origin = {0};
+        size_t length = strlen(host);
+        while (length && host[length-1]=='/') --length;
+        if (length >= 3 && !memcmp(host+length-3,"/v1",3)) {
+            append(error,"Use the workspace host address without /v1.");
+            return false;
+        }
+        append_n(&origin,host,length);
+        if (!read_host_workspace(a,str(&origin),password,!server,error)) {
+            release(&origin);
+            return false;
+        }
+        s->host = origin;
+        append(&s->password,password);
+        forget_secret(&s->admin);
+        s->elevated = false;
+        s->linked = true;
+        s->server_processing = server;
+        s->refresh_at = monotonic_ms()+5000;
+        status(a,server ? "Connected. Processing runs on the host." :
+                         "Connected. Processing runs on this client. Use /sync to refresh.");
+    }
+    s->open = false;
+    return true;
+}
+
+static bool verify_admin(App *a, const char *password)
+{
+    if (!session_secret(password,false) || strlen(password)<16) return false;
+    Session *s = &a->session;
+    if (s->gateway) return session_secret_matches(password,str(&s->local_admin));
+    Text response = {0};
+    const Text empty = {.data = "{}", .len = 2};
+    const int result = s->linked ? session_http(str(&s->host),"/api/admin",
+            str(&s->password),password,&empty,&response) :
+        session_host(ui_endpoint(a)) ? session_http(ui_endpoint(a),"/provider",password,"",&empty,&response) : 0;
+    Json *body = result == 200 ? cJSON_ParseWithOpts(str(&response),nullptr,true) : nullptr;
+    bool valid = cJSON_IsTrue(at(body,"admin")) || cJSON_IsBool(at(body,"authenticated"));
+    cJSON_Delete(body);
+    release(&response);
+    return valid;
+}
+
+static void admin_command(App *a, const char *arg)
+{
+    Session *s = &a->session;
+    if (!strcmp(arg,"off")) {
+        forget_secret(&s->admin);
+        s->elevated = false;
+        if (s->remote_terminal) s->admin_off = true;
+        if (!a->browser) s->admin_disabled = true;
+        s->admin_prompt = false;
+        status(a,"Admin mode ended.");
+    } else if (*arg) status(a,"Use /admin to enter the password in a masked field.");
+    else if (a->browser) {
+        if (s->remote_terminal) s->admin_requested = true;
+        else status(a,"Open /admin in your browser to enter the admin password.");
+    } else {
+        clear(&s->error);
+        forget_secret(&s->form_admin);
+        s->admin_prompt = true;
+    }
+}
+
+static void login_key(App *a, int key)
+{
+    Session *s = &a->session;
+    if (key == 17) { a->quit = true; return; }
+    if (key == 27) {
+        s->open = s->admin_prompt = false;
+        forget_secret(&s->form_password);
+        forget_secret(&s->form_admin);
+        return;
+    }
+    if (s->admin_prompt && (key == 13 || key == 10)) {
+        if (verify_admin(a,str(&s->form_admin))) {
+            forget_secret(&s->admin);
+            s->admin = s->form_admin;
+            s->form_admin = (Text){0};
+            s->elevated = true;
+            s->admin_prompt = false;
+            status(a,"Admin mode enabled for this session.");
+        } else {
+            clear(&s->error);
+            append(&s->error,"Admin password rejected or gateway unavailable.");
+        }
+        forget_secret(&s->form_admin);
+        return;
+    }
+    if (!s->admin_prompt) {
+        if ((key == 'a' || key == 'A') && s->field == 0) { s->form_local = false; s->field = 1; return; }
+        if ((key == 'b' || key == 'B') && s->field == 0) { s->form_local = true; s->field = 2; return; }
+        if ((key == KEY_LEFT || key == KEY_RIGHT || key == ' ') && s->field == 0) {
+            s->form_local = !s->form_local;
+            return;
+        }
+        if ((key == KEY_LEFT || key == KEY_RIGHT || key == ' ') && s->field == 4) {
+            s->form_server = !s->form_server;
+            return;
+        }
+        if ((key == 13 || key == 10) && s->field == 5) {
+            clear(&s->error);
+            connect_session(a,s->form_local,str(&s->form_host),s->form_server,
+                            str(&s->form_password),str(&s->form_admin),&s->error);
+            forget_secret(&s->form_password);
+            forget_secret(&s->form_admin);
+            return;
+        }
+        if (key == 9 || key == KEY_DOWN || key == KEY_UP || key == KEY_BACKTAB || key == 13 || key == 10) {
+            int step = key == KEY_UP || key == KEY_BACKTAB ? 5 : 1;
+            do { s->field = (s->field + step) % 6; }
+            while (s->form_local ? s->field == 1 || s->field == 4 : s->field == 3);
+            return;
+        }
+    }
+    Text *field = s->admin_prompt || s->field == 3 ? &s->form_admin :
+        s->field == 2 ? &s->form_password : s->field == 1 ? &s->form_host : nullptr;
+    if (!field) return;
+    if (key == 21) {
+        if (field == &s->form_host) clear(field); else forget_secret(field);
+    } else if ((key == 8 || key == 127) && field->len) field->data[--field->len] = 0;
+    else if (key > 32 && key < 127 && field->len < (field == &s->form_host ? 1024u : 256u)) {
+        char character = (char)key;
+        append_n(field,&character,1);
+    }
+}
+
+static void remote_terminal_frame(App *a, const int *keys, int count)
+{
+    Session *s = &a->session;
+    Json *request = cJSON_CreateObject(), *presses = cJSON_CreateArray();
+    integer(request,"cols",a->cols);
+    integer(request,"rows",a->rows);
+    for (int i = 0; i < count; ++i) cJSON_AddItemToArray(presses,cJSON_CreateNumber(keys[i]));
+    put(request,"keys",presses);
+    char *encoded = cJSON_PrintUnformatted(request);
+    cJSON_Delete(request);
+    if (!encoded) abort();
+    Text body = {.data = encoded, .len = strlen(encoded)}, response = {0};
+    const int result = session_http(str(&s->host),"/api/terminal",str(&s->password),
+                                    s->elevated ? str(&s->admin) : "",&body,&response);
+    cJSON_free(encoded);
+    Json *message = result == 200 ? cJSON_ParseWithOpts(str(&response),nullptr,true) : nullptr;
+    const char *frame = js(message,"frame");
+    if (session_frame_safe(frame)) terminal_write(frame,strlen(frame));
+    else {
+        status(a,"Host connection unavailable. Ctrl+Q closes this session.");
+        ui_draw(a);
+    }
+    if (cJSON_IsTrue(at(message,"admin"))) admin_command(a,"");
+    if (cJSON_IsTrue(at(message,"admin_off"))) admin_command(a,"off");
+    cJSON_Delete(message);
+    release(&response);
+}
+
 static void restore_terminal(void)
 {
     const char end[] = "\x1b[0m\x1b[?25h\x1b[?1049l";
@@ -2982,6 +3361,8 @@ static Json *browser_state(const App *a)
     put(state, "researching", cJSON_CreateBool(a->research_job != NULL));
     put(state, "editing", cJSON_CreateBool(a->editing));
     put(state, "compact", cJSON_CreateBool(a->compact));
+    put(state,"loginSetup",cJSON_CreateBool(a->session.open && a->session.browser_setup));
+    put(state,"canConnect",cJSON_CreateBool(a->session.browser_setup && !a->session.linked && !a->session.gateway));
     set(state, "id", a->roleplay ? js(a->story, "id") : js(a->scene, "path"));
     set(state, "title", a->roleplay ? ui_story_name(a) : ui_scene_name(a));
     set(state, "status", str(&a->status));
@@ -2990,18 +3371,21 @@ static Json *browser_state(const App *a)
         const ModelMenu *menu = &a->model_menu;
         Json *value = cJSON_CreateObject();
         put(state,"modelMenu",value);
-        put(value,"admin",cJSON_CreateBool(menu->admin));
+        const bool has_admin = menu->admin && *admin_token(a);
+        put(value,"admin",cJSON_CreateBool(has_admin));
         put(value,"busy",cJSON_CreateBool(model_menu_busy(a)));
         put(value,"usage",cJSON_CreateBool(menu->usage));
         put(value,"authenticated",cJSON_CreateBool(menu->authenticated));
-        set(value,"endpoint",str(&menu->endpoint));
+        set(value,"endpoint",has_admin ? str(&menu->endpoint) : "");
         set(value,"model",str(&menu->model));
         set(value,"error",str(&menu->error));
-        set(value,"notice",str(&menu->notice));
-        if (menu->models) put(value,"models",cJSON_Duplicate(menu->models,true));
-        set(value,"active_profile",str(&menu->active_profile));
-        if (menu->profiles) put(value,"profiles",cJSON_Duplicate(menu->profiles,true));
-        if (menu->profile_details) put(value,"profile_details",cJSON_Duplicate(menu->profile_details,true));
+        if (has_admin) {
+            set(value,"notice",str(&menu->notice));
+            if (menu->models) put(value,"models",cJSON_Duplicate(menu->models,true));
+            set(value,"active_profile",str(&menu->active_profile));
+            if (menu->profiles) put(value,"profiles",cJSON_Duplicate(menu->profiles,true));
+            if (menu->profile_details) put(value,"profile_details",cJSON_Duplicate(menu->profile_details,true));
+        }
     }
     if (a->roleplay) {
         put(state, "messages", browser_messages(a, 80));
@@ -3096,7 +3480,7 @@ static int browser_action(App *a, const Json *input, Text *error)
     return 200;
 }
 
-int app_browser_response(App *a, BrowserRoute route, const Text *input, Text *output)
+static int browser_workspace_response(App *a, BrowserRoute route, const Text *input, Text *output)
 {
     if (route == BROWSER_TRACE || route == BROWSER_CANDIDATE) {
         const Text *text = route == BROWSER_TRACE ? &a->trace :
@@ -3133,7 +3517,7 @@ int app_browser_response(App *a, BrowserRoute route, const Text *input, Text *ou
         attach_story_data(a, route == BROWSER_LORE ? "lore" : "preset", str(input));
         save(a);
     }
-    Json *value = route == BROWSER_EXPORT ? a->ws.root : route == BROWSER_HISTORY ? browser_messages(a, INT_MAX) :
+    Json *value = route == BROWSER_EXPORT ? workspace_snapshot(&a->ws) : route == BROWSER_HISTORY ? browser_messages(a, INT_MAX) :
         browser_state(a);
     if (route == BROWSER_STATE) {
         Json *list = cJSON_CreateArray();
@@ -3147,11 +3531,235 @@ int app_browser_response(App *a, BrowserRoute route, const Text *input, Text *ou
         put(value, "commands", list);
     }
     char *encoded = cJSON_PrintUnformatted(value);
-    if (value != a->ws.root) cJSON_Delete(value);
+    cJSON_Delete(value);
     if (!encoded) abort();
     append(output, encoded);
     cJSON_free(encoded);
     return 200;
+}
+
+static void encode_session_json(Json *value, Text *output)
+{
+    char *data = cJSON_PrintUnformatted(value);
+    if (!data) abort();
+    append(output,data);
+    cJSON_free(data);
+    cJSON_Delete(value);
+}
+
+static void forget_json_secret(Json *root, const char *name)
+{
+    char *value = cJSON_GetStringValue(at(root,name));
+    if (!value) return;
+    volatile char *data = value;
+    for (size_t i = 0, length = strlen(value); i < length; ++i) data[i] = 0;
+}
+
+static int hosted_sync(App *a, BrowserRoute route, const Text *input, Text *output)
+{
+    if (!a->session.serving) { append(output,"This instance does not host a synced workspace."); return 404; }
+    Json *result = cJSON_CreateObject();
+    if (route == BROWSER_SYNC_WRITE) {
+        Json *change = cJSON_ParseWithOpts(str(input),nullptr,true);
+        Json *root = at(change,"workspace");
+        if (!cJSON_IsObject(root) || !cJSON_IsString(at(change,"revision")) ||
+            cJSON_GetArraySize(change) != 2 || memchr(str(input),0,input->len)) {
+            cJSON_Delete(change);
+            cJSON_Delete(result);
+            append(output,"Send a complete workspace and its base revision.");
+            return 400;
+        }
+        if (a->ws.dirty || session_busy(a) ||
+            strcmp(js(change,"revision"),workspace_revision(a->ws.root))) {
+            cJSON_Delete(change);
+            cJSON_Delete(result);
+            append(output,"The host workspace has changed or is busy.");
+            return 409;
+        }
+        workspace_sync_mark(root);
+        if (!workspace_replace(&a->ws,root)) {
+            cJSON_Delete(change);
+            cJSON_Delete(result);
+            append(output,"The workspace is invalid or could not be saved.");
+            return 400;
+        }
+        cJSON_Delete(change);
+        a->scene = a->story = nullptr;
+        close_panel(a);
+        clear(&a->trace);
+        clear(&a->simulation_trace);
+        initial_selection(a);
+    } else if (route == BROWSER_SYNC) {
+        if (a->ws.dirty || session_busy(a)) {
+            cJSON_Delete(result);
+            append(output,"The host is working. Try syncing again when it is idle.");
+            return 409;
+        }
+        Json *snapshot = workspace_snapshot(&a->ws);
+        cJSON_DeleteItemFromObjectCaseSensitive(snapshot,"neutrinoSyncRevision");
+        put(result,"workspace",snapshot);
+    }
+    set(result,"revision",workspace_revision(a->ws.root));
+    encode_session_json(result,output);
+    if (output->len > FILE_LIMIT) {
+        clear(output);
+        append(output,"The workspace exceeds the sync limit.");
+        return 413;
+    }
+    return 200;
+}
+
+static int hosted_terminal(App *a, const Text *input, Text *output)
+{
+    if (!a->session.serving) { append(output,"This host has no remote terminal."); return 404; }
+    Json *packet = cJSON_ParseWithOpts(str(input),nullptr,true);
+    const Json *keys = at(packet,"keys"), *key;
+    int cols = number(packet,"cols"), rows = number(packet,"rows");
+    if (!cJSON_IsArray(keys) || cJSON_GetArraySize(keys) > 96 || cols < 1 || rows < 1 ||
+        memchr(str(input),0,input->len)) {
+        cJSON_Delete(packet);
+        append(output,"Send bounded terminal dimensions and keys.");
+        return 400;
+    }
+    cJSON_ArrayForEach(key,keys)
+        if (!cJSON_IsNumber(key) || key->valuedouble != key->valueint ||
+            key->valueint < 0 || key->valueint >= KEY_CLOSED || key->valueint == 17) {
+            cJSON_Delete(packet);
+            append(output,"Invalid terminal key.");
+            return 400;
+        }
+    bound_terminal_viewport(&cols,&rows);
+    a->cols = cols;
+    a->rows = rows;
+    a->session.remote_terminal = true;
+    cJSON_ArrayForEach(key,keys) {
+        key_event(a,key->valueint);
+        if (a->session.admin_requested || a->session.admin_off) break;
+    }
+    a->session.remote_terminal = false;
+    cJSON_Delete(packet);
+    save(a);
+    ui_frame(a);
+    Json *frame = cJSON_CreateObject();
+    set(frame,"frame",str(&a->screen));
+    put(frame,"admin",cJSON_CreateBool(a->session.admin_requested));
+    put(frame,"admin_off",cJSON_CreateBool(a->session.admin_off));
+    a->session.admin_requested = a->session.admin_off = false;
+    encode_session_json(frame,output);
+    return 200;
+}
+
+static int browser_connect(App *a, const Text *input, Text *output)
+{
+    if (!a->session.browser_setup) { append(output,"Local setup is available from a loopback client."); return 403; }
+    Json *form = cJSON_ParseWithOpts(str(input),nullptr,true);
+    const char *kind = js(form,"kind");
+    int result = 400;
+    if (!*kind || memchr(str(input),0,input->len)) append(output,"Choose how to connect.");
+    else if (!strcmp(kind,"skip")) { a->session.open = false; result = 200; }
+    else if (!strcmp(kind,"local") || !strcmp(kind,"host")) {
+        result = connect_session(a,!strcmp(kind,"local"),js(form,"host"),cJSON_IsTrue(at(form,"server")),
+                                 js(form,"password"),js(form,"admin"),output) ? 200 : 400;
+    } else append(output,"Unknown connection mode.");
+    forget_json_secret(form,"password");
+    forget_json_secret(form,"admin");
+    cJSON_Delete(form);
+    if (result == 200) {
+        Json *reply = cJSON_CreateObject();
+        put(reply,"localServer",cJSON_CreateBool(a->session.gateway != nullptr));
+        put(reply,"newWebPassword",cJSON_CreateBool(a->session.new_web_password));
+        encode_session_json(reply,output);
+    }
+    return result;
+}
+
+static int browser_response_with_admin(App *a, BrowserRoute route, const Text *input, Text *output)
+{
+    if (route == BROWSER_CONNECT) return browser_connect(a,input,output);
+    if (route == BROWSER_PROVIDER) {
+        if (!a->session.serving || !a->request_admin || !session_host(ui_endpoint(a))) {
+            append(output,"Host admin access is required.");
+            return 403;
+        }
+        if (input->len > 4096) { append(output,"The provider request exceeds 4 KiB."); return 413; }
+        int result;
+        if (a->session.gateway) {
+            Json *settings = cJSON_ParseWithOpts(str(input),nullptr,true);
+            if (!cJSON_IsObject(settings) || memchr(str(input),0,input->len)) {
+                cJSON_Delete(settings);
+                append(output,"Send a provider settings object.");
+                return 400;
+            }
+            Inference *request = inference_provider(ui_endpoint(a),a->request_admin,settings);
+            cJSON_Delete(settings);
+            result = 502;
+            if (request) {
+                Text ignored = {0}, error = {0};
+                while (!inference_read(request,output,&ignored,&error)) {
+                    gateway_poll(a->session.gateway);
+                    pause_ms(10);
+                }
+                if (!error.len) result = 200;
+                inference_free(request);
+                release(&ignored);
+                release(&error);
+            }
+        } else result = session_http(ui_endpoint(a),"/provider",a->request_admin,"",input,output);
+        if (result == 200) return result;
+        clear(output);
+        append(output,result == 401 ? "The admin password was rejected." : "The host gateway is unavailable.");
+        return result == 401 ? 403 : 502;
+    }
+    if (a->session.linked && a->session.server_processing) {
+        const char *const paths[] = {
+            [BROWSER_STATE]="/api/state", [BROWSER_HISTORY]="/api/history", [BROWSER_ACTION]="/api/action",
+            [BROWSER_IMPORT]="/api/import", [BROWSER_LORE]="/api/lore", [BROWSER_PRESET]="/api/preset",
+            [BROWSER_EXPORT]="/api/export", [BROWSER_TRACE]="/api/trace", [BROWSER_CANDIDATE]="/api/candidate",
+            [BROWSER_ADMIN]="/api/admin"
+        };
+        if (route <= BROWSER_ADMIN && paths[route]) {
+            const bool post = route == BROWSER_ACTION || route == BROWSER_IMPORT || route == BROWSER_LORE ||
+                route == BROWSER_PRESET || route == BROWSER_ADMIN;
+            int result = session_http(str(&a->session.host),paths[route],str(&a->session.password),
+                                      a->request_admin ? a->request_admin : "",post ? input : nullptr,output);
+            if (result == 200 || result == 400 || result == 403 || result == 404 ||
+                result == 409 || result == 413) return result;
+            clear(output);
+            append(output,result == 401 ? "The host password was rejected. Reopen the session to reconnect." :
+                "The workspace host is unavailable.");
+            return 502;
+        }
+    }
+    if (route == BROWSER_ADMIN) {
+        if (!a->request_admin || !verify_admin(a,a->request_admin)) {
+            append(output,"Admin password rejected or gateway unavailable.");
+            return 403;
+        }
+        append(output,"{\"admin\":true}");
+        a->model_menu.open = false;
+        return 200;
+    }
+    if (route == BROWSER_SYNC || route == BROWSER_SYNC_WRITE || route == BROWSER_REVISION)
+        return hosted_sync(a,route,input,output);
+    if (route == BROWSER_TERMINAL) return hosted_terminal(a,input,output);
+    return browser_workspace_response(a,route,input,output);
+}
+
+int app_browser_response(App *a, BrowserRoute route, const Text *input, const char *admin, Text *output)
+{
+    Session *s = &a->session;
+    const bool browser = a->browser;
+    a->browser = true;
+    const char *known = s->gateway ? str(&s->local_admin) : str(&s->validated_admin);
+    a->request_admin = admin && (route == BROWSER_ADMIN || session_secret_matches(admin,known)) ? admin : nullptr;
+    int result = browser_response_with_admin(a,route,input,output);
+    if (route == BROWSER_ADMIN && result == 200 && a->request_admin && !s->gateway) {
+        forget_secret(&s->validated_admin);
+        append(&s->validated_admin,a->request_admin);
+    }
+    a->request_admin = nullptr;
+    a->browser = browser;
+    return result;
 }
 
 static int run(int argc, char **argv)
@@ -3159,7 +3767,7 @@ static int run(int argc, char **argv)
     App a = {0};
     ProviderSetup provider = {0};
     const char *path = env("NEUTRINO_WORKSPACE", ".neutrino.json"), *import = NULL;
-    bool dump = false, serve = false;
+    bool dump = false, serve = false, login = false;
     int port = 0, bench = 0, code = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--demo")) a.demo = true;
@@ -3167,6 +3775,8 @@ static int run(int argc, char **argv)
         else if (!strcmp(argv[i], "--ssh-session")) a.ssh_session = true;
         else if (!strcmp(argv[i], "--serve")) serve = true;
         else if (!strcmp(argv[i], "--web")) a.browser = true;
+        else if (!strcmp(argv[i], "--login")) login = true;
+        else if (!strcmp(argv[i], "--host")) a.session.serving = true;
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) {
             port = parse_number(argv[++i], 1, 65535);
             if (port < 0) { fputs("Invalid port.\n", stderr); return 2; }
@@ -3191,11 +3801,11 @@ static int run(int argc, char **argv)
             bool help = !strcmp(argv[i], "--help") || !strcmp(argv[i], "-h");
             FILE *out = help ? stdout : stderr;
             if (!help) fprintf(out, "Unexpected argument: %s\n", argv[i]);
-            fputs("Usage: neutrino [--workspace FILE] [--import FILE] [--demo] [--snapshot] [--server URL]\n"
+            fputs("Usage: neutrino [--login] [--workspace FILE] [--import FILE] [--demo] [--snapshot] [--server URL]\n"
                   "       neutrino --ssh-session --workspace FILE [--server URL]\n"
                   "       neutrino --serve [--port PORT] [--provider ollama|llamacpp|openai|URL]\n"
                   "                        [--model MODEL_ID] [--api-key-env VARIABLE]\n"
-                  "       neutrino --web [--port 7000] [--workspace FILE] [--server URL] [--demo]\n"
+                  "       neutrino --web [--login|--host] [--port 7000] [--workspace FILE] [--server URL] [--demo]\n"
                   "       neutrino bench ttft [ROUNDS] [--server URL]\n", out);
             return help ? 0 : 2;
         }
@@ -3211,6 +3821,11 @@ static int run(int argc, char **argv)
         fputs("Choose one launch mode per process.\n", stderr);
         return 2;
     }
+    if ((a.session.serving && (!a.browser || a.demo || login)) ||
+        (login && (a.demo || dump || serve || bench || a.ssh_session))) {
+        fputs("Use --host with a persistent --web workspace or --login with a local interactive session.\n",stderr);
+        return 2;
+    }
     if (!serve && (provider.endpoint || provider.model || provider.key_env)) {
         fputs("Provider flags configure the gateway. Use them with --serve.\n",stderr);
         return 2;
@@ -3224,7 +3839,9 @@ static int run(int argc, char **argv)
     if (a.demo) workspace_demo(&a.ws);
     if (import) {
         Text error = {0};
-        if (!workspace_import(&a.ws, import, &error) || !workspace_save(&a.ws)) {
+        const bool imported = workspace_import(&a.ws,import,&error) != nullptr;
+        if (imported && a.session.serving) workspace_sync_mark(a.ws.root);
+        if (!imported || !workspace_save(&a.ws)) {
             fprintf(stderr, "Import failed: %s\n", error.len ? str(&error) : "workspace could not be saved");
             release(&error);
             workspace_close(&a.ws);
@@ -3233,20 +3850,26 @@ static int run(int argc, char **argv)
         release(&error);
     }
     initial_selection(&a);
+    a.session.browser_setup = a.browser && !a.demo && !a.session.serving &&
+        !*env("NEUTRINO_WEB_HOST","") && !strcmp(env("NEUTRINO_WEB_BIND","127.0.0.1"),"127.0.0.1");
+    a.session.open = (login || argc == 1 || (a.browser && argc == 2)) &&
+        !a.demo && !a.ssh_session && (!a.browser || a.session.browser_setup);
     if (a.browser) {
-        Browser *web = browser_open(port ? port : 7000);
+        a.session.web_port = port ? port : 7000;
+        Browser *web = a.session.browser = browser_open(a.session.web_port);
         if (!web) code = 1;
         else {
             while (!interrupted) {
+                if (a.session.gateway) gateway_poll(a.session.gateway);
                 update_generation(&a);
                 tick_neofetch(&a);
                 tick_model_api(&a);
                 tick_research(&a);
                 if (memory_tick(&a)) save(&a);
+                tick_workspace_sync(&a);
                 browser_poll(web, &a);
                 pause_ms(15);
             }
-            browser_close(web);
         }
     } else if (dump) {
         ui_dump(&a, 112, 30);
@@ -3260,6 +3883,7 @@ static int run(int argc, char **argv)
         const char start[] = "\x1b[?1049h\x1b[?25l";
         terminal_write(start, sizeof start - 1);
         bool redraw = true;
+        uint64_t next_remote = 0;
         while (!a.quit && !interrupted) {
             int cols, rows;
             terminal_size(&cols, &rows);
@@ -3268,10 +3892,28 @@ static int run(int argc, char **argv)
                 a.rows = rows;
                 redraw = true;
             }
+            if (a.session.server_processing && !a.session.admin_prompt) {
+                int keys[96], count = 0;
+                for (int key = terminal_key(50); key >= 0 && count < 96;) {
+                    if (key == 17 || key == KEY_CLOSED) { a.quit = true; break; }
+                    if (key != KEY_RESIZE) keys[count++] = key;
+                    if (count == 96) break;
+                    key = terminal_key(0);
+                }
+                if (!a.quit && (count || redraw || monotonic_ms() >= next_remote)) {
+                    remote_terminal_frame(&a,keys,count);
+                    next_remote = monotonic_ms()+350;
+                    redraw = a.session.admin_prompt;
+                }
+                continue;
+            }
+            if (a.session.gateway) gateway_poll(a.session.gateway);
+            if (a.session.browser) browser_poll(a.session.browser,&a);
             if (update_generation(&a)) redraw = true;
             if (tick_neofetch(&a)) redraw = true;
             if (tick_model_api(&a)) redraw = true;
             if (tick_research(&a)) redraw = true;
+            if (tick_workspace_sync(&a)) redraw = true;
             if (memory_tick(&a)) {
                 save(&a);
                 redraw = true;
@@ -3323,6 +3965,22 @@ static int run(int argc, char **argv)
     release(&a.research_pending_scope);
     release(&a.research_data);
     release(&a.research_reply);
+    if (a.session.refresh) inference_free(a.session.refresh);
+    if (a.session.browser) browser_close(a.session.browser);
+    gateway_close(a.session.gateway);
+    forget_secret(&a.session.password);
+    forget_secret(&a.session.admin);
+    forget_secret(&a.session.validated_admin);
+    forget_secret(&a.session.local_admin);
+    forget_secret(&a.session.local_password);
+    forget_secret(&a.session.form_admin);
+    forget_secret(&a.session.form_password);
+    release(&a.session.host);
+    release(&a.session.revision);
+    release(&a.session.refresh_base);
+    release(&a.session.profiles);
+    release(&a.session.form_host);
+    release(&a.session.error);
     workspace_close(&a.ws);
     return code;
 }
