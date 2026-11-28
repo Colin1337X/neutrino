@@ -4,6 +4,8 @@ A native C workspace for writing fiction and playing it out in a terminal or bro
 
 ## Build and open
 
+For a ready-to-run build, download the Windows x64 ZIP or the Linux or macOS archive for your architecture and extract it. Run `neutrino.exe --demo` on Windows or `./neutrino --demo` on Linux and macOS from the extracted directory. [GitHub releases](https://github.com/Colin1337X/neutrino/releases)
+
 Use a UTF-8, VT-capable terminal. Build with CMake 3.25 or later and a compiler that reports final C23 support, such as GCC 15.2 or the Clang driver in Zig 0.15.2. Release and RelWithDebInfo use `-O3`. All builds need HTTPS-capable libcurl development files. Windows uses WinHTTP for model inference. Linux and macOS use POSIX threads. cJSON is bundled under its own [license](third_party/cjson/LICENSE).
 
 ```powershell
@@ -24,6 +26,8 @@ cmake --build build
 
 The demo opens an original manuscript and a connected roleplay story. It runs in memory. For persistent work, start without `--demo`. Neutrino saves to `.neutrino.json` in the working directory by default. Use `--workspace FILE` or `NEUTRINO_WORKSPACE` for a different file. A sidecar lock prevents two Neutrino processes from writing to the same workspace. `--snapshot` prints a static ANSI frame for inspection.
 
+The TUI centers a reading column and reflows when the terminal resizes. Wider terminals show the library and context beside it. On narrow or short terminals, **F3** opens the library in place of the reading pane. The composer expands to three lines when there is room and scrolls on one line in compact terminals. Use `/focus` to hide the side panes at any width.
+
 ### Use Neutrino in a browser
 
 Start `neutrino --web --demo` and open [the local browser interface](http://127.0.0.1:7000). Use `neutrino --web --workspace FILE` for persistent work. The browser opens a Manuscript and Roleplay library, composer, editor, and searchable command palette. Generation streams into the same story or candidate review as in the terminal. The **Files** menu uploads cards, workspaces, lorebooks, and presets, and downloads a workspace backup. The trace and candidate panels offer their own downloads.
@@ -38,9 +42,15 @@ Push a new `vMAJOR.MINOR.PATCH` or `build-NNN` tag from a commit that contains t
 
 For a build without publishing, run the **Release packages** workflow manually from the Actions tab and download its `release-packages-and-checksums` artifact. The Windows ZIP bundles libcurl. The Linux archives use system libcurl on a glibc distribution, and the macOS archives target macOS 15 or later.
 
-Release packages include `benchmarks/` beside the executable. See `benchmarks/README.md` inside the archive for the comparison harness, fixtures, recorded runs, and their optional runtime dependencies. See `benchmarks/PACKAGE-NOTES.txt` for the suite version when running against an older binary.
+### Run the packaged benchmarks
 
-The TUI centers a reading column and reflows when the terminal resizes. Wider terminals show the library and context beside it. On narrow or short terminals, **F3** opens the library in place of the reading pane. The composer expands to three lines when there is room and scrolls on one line in compact terminals. Use `/focus` to hide the side panes at any width.
+Download a platform package from the release's **Assets** and extract it. The `benchmarks/` directory sits beside the executable. For `v0.20.3` and later, verify the archive against its entry in `SHA256SUMS.txt`. Older releases may use `checksums-posix.sha256` and a separate `.zip.sha256` file.
+
+- Open `benchmarks/README.md` for the SillyTavern comparison harness and its optional dependencies. Recorded runs are under `benchmarks/results/`.
+- Run `python benchmarks/provider_setup.py ./neutrino` for a provider smoke check with a local fixture. On Windows, use `py benchmarks/provider_setup.py .\neutrino.exe`.
+- See the [multiphysics guide](docs/MULTIPHYSICS.md#run-and-measure) for simulation fixtures and timing commands.
+
+The archives for earlier versions include the suite from `v0.20.3` development. Check `benchmarks/PACKAGE-NOTES.txt` before using an older binary, since some tests exercise newer commands. The suite lives in the platform downloads. GitHub's generated **Source code** archives follow the source tree at each tag. A regular CMake build from the current source can run CTest without the packaged suite. The release workflow retrieves a SHA-256-pinned suite from a published platform archive before packaging it into new builds.
 
 ## Use the workspace
 
@@ -278,13 +288,16 @@ An explicitly chosen endpoint uses the named key variable or the preset's defaul
 
 Set `NEUTRINO_PROVIDER_ADMIN_TOKEN` to the same secret in the gateway and in each trusted TUI or web process that will manage it. Use at least 16 characters and a different value from `NEUTRINO_SERVER_TOKEN`. A gateway started with an admin token can accept its first provider through `/model`.
 
-Open `/model` to choose a provider and edit its model ID, key variable, and streaming usage setting. In the terminal, use Tab to move, the arrow keys to change choices, and Enter on Apply. Choosing **Current provider** keeps its endpoint and gateway credential. Without admin access, the menu can select the workspace narrator model.
+Open `/model` in the terminal or web composer to choose a provider and edit its model ID, key variable, and streaming usage setting. Choosing **Current provider** keeps its endpoint and gateway credential. Without gateway admin access, the menu can select the workspace narrator model.
 
-Fill in **Save as** and apply to save a named provider, or reuse its name to update it. Saved names appear in the **Provider** list. Select a name and choose **Switch provider** to load all of its settings. With provider administration enabled, the gateway stores the profiles and the last saved selection in `.neutrino-providers.json` in its working directory. Set `NEUTRINO_PROVIDERS_FILE` to choose a different path. The file stores key variable names only. Keep their values in the gateway environment across restarts.
+1. Choose the provider. For a custom provider, enter its API base URL, such as `https://provider.example/v1`. If it requires a key, enter the gateway environment variable's name in **Gateway key variable** (**Key variable** in the terminal).
+2. Select **Test connection**. You can also fetch the list from **Available models** in the browser or press Enter on **Models** in the terminal. The gateway requests the provider's OpenAI-compatible `GET /models` catalog using the current or draft settings. The connection status reports how many model IDs came back. A successful test verifies catalog access.
+3. In the browser, choose an ID from **Available models**. In the terminal, use Tab to reach **Models**, Left or Right to browse, and Enter to copy the ID into **Model ID**. You can type the ID directly when the provider has no compatible catalog or returns an empty list.
+4. Select **Apply** to use the draft or enter a name under **Save as** before applying to persist it. Lookups leave the active provider unchanged.
 
-Select a saved provider to open **Edit / rename** or **Delete profile**. Edits to the active profile apply immediately. Inactive profiles keep their edits for the next time you select them. In the editor, a blank key field keeps the existing key for the same URL. Enter `none` to clear the key or enter a gateway key variable to replace it. Changing an authenticated URL requires one of those choices. Deleting the active profile keeps its live connection for the current gateway session and clears the saved selection.
+Saved names appear in the **Provider** list. Select a name and choose **Switch provider** to load all of its settings. Reusing a name under **Save as** updates that profile. With provider administration enabled, the gateway stores the profiles and the last saved selection in `.neutrino-providers.json` in its working directory. Set `NEUTRINO_PROVIDERS_FILE` to choose a different path. The file stores key variable names only. Keep their values in the gateway environment across restarts.
 
-Select **Test connection** or **Fetch available models** to query the provider's OpenAI-compatible `/models` endpoint through the gateway. A successful test fills **Available models**. Choose an ID there or enter one manually. In the terminal, use the arrow keys to browse the fetched models and Enter to use the highlighted ID. To change a saved profile's model, first choose **Edit / rename**. Lookups use the selected or draft provider settings and leave the active provider unchanged.
+Select a saved provider to test its connection. To pick a different model for that profile, choose **Edit / rename**, fetch the list, and select **Save changes** after choosing an ID. Edits to the active profile apply immediately. Inactive profiles keep their edits for the next time you select them. In the editor, a blank key field keeps the existing key for the same URL. Enter `none` to clear the key or enter a gateway key variable to replace it. Changing an authenticated URL requires one of those choices. **Delete** (**Delete profile** in the terminal) removes the saved profile. Deleting the active profile keeps its live connection for the current gateway session and clears the saved selection.
 
 ```text
 /model provider ollama | your-installed-model-id

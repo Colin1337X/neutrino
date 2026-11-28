@@ -10,12 +10,18 @@ Audit date **2026-11-20**. Scope is the C application and tests, the Windows and
 | cJSON | The only vendored library. MIT, v1.7.19, upstream commit `c859b25`. The local changes make parse error state thread-local and cap parsing and deep copying at 128 levels. The vendor license is retained. [Release and fixes](https://github.com/DaveGamble/cJSON/releases/tag/v1.7.19) · [License](../third_party/cjson/LICENSE) |
 | cJSON security review | The shipped version includes the `cJSON_SetValuestring` fix for CVE-2024-31755. CVE-2026-67215 and CVE-2026-67216 concern the JSON Patch utilities. Those source files and APIs are absent from the build. Parsed workspace, gateway and provider JSON are still bounded by application size and nesting limits. [Release history](https://github.com/DaveGamble/cJSON/releases) · [CVE-2026-67215](https://github.com/advisories/GHSA-5q3m-r3x7-8phg) · [CVE-2026-67216](https://nvd.nist.gov/vuln/detail/CVE-2026-67216) |
 | Build tooling | CMake 3.25 or later and a final C23 compiler. Verified with CMake 4.2.3 and GCC 15.2 on Ubuntu 26.04.1 and the Clang C driver in Zig 0.15.2 on Windows build 26200. CTest runs the C regression test. Zig is used only as a compiler toolchain. |
-| Upstream inspirations | Neko Agent `0c5bc71`, rp-core, and Cherenkov/Xenon were read to identify workflows. The implementation in Neutrino is C. There is no Neko Agent, Node, pnpm, browser client, SQLite module, JS plugin, TTS service, or paid provider SDK in its build or runtime. [Neko Agent source and license](https://github.com/GameDevFox/neko-agent/tree/0c5bc71) |
+| Upstream inspirations | Neko Agent `0c5bc71`, rp-core, and Cherenkov/Xenon were read to identify workflows. Neutrino implements them in C. The web interface serves embedded HTML, CSS, and JavaScript to the user's browser. Its build and runtime need no Node.js or package manager. [Neko Agent source and license](https://github.com/GameDevFox/neko-agent/tree/0c5bc71) |
 
 Current vendored source SHA-256 values:
 
 - `cJSON.c` — `7fd89de5322c2e434ab66a402f20c33d5ace9852b1b8c93434da2af73d472e6d`
 - `cJSON.h` — `c4146e9c6794a7d6610d967ff58dca8293a0ad41eccc52642aacb82dac225bce`
+
+## Packaged benchmarks
+
+Platform downloads include the optional benchmark suite under `benchmarks/`. Its requirements depend on the test. The provider smoke check uses Python's standard library. The multiphysics harness uses Python and `psutil`. The SillyTavern comparison also requires Node.js, Playwright, Chromium, and a separate SillyTavern installation. See `benchmarks/README.md` in the archive for setup and Windows-specific dependencies.
+
+The tagged release workflow retrieves the suite from a SHA-256-pinned archive and generates checksums after bundling it. A normal CMake build and its CTest suite run independently of that download. [GitHub releases](https://github.com/Colin1337X/neutrino/releases)
 
 ## Neutrino runtime
 

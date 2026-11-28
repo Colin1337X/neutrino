@@ -194,13 +194,26 @@ The C regression suite checks geometric flight time, analytical drainage, condit
 
 ## Run and measure
 
-    cmake --build BUILD --config Release
-    ctest --test-dir BUILD -C Release --output-on-failure
-    python benchmarks/multiphysics.py BUILD/neutrino --fixtures benchmarks/multiphysics-scenarios.json --out results.json
-    BUILD/scene_physics_test --rigid-timing
+Download a platform archive and extract it. Run the benchmark from the directory containing both the executable and `benchmarks/`. Install `psutil` into the Python environment you will use for benchmarks. [GitHub releases](https://github.com/Colin1337X/neutrino/releases)
 
-Use the Windows executable path on Windows. Add --provider http://127.0.0.1:PORT/v1 and --model MODEL for an isolated live narration test. Use --fixtures benchmarks/falling-container.json and --live-plan "falling water container" to reproduce the attached-plan test. The benchmark records raw timings, exact reports and persistence checks. The existing scene_physics_test --rt and scene_physics_test --cfd-gpu modes check supported hardware paths against CPU results.
+```sh
+python -m pip install psutil
+python benchmarks/multiphysics.py ./neutrino --fixtures benchmarks/multiphysics-scenarios.json --out results.json
+```
 
-For the spin and water deposition run, use --fixtures benchmarks/rotating-container.json and --live-plan "falling water container with spin".
+On Windows, use `py` and `.\neutrino.exe`. You can substitute the path to a local CMake build to test it with the same fixtures. The benchmark records raw timings, typed reports, and persistence checks. For a live narration test, add `--provider http://127.0.0.1:PORT/v1` and `--model MODEL`. Choose a scenario with the flags below.
 
-For the runoff run, use --fixtures benchmarks/runoff-container.json and --live-plan "falling water container with runoff".
+| Scenario | `--fixtures` | `--live-plan` |
+| --- | --- | --- |
+| Falling water container | `benchmarks/falling-container.json` | `"falling water container"` |
+| Spin and water deposition | `benchmarks/rotating-container.json` | `"falling water container with spin"` |
+| Runoff and pooling | `benchmarks/runoff-container.json` | `"falling water container with runoff"` |
+
+From a configured source build, run the native regression suite independently.
+
+```sh
+cmake --build BUILD --config Release
+ctest --test-dir BUILD -C Release --output-on-failure
+```
+
+Run `scene_physics_test --rigid-timing` from the build output to measure rigid-body timing. Its `--rt` and `--cfd-gpu` modes compare supported hardware paths against CPU results. To build the optional `ray_scaling_bench` target, extract the packaged `benchmarks/` directory into the source checkout before configuring CMake.
