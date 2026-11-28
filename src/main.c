@@ -145,6 +145,7 @@ static bool push_workspace(App *a);
 static void sync_workspace(App *a);
 static void admin_command(App *a, const char *arg);
 static void login_key(App *a, int key);
+static void clear_password_form(Session *session);
 
 static const char *server_token(const App *a)
 {
@@ -2869,7 +2870,7 @@ static void model_menu_key(App *a, int key)
 static void key_event(App *a, int key)
 {
     if (key == KEY_CLOSED) { a->quit = true; return; }
-    if (a->session.open || a->session.admin_prompt) { login_key(a,key); return; }
+    if (a->session.open || a->session.admin_prompt || a->session.rotating_passwords) { login_key(a,key); return; }
     if (a->model_menu.open && key != 17) { model_menu_key(a,key); return; }
     if (a->editing && key != 17) { edit_key(a, key); return; }
     switch (key) {
@@ -2959,6 +2960,21 @@ static const char *workspace_revision(const Json *root)
     return *revision ? revision : "initial";
 }
 
+static void rebind_workspace(App *a)
+{
+    release_preview(&a->preview);
+    memory_close(a);
+    a->scene = a->story = nullptr;
+    a->roleplay = false;
+    a->selected = false;
+    close_panel(a);
+    clear(&a->trace);
+    clear(&a->simulation_trace);
+    clear(&a->research_data);
+    clear(&a->research_scope);
+    initial_selection(a);
+}
+
 static bool session_busy(const App *a)
 {
     return a->editing || a->preview.open || preview_busy(&a->preview) ||
@@ -3009,11 +3025,7 @@ static bool apply_host_workspace(App *a, const Json *reply)
     a->ws = mirror;
     clear(&a->session.revision);
     append(&a->session.revision,revision);
-    a->scene = a->story = nullptr;
-    close_panel(a);
-    clear(&a->trace);
-    clear(&a->simulation_trace);
-    initial_selection(a);
+    rebind_workspace(a);
     return true;
 }
 
@@ -3207,6 +3219,35 @@ static bool verify_admin(App *a, const char *password)
     return valid;
 }
 
+static void clear_password_form(Session *s)
+{
+    for (size_t i = 0; i < PASS_REMOVE; ++i) forget_secret(&s->password_fields[i]);
+    s->remove_password = false;
+}
+
+static const char *apply_passwords(App *a, const char *admin, const char *admin_repeat,
+                                   const char *connection, const char *connection_repeat, bool remove)
+{
+    Session *s = &a->session;
+    if (strcmp(admin,admin_repeat) || strcmp(connection,connection_repeat))
+        return "Enter matching confirmation passwords.";
+    if (!session_secret(admin,true) || !session_secret(connection,true) ||
+        (*admin && strlen(admin)<16) || (*connection && strlen(connection)<16))
+        return "Use 16–256 printable ASCII characters without spaces.";
+    if (remove && *connection) return "Choose a replacement or remove the connection password.";
+    const char *error = credentials_rotate(&s->auth,str(&s->auth_path),*admin ? admin : nullptr,
+                                           remove || *connection ? connection : nullptr);
+    if (!error) {
+        if (remove || *connection) browser_use_password(s->browser,&s->auth.connection);
+        if (*admin) {
+            if (a->browser) s->elevated = false;
+            a->model_menu.open = false;
+        }
+        status(a,"Local server passwords saved.");
+    }
+    return error;
+}
+
 static void admin_command(App *a, const char *arg)
 {
     Session *s = &a->session;
@@ -3223,14 +3264,68 @@ static void admin_command(App *a, const char *arg)
         else status(a,"Open /admin in your browser to enter the admin password.");
     } else {
         clear(&s->error);
-        forget_secret(&s->form_admin);
-        s->admin_prompt = true;
+        if (s->gateway && s->elevated) {
+            clear_password_form(s);
+            s->field = PASS_ADMIN;
+            s->rotating_passwords = true;
+        } else {
+            forget_secret(&s->form_admin);
+            s->admin_prompt = true;
+        }
     }
+}
+
+static void form_text_key(Text *field, int key, size_t limit)
+{
+    if (key == 21) forget_secret(field);
+    else if ((key == 8 || key == 127) && field->len) field->data[--field->len] = 0;
+    else if (key > 32 && key < 127 && field->len < limit) {
+        char character = (char)key;
+        append_n(field,&character,1);
+    }
+}
+
+static void password_form_key(App *a, int key)
+{
+    Session *s = &a->session;
+    if (key == 17 || key == 27) {
+        s->rotating_passwords = false;
+        clear_password_form(s);
+        if (key == 17) quit(a);
+        return;
+    }
+    if (s->field == PASS_REMOVE && (key == KEY_LEFT || key == KEY_RIGHT || key == ' ')) {
+        s->remove_password = !s->remove_password;
+        if (s->remove_password) {
+            forget_secret(&s->password_fields[PASS_CONNECTION]);
+            forget_secret(&s->password_fields[PASS_CONNECTION_REPEAT]);
+        }
+        return;
+    }
+    if ((key == 13 || key == 10) && s->field == PASS_SAVE) {
+        const Text *fields = s->password_fields;
+        const char *error = s->elevated ? apply_passwords(a,str(&fields[PASS_ADMIN]),str(&fields[PASS_ADMIN_REPEAT]),
+            str(&fields[PASS_CONNECTION]),str(&fields[PASS_CONNECTION_REPEAT]),s->remove_password) : "Use /admin to elevate.";
+        clear(&s->error);
+        if (error) append(&s->error,error);
+        else {
+            s->rotating_passwords = false;
+            clear_password_form(s);
+        }
+        return;
+    }
+    if (key == 9 || key == KEY_DOWN || key == KEY_UP || key == KEY_BACKTAB || key == 13 || key == 10) {
+        const int count = PASS_SAVE+1, step = key == KEY_UP || key == KEY_BACKTAB ? count-1 : 1;
+        do { s->field = (s->field+step)%count; }
+        while (s->remove_password && (s->field == PASS_CONNECTION || s->field == PASS_CONNECTION_REPEAT));
+    } else if (s->field < PASS_REMOVE)
+        form_text_key(&s->password_fields[s->field],key,256);
 }
 
 static void login_key(App *a, int key)
 {
     Session *s = &a->session;
+    if (s->rotating_passwords) { password_form_key(a,key); return; }
     if (key == 17) { a->quit = true; return; }
     if (key == 27) {
         s->open = s->admin_prompt = false;
@@ -3288,14 +3383,7 @@ static void login_key(App *a, int key)
     }
     Text *field = s->admin_prompt || s->field == 3 ? &s->form_admin :
         s->field == 2 ? &s->form_password : s->field == 1 ? &s->form_host : nullptr;
-    if (!field) return;
-    if (key == 21) {
-        if (field == &s->form_host) clear(field); else forget_secret(field);
-    } else if ((key == 8 || key == 127) && field->len) field->data[--field->len] = 0;
-    else if (key > 32 && key < 127 && field->len < (field == &s->form_host ? 1024u : 256u)) {
-        char character = (char)key;
-        append_n(field,&character,1);
-    }
+    if (field) form_text_key(field,key,field == &s->form_host ? 1024 : 256);
 }
 
 static void remote_terminal_frame(App *a, const int *keys, int count)
@@ -3621,11 +3709,7 @@ static int hosted_sync(App *a, BrowserRoute route, const Text *input, Text *outp
             return 400;
         }
         cJSON_Delete(change);
-        a->scene = a->story = nullptr;
-        close_panel(a);
-        clear(&a->trace);
-        clear(&a->simulation_trace);
-        initial_selection(a);
+        rebind_workspace(a);
     } else if (route == BROWSER_SYNC) {
         if (a->ws.dirty || session_busy(a)) {
             cJSON_Delete(result);
@@ -3714,6 +3798,29 @@ static int browser_connect(App *a, const Text *input, Text *output)
 static int browser_response_with_admin(App *a, BrowserRoute route, const Text *input, Text *output)
 {
     if (route == BROWSER_CONNECT) return browser_connect(a,input,output);
+    if (route == BROWSER_PASSWORD_STATUS || route == BROWSER_PASSWORDS) {
+        const bool available = a->session.gateway && a->request_admin;
+        if (route == BROWSER_PASSWORD_STATUS) {
+            append(output,available ? "{\"available\":true}" : "{\"available\":false}");
+            return 200;
+        }
+        if (!available) {
+            append(output,"Use /admin to elevate on the local server.");
+            return 403;
+        }
+        Json *form = input->len <= 4096 && !memchr(str(input),0,input->len) ?
+            cJSON_ParseWithOpts(str(input),nullptr,true) : nullptr;
+        const char *const fields[] = {"admin","confirmAdmin","connection","confirmConnection"};
+        bool valid = cJSON_IsObject(form) && cJSON_GetArraySize(form) == 5 && cJSON_IsBool(at(form,"remove"));
+        for (size_t i = 0; i < sizeof fields / sizeof *fields; ++i)
+            valid = valid && cJSON_IsString(at(form,fields[i]));
+        const char *problem = valid ? apply_passwords(a,js(form,fields[0]),js(form,fields[1]),js(form,fields[2]),
+            js(form,fields[3]),cJSON_IsTrue(at(form,"remove"))) : "Send the new passwords and their confirmations.";
+        for (size_t i = 0; i < sizeof fields / sizeof *fields; ++i) forget_json_secret(form,fields[i]);
+        cJSON_Delete(form);
+        append(output,problem ? problem : "{\"saved\":true}");
+        return problem ? 400 : 200;
+    }
     if (route == BROWSER_PROVIDER) {
         if (!a->session.serving || !a->request_admin || !session_host(ui_endpoint(a))) {
             append(output,"Host admin access is required.");
@@ -4023,6 +4130,7 @@ static int run(int argc, char **argv)
     forget_secret(&a.session.local_password);
     forget_secret(&a.session.form_admin);
     forget_secret(&a.session.form_password);
+    clear_password_form(&a.session);
     release(&a.session.host);
     release(&a.session.revision);
     release(&a.session.refresh_base);

@@ -20,6 +20,7 @@ typedef enum { CREDENTIALS_MISSING, CREDENTIALS_READY, CREDENTIALS_INVALID } Cre
 CredentialStatus credentials_load(LocalCredentials *auth, const char *path);
 bool credentials_prepare(LocalCredentials *auth, const char *admin, const char *connection);
 bool credentials_save(const LocalCredentials *auth, const char *path);
+const char *credentials_rotate(LocalCredentials *auth, const char *path, const char *admin, const char *connection);
 bool password_verify(PasswordVerifier *verifier, const char *password);
 bool password_cached(const PasswordVerifier *verifier, const char *password);
 bool credential_token(Text *token);

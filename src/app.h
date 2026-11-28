@@ -113,9 +113,11 @@ typedef struct {
 } ModelMenu;
 
 typedef struct Browser Browser;
+enum { PASS_ADMIN, PASS_ADMIN_REPEAT, PASS_CONNECTION, PASS_CONNECTION_REPEAT, PASS_REMOVE, PASS_SAVE };
 typedef struct {
     Text host, password, revision, refresh_base, admin, validated_admin, local_admin, local_password, profiles, auth_path;
     Text form_host, form_password, form_admin, error;
+    Text password_fields[PASS_REMOVE];
     Gateway *gateway;
     Browser *browser;
     LocalCredentials auth;
@@ -123,6 +125,7 @@ typedef struct {
     uint64_t refresh_at, retry_at;
     bool open, elevated, server_processing, serving, linked, form_local, form_server;
     bool admin_prompt, admin_requested, admin_disabled, admin_off, remote_terminal, browser_setup, new_web_password;
+    bool rotating_passwords, remove_password;
     int field;
     int web_port;
 } Session;
@@ -168,7 +171,7 @@ const char *model_provider_label(const ModelMenu *menu);
 typedef enum { BROWSER_STATE, BROWSER_HISTORY, BROWSER_ACTION, BROWSER_IMPORT,
                BROWSER_LORE, BROWSER_PRESET, BROWSER_EXPORT, BROWSER_TRACE, BROWSER_CANDIDATE,
                BROWSER_CONNECT, BROWSER_ADMIN, BROWSER_SYNC, BROWSER_SYNC_WRITE, BROWSER_TERMINAL,
-               BROWSER_REVISION, BROWSER_PROVIDER } BrowserRoute;
+               BROWSER_REVISION, BROWSER_PROVIDER, BROWSER_PASSWORD_STATUS, BROWSER_PASSWORDS } BrowserRoute;
 Browser *browser_open(int port);
 Browser *browser_open_local(int *port);
 void browser_use_password(Browser *web, PasswordVerifier *password);

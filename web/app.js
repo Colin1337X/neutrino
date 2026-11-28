@@ -7,6 +7,7 @@ const prompt = byId("prompt");
 const login = byId("login");
 const connection = byId("connection");
 const elevation = byId("elevation");
+const passwords = byId("passwords");
 const commandDialog = byId("commands");
 const modelDialog = byId("model-menu");
 const content = byId("content");
@@ -16,7 +17,7 @@ let editorId = null, libraryKey = "", messageKey = "", panelKey = "", toolMode;
 let earlier = null, uploadKind, mutation = Promise.resolve(), streamText = "";
 let modelRequested = false, modelSeeded = false, modelEditing = "";
 let catalogRequest = null, catalogOptions = "";
-let connecting = false;
+let connecting = false, changingPasswords = false;
 
 function element(tag, text, className) {
     const node = document.createElement(tag);
@@ -34,6 +35,7 @@ function button(label, handle) {
 
 async function request(route, body, credential = admin) {
     const headers = {"X-Neutrino-Web": "1"};
+    const requestToken = token;
     if (token) headers.Authorization = "Bearer " + token;
     if (credential) headers["X-Neutrino-Admin"] = credential;
     const options = {headers, cache: "no-store"};
@@ -46,7 +48,7 @@ async function request(route, body, credential = admin) {
         }
     }
     const response = await fetch("/api/" + route, options);
-    if (response.status === 401) {
+    if (response.status === 401 && requestToken === token && !changingPasswords) {
         token = "";
         admin = "";
         if (!login.open) login.showModal();
@@ -74,7 +76,7 @@ async function refresh() {
 }
 
 async function poll() {
-    if (!mutating && !login.open && !connecting) await refresh();
+    if (!mutating && !login.open && !connecting && !changingPasswords) await refresh();
     setTimeout(poll, state?.busy || state?.researching ? 220 : 1100);
 }
 
@@ -106,11 +108,7 @@ function submit(text) {
         if (!connection.open) connection.showModal();
         return Promise.resolve(true);
     }
-    if (command === "/admin") {
-        byId("elevation-error").textContent = "";
-        elevation.showModal();
-        return Promise.resolve(true);
-    }
+    if (command === "/admin") return openAdmin();
     if (command === "/admin off") {
         admin = "";
         feedback = "Admin mode ended.";
@@ -661,6 +659,70 @@ byId("elevation-form").addEventListener("submit",async event => {
         byId("elevation-error").textContent = error.message;
         byId("elevation-password").value = "";
     }
+});
+async function openAdmin() {
+    if (admin) {
+        try {
+            const result = await (await request("admin/passwords")).json();
+            if (result.available) {
+                byId("passwords-error").textContent = "";
+                if (!passwords.open) passwords.showModal();
+                return true;
+            }
+        } catch (error) { alertText(error); return false; }
+    }
+    byId("elevation-error").textContent = "";
+    if (!elevation.open) elevation.showModal();
+    return true;
+}
+function connectionPasswordFields() {
+    const remove = byId("remove-connection").checked;
+    byId("passwords-connection-fields").hidden = remove;
+    for (const id of ["new-connection","confirm-connection"]) {
+        const field = byId(id);
+        field.disabled = remove;
+        if (remove) field.value = "";
+    }
+}
+byId("remove-connection").addEventListener("change",connectionPasswordFields);
+byId("passwords-cancel").addEventListener("click",() => passwords.close());
+passwords.addEventListener("cancel",event => { if (changingPasswords) event.preventDefault(); });
+passwords.addEventListener("close",() => {
+    byId("passwords-form").reset();
+    connectionPasswordFields();
+});
+byId("passwords-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    if (changingPasswords) return;
+    const fields = {
+        admin: byId("new-admin").value,
+        confirmAdmin: byId("confirm-admin").value,
+        connection: byId("new-connection").value,
+        confirmConnection: byId("confirm-connection").value,
+        remove: byId("remove-connection").checked
+    };
+    const error = byId("passwords-error");
+    error.textContent = "";
+    if (fields.admin !== fields.confirmAdmin || fields.connection !== fields.confirmConnection) {
+        error.textContent = "Enter matching confirmation passwords.";
+        return;
+    }
+    ++revision;
+    changingPasswords = true;
+    byId("passwords-save").disabled = byId("passwords-cancel").disabled = true;
+    try {
+        await request("admin/passwords",fields);
+        if (fields.admin) admin = fields.admin;
+        if (fields.connection || fields.remove) token = fields.connection;
+        feedback = "Local server passwords saved.";
+        passwords.close();
+    } catch (failure) {
+        error.textContent = failure.message;
+    } finally {
+        changingPasswords = false;
+        byId("passwords-save").disabled = byId("passwords-cancel").disabled = false;
+    }
+    if (!passwords.open) await refresh();
 });
 connectionFields();
 

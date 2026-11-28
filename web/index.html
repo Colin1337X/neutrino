@@ -168,6 +168,28 @@
       </div>
     </form>
   </dialog>
+  <dialog id="passwords" aria-labelledby="passwords-title">
+    <form id="passwords-form">
+      <h2 id="passwords-title">Change local passwords</h2>
+      <p>Leave a password blank to keep it.</p>
+      <label for="new-admin">New admin password</label>
+      <input id="new-admin" type="password" minlength="16" maxlength="256" autocomplete="new-password">
+      <label for="confirm-admin">Repeat admin password</label>
+      <input id="confirm-admin" type="password" minlength="16" maxlength="256" autocomplete="new-password">
+      <div id="passwords-connection-fields" class="connection-fields">
+        <label for="new-connection">New connection password</label>
+        <input id="new-connection" type="password" minlength="16" maxlength="256" autocomplete="new-password">
+        <label for="confirm-connection">Repeat connection password</label>
+        <input id="confirm-connection" type="password" minlength="16" maxlength="256" autocomplete="new-password">
+      </div>
+      <label><input id="remove-connection" type="checkbox"> Remove the connection password</label>
+      <p id="passwords-error" role="status"></p>
+      <div class="panel-actions">
+        <button id="passwords-cancel" type="button">Cancel</button>
+        <button id="passwords-save" class="primary" type="submit">Save passwords</button>
+      </div>
+    </form>
+  </dialog>
   <input id="upload" type="file" hidden>
 </body>
 </html>

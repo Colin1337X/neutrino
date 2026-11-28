@@ -48,6 +48,8 @@ After restarting with the same workspace, choose **B. Start saved local server**
 
 Use `/admin` to enter the admin password in a masked prompt, or `/admin off` to leave admin mode. In a hosted session, this grants access to the host's provider settings. It is scoped to the terminal session or browser tab.
 
+On a running local server, open `/admin` again after elevating to change its passwords. Enter and confirm either new password, or select **Remove the connection password**. Blank fields keep the corresponding password. Saving replaces the stored verifiers and invalidates changed credentials immediately. Other clients or browser tabs need to reconnect or elevate again using the new password.
+
 To host a persistent workspace, start the gateway as described below and run `neutrino --web --host --workspace FILE --server URL`. Set `NEUTRINO_WEB_TOKEN` on the workspace host to its connection password and `NEUTRINO_PROVIDER_ADMIN_TOKEN` on the gateway to its separate admin password. Use the workspace host URL in the menu. Remote connections use HTTPS. Loopback connections can use HTTP.
 
 ### GitHub release builds

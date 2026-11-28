@@ -4,6 +4,7 @@
 #include <string.h>
 #ifndef _WIN32
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 static uint64_t clock_ms;
@@ -16,7 +17,14 @@ uint64_t monotonic_ms(void) { return clock_ms; }
 int main(int argc, char **argv)
 {
     CHECK(argc == 2);
+#ifdef _WIN32
     const char *path = argv[1];
+#else
+    (void)argv;
+    char directory[] = "/tmp/neutrino-credentials.XXXXXX", path[sizeof directory+20];
+    CHECK(mkdtemp(directory));
+    CHECK(snprintf(path,sizeof path,"%s/credentials.json",directory) > 0);
+#endif
     const char admin[] = "test-admin-password-1", connection[] = "test-connection-password-2";
     LocalCredentials created, loaded = {0}, other;
     remove(path);
@@ -43,6 +51,21 @@ int main(int argc, char **argv)
     CHECK(!password_verify(&loaded.connection,connection));
     clock_ms = loaded.connection.retry_at;
     CHECK(password_verify(&loaded.connection,connection));
+    const char updated_admin[] = "different-test-admin-password";
+    const char updated_connection[] = "different-connection-password";
+    CHECK(credentials_rotate(&loaded,path,connection,updated_connection));
+    CHECK(credentials_rotate(&loaded,"",updated_admin,updated_connection));
+    CHECK(password_cached(&loaded.admin,admin) && password_cached(&loaded.connection,connection));
+    CHECK(!credentials_rotate(&loaded,path,updated_admin,nullptr));
+    CHECK(password_cached(&loaded.connection,connection));
+    CHECK(!credentials_rotate(&loaded,path,nullptr,updated_connection));
+    CHECK(!password_cached(&loaded.admin,admin) && !password_cached(&loaded.connection,connection));
+    CHECK(credentials_load(&loaded,path) == CREDENTIALS_READY);
+    CHECK(!password_verify(&loaded.admin,admin) && !password_verify(&loaded.connection,connection));
+    CHECK(password_verify(&loaded.admin,updated_admin) && password_verify(&loaded.connection,updated_connection));
+    CHECK(!credentials_rotate(&loaded,path,nullptr,""));
+    CHECK(credentials_load(&loaded,path) == CREDENTIALS_READY);
+    CHECK(!loaded.connection.enabled && password_verify(&loaded.admin,updated_admin));
     CHECK(remove(path) == 0);
     CHECK(credentials_save(&other,path));
     CHECK(credentials_load(&loaded,path) == CREDENTIALS_READY);
@@ -50,5 +73,8 @@ int main(int argc, char **argv)
     CHECK(write_file(path,"{\"version\":1}",true));
     CHECK(credentials_load(&loaded,path) == CREDENTIALS_INVALID);
     CHECK(remove(path) == 0);
+#ifndef _WIN32
+    CHECK(rmdir(directory) == 0);
+#endif
     return 0;
 }

@@ -782,7 +782,6 @@ static const char *start_model_catalog(Client *c, const Gateway *gateway, const 
     if (active >= 2) return "The gateway already has model lookups running.";
     c->job = inference_models(provider.endpoint,provider.key);
     if (!c->job) return "Could not start the provider connection test.";
-    c->route.key = provider.key;
     c->model_catalog = true;
     return nullptr;
 }
@@ -801,7 +800,7 @@ static void finish_model_catalog(Client *c)
             const unsigned char *p = (const unsigned char *)id;
             while (*p > 32 && *p != 127) ++p;
             if (!*id || *p || strlen(id)>160 ||
-                (*c->route.key && strstr(id,c->route.key))) continue;
+                inference_contains_key(c->job,id)) continue;
             const Json *prior;
             cJSON_ArrayForEach(prior,models)
                 if (!strcmp(cJSON_GetStringValue(prior),id)) break;

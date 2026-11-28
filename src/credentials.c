@@ -140,7 +140,7 @@ static void store_verifier(Json *root, const char *name, const PasswordVerifier 
     set(root,name,encoded);
 }
 
-bool credentials_save(const LocalCredentials *auth, const char *path)
+static bool write_credentials(const LocalCredentials *auth, const char *path, bool replace)
 {
     Json *root = cJSON_CreateObject();
     integer(root,"version",1);
@@ -148,9 +148,47 @@ bool credentials_save(const LocalCredentials *auth, const char *path)
     store_verifier(root,"connection",&auth->connection);
     char *data = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
-    const bool ok = data && write_file(path,data,false);
+    const bool ok = data && write_file(path,data,replace);
     cJSON_free(data);
     return ok;
+}
+
+bool credentials_save(const LocalCredentials *auth, const char *path)
+{
+    return write_credentials(auth,path,false);
+}
+
+static bool password_matches(const PasswordVerifier *verifier, const char *password)
+{
+    if (!verifier->enabled || !*password) return false;
+    if (password_cached(verifier,password)) return true;
+    unsigned char hash[PASSWORD_HASH];
+    const bool equal = derive(password,verifier->salt,PASSWORD_ROUNDS,hash) &&
+                       matching_hash(hash,verifier->hash);
+    wipe(hash,sizeof hash);
+    return equal;
+}
+
+const char *credentials_rotate(LocalCredentials *auth, const char *path, const char *admin, const char *connection)
+{
+    if (!auth->saved || (!admin && !connection)) return "Enter a new password or remove the connection password.";
+    if ((admin && !*admin) || (admin && connection && !strcmp(admin,connection)))
+        return "The admin and connection passwords must differ.";
+    if ((admin && (password_matches(&auth->admin,admin) || password_matches(&auth->connection,admin))) ||
+        (connection && (password_matches(&auth->admin,connection) || password_matches(&auth->connection,connection))))
+        return "Choose new passwords that differ from both current passwords.";
+    LocalCredentials next = *auth;
+    const char *error = nullptr;
+    if (admin) next.admin = (PasswordVerifier){0};
+    if (connection) next.connection = (PasswordVerifier){0};
+    if ((admin && !create_verifier(&next.admin,admin)) ||
+        (connection && !create_verifier(&next.connection,connection)))
+        error = "Could not prepare secure password verifiers.";
+    else if (!write_credentials(&next,path,true))
+        error = "Could not save the new passwords. Your existing passwords still apply.";
+    else *auth = next;
+    wipe(&next,sizeof next);
+    return error;
 }
 
 bool password_cached(const PasswordVerifier *verifier, const char *password)

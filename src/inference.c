@@ -561,6 +561,10 @@ Inference *inference_models(const char *endpoint, const char *key)
 {
     return request_json(endpoint,key,"/models",nullptr);
 }
+bool inference_contains_key(const Inference *job, const char *text)
+{
+    return job->key && *job->key && strstr(text,job->key);
+}
 InferenceMetrics inference_metrics(Inference *j)
 {
     lock(j);

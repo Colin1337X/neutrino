@@ -900,6 +900,43 @@ static void session_popup(App *a, int *cx, int *cy)
         width >= 56 ? "A/B or arrows choose   Tab move   Enter   Esc continue" : "A/B   Tab   Enter   Esc");
 }
 
+static void password_popup(App *a, int *cx, int *cy)
+{
+    const Session *s = &a->session;
+    const int width = minimum(74,a->cols-4), height = 10;
+    const int x = (a->cols-width)/2, y = (a->rows-height)/2;
+    const int label_width = width >= 62 ? 25 : 14;
+    const int field_width = width-label_width-4;
+    const char *const labels[] = {"New admin password","Repeat admin password","New connection password",
+                                  "Repeat connection","Remove connection password",""};
+    const char *const compact[] = {"New admin","Repeat admin","New connection","Repeat connect","Remove password",""};
+    card(a,x,y,width,height,RAIL MINT NORMAL);
+    cell(a,x+2,y,width-4,RAIL MINT BOLD," Change local passwords ");
+    *cx = *cy = -1;
+    int row = y+1;
+    for (int i = 0; i <= PASS_SAVE; ++i) {
+        if (s->remove_password && (i == PASS_CONNECTION || i == PASS_CONNECTION_REPEAT)) continue;
+        const bool selected = s->field == i;
+        const char *style = selected ? PICK TXT BOLD : RAIL TXT NORMAL;
+        if (selected) paint(a,x+1,row,width-2,PICK);
+        clipped_cell(a,x+2,row,label_width,style,(width >= 62 ? labels : compact)[i]);
+        if (i < PASS_REMOVE) {
+            const int length = minimum((int)s->password_fields[i].len,field_width-1);
+            char masked[257];
+            memset(masked,'*',(size_t)length);
+            masked[length] = 0;
+            clipped_cell(a,x+2+label_width,row,field_width,style,masked);
+            if (selected) { *cx = x+2+label_width+length; *cy = row; }
+        } else clipped_cell(a,x+2+label_width,row,field_width,style,
+            i == PASS_REMOVE ? s->remove_password ? "Yes" : "No" : "Save passwords");
+        ++row;
+    }
+    clipped_cell(a,x+2,y+height-3,width-4,RAIL GOLD NORMAL,
+        s->error.len ? str(&s->error) : "Leave a password blank to keep it.");
+    clipped_cell(a,x+2,y+height-2,width-4,RAIL DIM NORMAL,
+        width >= 54 ? "Tab move   ←→ toggle removal   Enter   Esc cancel" : "Tab   ←→   Enter   Esc");
+}
+
 static void frame(App *a)
 {
     clear(&a->screen);
@@ -948,7 +985,8 @@ static void frame(App *a)
     clipped_cell(a, l.left + 2, a->rows - 1, l.width - reserve - 3,
                  preview_busy(&a->preview) || a->research_job ? RAIL GOLD NORMAL : RAIL DIM NORMAL, state);
     right(a, l.left + l.width - 2, a->rows - 1, reserve, RAIL QUIET NORMAL, keys);
-    if (a->session.open || a->session.admin_prompt) session_popup(a,&cx,&cy);
+    if (a->session.rotating_passwords) password_popup(a,&cx,&cy);
+    else if (a->session.open || a->session.admin_prompt) session_popup(a,&cx,&cy);
     else if (a->model_menu.open) model_popup(a,&cx,&cy);
     else palette(a, &l);
     styled(a, ROOT TXT NORMAL);

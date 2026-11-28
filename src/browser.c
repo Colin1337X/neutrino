@@ -14,6 +14,7 @@ typedef struct {
     Text request, response;
     size_t offset, length, sent;
     size_t admin_offset;
+    uint64_t password_epoch;
     BrowserRoute route;
     bool ready;
 } BrowserClient;
@@ -23,6 +24,7 @@ struct Browser {
     int port;
     Text token;
     PasswordVerifier *password;
+    uint64_t password_epoch;
     const char *host;
     BrowserClient clients[WEB_CLIENTS];
 };
@@ -113,8 +115,9 @@ static void parse_headers(const Browser *web, BrowserClient *client)
     *version = 0;
     const char *host = NULL, *auth = NULL, *marker = NULL, *length = NULL, *admin = NULL;
     for (line += 2; line <= end && line[0] != '\r';) {
-        char *next = strstr(line, "\r\n"), *colon = strchr(line, ':');
-        if (!next || !colon || colon >= next) { web_error(client, 400, "Invalid header field."); return; }
+        char *next = strstr(line, "\r\n");
+        char *colon = next ? memchr(line,':',(size_t)(next-line)) : nullptr;
+        if (!colon) { web_error(client, 400, "Invalid header field."); return; }
         *next = *colon = 0;
         char *value = colon + 1;
         while (*value == ' ' || *value == '\t') ++value;
@@ -160,7 +163,9 @@ static void parse_headers(const Browser *web, BrowserClient *client)
         {"/api/connect", true, BROWSER_CONNECT}, {"/api/admin", true, BROWSER_ADMIN},
         {"/api/sync", false, BROWSER_SYNC}, {"/api/sync", true, BROWSER_SYNC_WRITE},
         {"/api/terminal", true, BROWSER_TERMINAL}, {"/api/sync/revision", false, BROWSER_REVISION},
-        {"/api/provider", true, BROWSER_PROVIDER}
+        {"/api/provider", true, BROWSER_PROVIDER},
+        {"/api/admin/passwords", false, BROWSER_PASSWORD_STATUS},
+        {"/api/admin/passwords", true, BROWSER_PASSWORDS}
     };
     for (size_t i = 0; i < sizeof routes / sizeof *routes; ++i) {
         if (routes[i].post != post || strcmp(path, routes[i].path)) continue;
@@ -168,6 +173,7 @@ static void parse_headers(const Browser *web, BrowserClient *client)
         if (!authorized(web, auth)) { web_error(client, 401, "Enter the host password."); return; }
         if (admin && !session_secret(admin,false)) { web_error(client,400,"Invalid admin password."); return; }
         client->admin_offset = admin ? (size_t)(admin-headers) : 0;
+        client->password_epoch = web->password_epoch;
         client->route = routes[i].route;
         client->offset = offset;
         client->length = size;
@@ -177,10 +183,14 @@ static void parse_headers(const Browser *web, BrowserClient *client)
     web_error(client, 404, "Page not found.");
 }
 
-static void handle_request(BrowserClient *client, App *app)
+static void handle_request(const Browser *web, BrowserClient *client, App *app)
 {
     if (client->request.len != client->offset + client->length) {
         web_error(client, 400, "Request length does not match its header.");
+        return;
+    }
+    if (client->password_epoch != web->password_epoch) {
+        web_error(client,401,"Reconnect with the current host password.");
         return;
     }
     Text input = {.data = client->request.data + client->offset, .len = client->length};
@@ -211,7 +221,7 @@ static void pump(const Browser *web, BrowserClient *client, App *app)
         append_n(&client->request, buffer, (size_t)bytes);
         if (!client->offset) parse_headers(web, client);
         if (!client->ready && client->offset && client->request.len >= client->offset + client->length)
-            handle_request(client, app);
+            handle_request(web, client, app);
     }
     if (client->ready) {
         size_t left = client->response.len - client->sent;
@@ -280,6 +290,7 @@ Browser *browser_open_local(int *port)
 
 void browser_use_password(Browser *web, PasswordVerifier *password)
 {
+    ++web->password_epoch;
     web->password = password;
 }
 

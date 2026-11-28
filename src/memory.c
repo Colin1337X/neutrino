@@ -708,6 +708,7 @@ void memory_close(App *app)
     release(&lane->output);
     release(&lane->reasoning);
     release(&lane->error);
+    *lane = (MemoryLane){0};
 }
 
 static void invalidate(App *a)
