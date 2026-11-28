@@ -22,6 +22,7 @@ struct Browser {
     Socket listener;
     int port;
     Text token;
+    PasswordVerifier *password;
     const char *host;
     BrowserClient clients[WEB_CLIENTS];
 };
@@ -79,6 +80,8 @@ static bool host_allowed(const Browser *web, const char *host)
 
 static bool authorized(const Browser *web, const char *value)
 {
+    if (web->password && web->password->enabled)
+        return value && !strncmp(value,"Bearer ",7) && password_verify(web->password,value+7);
     const char *token = str(&web->token);
     size_t length = web->token.len;
     if (!length) return true;
@@ -270,16 +273,14 @@ Browser *browser_open(int port)
     return web;
 }
 
-Browser *browser_open_local(int *port, const char *password)
+Browser *browser_open_local(int *port)
 {
-    return open_browser(port,"127.0.0.1","",password);
+    return open_browser(port,"127.0.0.1","","");
 }
 
-bool browser_set_local_password(Browser *web, const char *password)
+void browser_use_password(Browser *web, PasswordVerifier *password)
 {
-    if (web->token.len || !*password) return false;
-    append(&web->token,password);
-    return true;
+    web->password = password;
 }
 
 void browser_poll(Browser *web, App *app)

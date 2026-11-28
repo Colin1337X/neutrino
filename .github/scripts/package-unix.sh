@@ -9,12 +9,12 @@ args=(-G Ninja -DCMAKE_BUILD_TYPE=Release -DCURL_NO_CURL_CMAKE=ON)
 
 if [[ "$RUNNER_OS" == Linux ]]; then
     sudo apt-get update -qq
-    sudo apt-get install -y --no-install-recommends clang-20 libcurl4-openssl-dev
+    sudo apt-get install -y --no-install-recommends clang-20 libcurl4-openssl-dev libssl-dev
     export CC=clang-20
     multiarch="$(gcc -print-multiarch)"
     args+=("-DCURL_INCLUDE_DIR=/usr/include/$multiarch"
            "-DCURL_LIBRARY=/usr/lib/$multiarch/libcurl.so")
-    runtime='Built on Ubuntu 24.04. Requires glibc and libcurl.so.4.'
+    runtime='Built on Ubuntu 24.04. Requires glibc, libcurl.so.4 and libcrypto.so.3.'
 else
     CC="$(xcrun --find clang)"
     if ! printf '%s\n' 'int main(void) { void *p = nullptr; return p != nullptr; }' |

@@ -852,22 +852,23 @@ static void session_popup(App *a, int *cx, int *cy)
 {
     const Session *s = &a->session;
     const bool admin = s->admin_prompt;
+    const bool saved = s->form_local && s->auth.saved;
     const int width = minimum(76,a->cols-4), height = admin ? 7 : 10;
     const int x = (a->cols-width)/2, y = (a->rows-height)/2;
     const int label_width = width >= 60 ? 17 : 12, field_width = width-label_width-5;
     card(a,x,y,width,height,RAIL MINT NORMAL);
     cell(a,x+2,y,width-4,RAIL MINT BOLD,admin ? " Admin access " : " Connect to Neutrino ");
     const char *const values[] = {
-        s->form_local ? "B. Set up a local server" : "A. Connect to a host",
+        saved ? "B. Start saved local server" : s->form_local ? "B. Set up a local server" : "A. Connect to a host",
         str(&s->form_host), "", "",
         s->form_server ? "Run processing on the host" : "Run processing on this client",
-        s->form_local ? "Start local server" : "Connect"
+        saved ? "Start saved server" : s->form_local ? "Start local server" : "Connect"
     };
     const char *const labels[] = {"Connection","Host URL","Password","Admin password","Processing",""};
     int row = y+2;
     *cx = *cy = -1;
     for (int i = admin ? 3 : 0; i < (admin ? 4 : 6); ++i) {
-        if (!admin && (s->form_local ? i == 1 || i == 4 : i == 3)) continue;
+        if (!admin && (saved ? i > 0 && i < 5 : s->form_local ? i == 1 || i == 4 : i == 3)) continue;
         bool selected = admin || s->field == i;
         const char *style = selected ? PICK TXT BOLD : RAIL TXT NORMAL;
         if (selected) paint(a,x+1,row,width-2,PICK);
@@ -892,6 +893,7 @@ static void session_popup(App *a, int *cx, int *cy)
     }
     clipped_cell(a,x+2,y+height-3,width-4,RAIL GOLD NORMAL,
         s->error.len ? str(&s->error) : admin ? "Password is only used for this session." :
+        saved ? "Saved passwords apply. Use /admin after starting." :
         s->form_local ? "Set your admin password here. Open /model after setup." :
                         "Workspaces sync to the host. Use /admin to elevate.");
     clipped_cell(a,x+2,y+height-2,width-4,RAIL DIM NORMAL,admin ? "Enter verify   Esc cancel" :

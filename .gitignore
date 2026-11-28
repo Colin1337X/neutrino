@@ -4,3 +4,4 @@
 *.obj
 *.exe
 .neutrino-providers.json*
+*.local-auth.json*

@@ -1,6 +1,7 @@
 #ifndef NEUTRINO_APP_H
 #define NEUTRINO_APP_H
 #include "neutrino.h"
+#include "credentials.h"
 
 typedef enum { CONTINUE, REWRITE, EXPAND, DESCRIBE, DRAFT, BRAINSTORM,
                CRITIQUE, CONTINUITY, EXTRACT, NARRATE, SWIPE, OP_COUNT } Operation;
@@ -113,10 +114,11 @@ typedef struct {
 
 typedef struct Browser Browser;
 typedef struct {
-    Text host, password, revision, refresh_base, admin, validated_admin, local_admin, local_password, profiles;
+    Text host, password, revision, refresh_base, admin, validated_admin, local_admin, local_password, profiles, auth_path;
     Text form_host, form_password, form_admin, error;
     Gateway *gateway;
     Browser *browser;
+    LocalCredentials auth;
     Inference *refresh;
     uint64_t refresh_at, retry_at;
     bool open, elevated, server_processing, serving, linked, form_local, form_server;
@@ -168,8 +170,8 @@ typedef enum { BROWSER_STATE, BROWSER_HISTORY, BROWSER_ACTION, BROWSER_IMPORT,
                BROWSER_CONNECT, BROWSER_ADMIN, BROWSER_SYNC, BROWSER_SYNC_WRITE, BROWSER_TERMINAL,
                BROWSER_REVISION, BROWSER_PROVIDER } BrowserRoute;
 Browser *browser_open(int port);
-Browser *browser_open_local(int *port, const char *password);
-bool browser_set_local_password(Browser *web, const char *password);
+Browser *browser_open_local(int *port);
+void browser_use_password(Browser *web, PasswordVerifier *password);
 void browser_poll(Browser *web, App *app);
 void browser_close(Browser *web);
 int app_browser_response(App *app, BrowserRoute route, const Text *input, const char *admin, Text *output);

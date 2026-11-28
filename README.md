@@ -6,7 +6,7 @@ A native C workspace for writing fiction and playing it out in a terminal or bro
 
 For a ready-to-run build, download the Windows x64 ZIP or the Linux or macOS archive for your architecture and extract it. Run `neutrino.exe --demo` on Windows or `./neutrino --demo` on Linux and macOS from the extracted directory. [GitHub releases](https://github.com/Colin1337X/neutrino/releases)
 
-Use a UTF-8, VT-capable terminal. Build with CMake 3.25 or later and a compiler that reports final C23 support, such as GCC 15.2 or the Clang driver in Zig 0.15.2. Release and RelWithDebInfo use `-O3`. All builds need HTTPS-capable libcurl development files. Windows uses WinHTTP for model inference. Linux and macOS use POSIX threads. cJSON is bundled under its own [license](third_party/cjson/LICENSE).
+Use a UTF-8, VT-capable terminal. Build with CMake 3.25 or later and a compiler that reports final C23 support, such as GCC 15.2 or the Clang driver in Zig 0.15.2. Release and RelWithDebInfo use `-O3`. All builds need HTTPS-capable libcurl development files. Linux also needs the OpenSSL development package for libcrypto. Windows uses WinHTTP for model inference. Linux and macOS use POSIX threads. cJSON is bundled under its own [license](third_party/cjson/LICENSE).
 
 ```powershell
 # Windows, with Zig 0.15.2 and Ninja on PATH and the x64 curl development archive extracted
@@ -42,7 +42,9 @@ The connection menu opens when you run `neutrino` or `neutrino --web` without ot
 
 - **A. Connect to a host.** Enter the workspace host URL and its password if required. **Run on this client** is the default. Your Neutrino process runs the workspace, narrator orchestration, and simulation, and uses its configured inference gateway. The host saves workspace changes and clients refresh when idle. Use `/sync` to refresh on demand. If the host has changed while you were editing, Neutrino keeps your changes in memory and reports a conflict. Export a backup before closing.
 - **Run on the host** sends workspace actions to the host's Neutrino process. The host uses its gateway and runs the tools. You can also open the host URL directly in a browser for host processing.
-- **B. Set up a local server.** Create an admin password of at least 16 characters. The optional connection password must also have at least 16 characters and differ from the admin password. Neutrino starts a loopback workspace listener and inference gateway for this session. In the TUI, the connection address appears after setup. Open `/model` to configure the provider. Saved provider profiles use the workspace path with `.providers.json` appended, unless `NEUTRINO_PROVIDERS_FILE` is set. Enter the local server passwords again when you start a new session.
+- **B. Set up a local server.** Create an admin password of at least 16 characters. The optional connection password must also have at least 16 characters and differ from the admin password. Neutrino starts a loopback workspace listener and inference gateway. In the TUI, the connection address appears after setup. Open `/model` to configure the provider. Saved provider profiles use the workspace path with `.providers.json` appended, unless `NEUTRINO_PROVIDERS_FILE` is set.
+
+After restarting with the same workspace, choose **B. Start saved local server**. The existing connection password still protects browser and hosted-client access. Use the existing admin password with `/admin` when you need to elevate. Neutrino stores salted PBKDF2-HMAC-SHA256 password verifiers with 600,000 iterations in `<workspace>.local-auth.json`. Keep the workspace directory private. The embedded inference gateway uses separate random tokens generated at each start.
 
 Use `/admin` to enter the admin password in a masked prompt, or `/admin off` to leave admin mode. In a hosted session, this grants access to the host's provider settings. It is scoped to the terminal session or browser tab.
 
@@ -52,7 +54,7 @@ To host a persistent workspace, start the gateway as described below and run `ne
 
 Push a new `vMAJOR.MINOR.PATCH` or `build-NNN` tag from a commit that contains the release workflow. The workflow runs CTest and a demo smoke check on Windows x64, Linux x64 and ARM64, and macOS Intel and Apple Silicon. After every build passes, GitHub publishes the five archives and `SHA256SUMS.txt` on the tagged release. A tag such as `v0.16.0-rc.1` publishes as a prerelease.
 
-For a build without publishing, run the **Release packages** workflow manually from the Actions tab and download its `release-packages-and-checksums` artifact. The Windows ZIP bundles libcurl. The Linux archives use system libcurl on a glibc distribution, and the macOS archives target macOS 15 or later.
+For a build without publishing, run the **Release packages** workflow manually from the Actions tab and download its `release-packages-and-checksums` artifact. The Windows ZIP bundles libcurl. The Linux archives use system libcurl and, starting with `v0.20.4`, libcrypto on a glibc distribution. The macOS archives target macOS 15 or later.
 
 ### Run the packaged benchmarks
 

@@ -425,7 +425,10 @@ function quickTools(roleplay) {
 }
 
 function render(next) {
-    if (next.loginSetup && !connection.open && !login.open && !connecting) connection.showModal();
+    if (next.loginSetup && !connection.open && !login.open && !connecting) {
+        connectionFields(next.localServerSaved);
+        connection.showModal();
+    }
     const switched = !state || state.id !== next.id || state.roleplay !== next.roleplay;
     const showPanel = next.panel && (!state?.panel || state.panel.title !== next.panel.title);
     state = next;
@@ -589,15 +592,19 @@ window.addEventListener("beforeunload", event => {
     if (drafts.size) event.preventDefault();
 });
 
-function connectionFields() {
+function connectionFields(saved = state?.localServerSaved === true) {
     const local = byId("connection-kind").value === "local";
+    saved = saved === true;
+    byId("connection-kind").options[1].textContent = saved ? "B. Start saved local server" : "B. Set up a local server";
     byId("connection-host-fields").hidden = local;
-    byId("connection-local-fields").hidden = !local;
+    byId("connection-local-fields").hidden = !local || saved;
+    byId("connection-password").disabled = byId("connection-password").hidden = local && saved;
+    byId("connection-password-label").hidden = local && saved;
     byId("connection-host").disabled = local;
     byId("connection-host").required = !local;
-    byId("connection-admin").disabled = !local;
-    byId("connection-admin").required = local;
-    byId("connection-submit").textContent = local ? "Start local server" : "Connect";
+    byId("connection-admin").disabled = !local || saved;
+    byId("connection-admin").required = local && !saved;
+    byId("connection-submit").textContent = !local ? "Connect" : saved ? "Start saved server" : "Start local server";
 }
 async function closeConnection(fields) {
     ++revision;
@@ -606,7 +613,7 @@ async function closeConnection(fields) {
     byId("connection-submit").disabled = byId("connection-skip").disabled = true;
     try {
         const result = await (await request("connect",fields,"")).json();
-        admin = result.localServer ? fields.admin : "";
+        admin = result.elevatedAtSetup ? fields.admin : "";
         if (result.newWebPassword) token = fields.password;
         connection.close();
         libraryKey = messageKey = panelKey = "";
@@ -619,15 +626,15 @@ async function closeConnection(fields) {
         byId("connection-password").value = byId("connection-admin").value = "";
     }
 }
-byId("connection-kind").addEventListener("change",connectionFields);
+byId("connection-kind").addEventListener("change",() => connectionFields());
 byId("connection-form").addEventListener("submit",event => {
     event.preventDefault();
     const kind = byId("connection-kind").value;
     closeConnection({
         kind, host: byId("connection-host").value.trim(),
         server: byId("connection-processing").value === "server",
-        password: byId("connection-password").value,
-        admin: kind === "local" ? byId("connection-admin").value : ""
+        password: byId("connection-password").disabled ? "" : byId("connection-password").value,
+        admin: byId("connection-admin").disabled ? "" : byId("connection-admin").value
     });
 });
 byId("connection-skip").addEventListener("click",() => closeConnection({kind:"skip"}));

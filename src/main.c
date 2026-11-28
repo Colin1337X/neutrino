@@ -153,8 +153,9 @@ static const char *server_token(const App *a)
 
 static const char *admin_token(const App *a)
 {
-    if (a->request_admin) return a->request_admin;
-    if (!a->browser && a->session.elevated) return str(&a->session.admin);
+    if (a->request_admin) return a->session.gateway ? str(&a->session.local_admin) : a->request_admin;
+    if (!a->browser && a->session.elevated)
+        return a->session.gateway ? str(&a->session.local_admin) : str(&a->session.admin);
     if (a->session.serving || a->session.gateway || a->session.linked || a->session.admin_disabled) return "";
     return env("NEUTRINO_PROVIDER_ADMIN_TOKEN","");
 }
@@ -3077,6 +3078,69 @@ static void sync_workspace(App *a)
     release(&error);
 }
 
+static bool start_local_session(App *a, const char *password, const char *admin, Text *error)
+{
+    Session *s = &a->session;
+    const bool setup = !s->auth.saved;
+    if (setup) {
+        if (!session_secret(admin,false) || strlen(admin)<16 || !strcmp(admin,password) ||
+            (*password && strlen(password)<16)) {
+            append(error,"Use a separate admin password of 16–256 characters. An optional local server password also needs 16.");
+            return false;
+        }
+        if (!credentials_prepare(&s->auth,admin,password)) {
+            append(error,"Could not prepare secure password verifiers.");
+            return false;
+        }
+    } else if (*password || *admin) {
+        append(error,"Start the saved server without entering new passwords.");
+        return false;
+    }
+    if (!credential_token(&s->local_password) || !credential_token(&s->local_admin)) {
+        append(error,"Could not generate secure gateway credentials.");
+        goto failed;
+    }
+    const char *configured = env("NEUTRINO_PROVIDERS_FILE","");
+    if (*configured) append(&s->profiles,configured);
+    else format(&s->profiles,"%s.providers.json",a->ws.path);
+    int port = 0;
+    s->gateway = local_gateway_open(str(&s->local_password),str(&s->local_admin),str(&s->profiles),&port);
+    if (!s->gateway) {
+        append(error,"Could not start the local gateway. Check the provider profile file and terminal output.");
+        goto failed;
+    }
+    const bool needs_listener = !s->browser;
+    if (needs_listener && !(s->browser = browser_open_local(&s->web_port))) {
+        append(error,"Could not start the local workspace listener.");
+        goto failed;
+    }
+    if (setup && !credentials_save(&s->auth,str(&s->auth_path))) {
+        append(error,"Could not securely save the local server credentials.");
+        if (needs_listener) {
+            browser_close(s->browser);
+            s->browser = nullptr;
+        }
+        goto failed;
+    }
+    s->new_web_password = setup && s->auth.connection.enabled;
+    s->auth.saved = true;
+    browser_use_password(s->browser,&s->auth.connection);
+    s->serving = true;
+    s->elevated = setup && !a->browser;
+    clear(&a->server_address);
+    format(&a->server_address,"http://127.0.0.1:%d/v1",port);
+    clear(&a->status);
+    format(&a->status,"Local server ready · http://127.0.0.1:%d · %s",s->web_port,setup ? "/model" : "/admin");
+    return true;
+failed:
+    gateway_close(s->gateway);
+    s->gateway = nullptr;
+    clear(&s->profiles);
+    forget_secret(&s->local_password);
+    forget_secret(&s->local_admin);
+    return false;
+}
+
 static bool connect_session(App *a, bool local, const char *host, bool server, const char *password,
                             const char *admin, Text *error)
 {
@@ -3094,42 +3158,7 @@ static bool connect_session(App *a, bool local, const char *host, bool server, c
         return false;
     }
     if (local) {
-        if (!session_secret(admin,false) || strlen(admin)<16 || !strcmp(admin,password) ||
-            (*password && strlen(password)<16)) {
-            append(error,"Use a separate admin password of 16–256 characters. An optional local server password also needs 16.");
-            return false;
-        }
-        const char *configured = env("NEUTRINO_PROVIDERS_FILE","");
-        if (*configured) append(&s->profiles,configured);
-        else format(&s->profiles,"%s.providers.json",a->ws.path);
-        int port = 0;
-        s->gateway = local_gateway_open(password,admin,str(&s->profiles),&port);
-        if (!s->gateway) {
-            clear(&s->profiles);
-            append(error,"Could not start the local gateway. Check the provider profile file and terminal output.");
-            return false;
-        }
-        if (!s->browser) {
-            s->browser = browser_open_local(&s->web_port,password);
-            if (!s->browser) {
-                gateway_close(s->gateway);
-                s->gateway = nullptr;
-                clear(&s->profiles);
-                append(error,"Could not start the local workspace listener.");
-                return false;
-            }
-        } else s->new_web_password = browser_set_local_password(s->browser,password);
-        s->serving = true;
-        clear(&a->server_address);
-        format(&a->server_address,"http://127.0.0.1:%d/v1",port);
-        append(&s->local_password,password);
-        append(&s->local_admin,admin);
-        if (!a->browser) {
-            append(&s->admin,admin);
-            s->elevated = true;
-        }
-        clear(&a->status);
-        format(&a->status,"Local server ready · http://127.0.0.1:%d · /model",s->web_port);
+        if (!start_local_session(a,password,admin,error)) return false;
     } else {
         if (!session_host(host)) {
             append(error,"Enter the workspace host's HTTPS URL (HTTP is available on loopback).");
@@ -3165,7 +3194,7 @@ static bool verify_admin(App *a, const char *password)
 {
     if (!session_secret(password,false) || strlen(password)<16) return false;
     Session *s = &a->session;
-    if (s->gateway) return session_secret_matches(password,str(&s->local_admin));
+    if (s->gateway) return password_verify(&s->auth.admin,password);
     Text response = {0};
     const Text empty = {.data = "{}", .len = 2};
     const int result = s->linked ? session_http(str(&s->host),"/api/admin",
@@ -3212,8 +3241,10 @@ static void login_key(App *a, int key)
     if (s->admin_prompt && (key == 13 || key == 10)) {
         if (verify_admin(a,str(&s->form_admin))) {
             forget_secret(&s->admin);
-            s->admin = s->form_admin;
-            s->form_admin = (Text){0};
+            if (!s->gateway) {
+                s->admin = s->form_admin;
+                s->form_admin = (Text){0};
+            }
             s->elevated = true;
             s->admin_prompt = false;
             status(a,"Admin mode enabled for this session.");
@@ -3226,7 +3257,11 @@ static void login_key(App *a, int key)
     }
     if (!s->admin_prompt) {
         if ((key == 'a' || key == 'A') && s->field == 0) { s->form_local = false; s->field = 1; return; }
-        if ((key == 'b' || key == 'B') && s->field == 0) { s->form_local = true; s->field = 2; return; }
+        if ((key == 'b' || key == 'B') && s->field == 0) {
+            s->form_local = true;
+            s->field = s->auth.saved ? 5 : 2;
+            return;
+        }
         if ((key == KEY_LEFT || key == KEY_RIGHT || key == ' ') && s->field == 0) {
             s->form_local = !s->form_local;
             return;
@@ -3246,7 +3281,8 @@ static void login_key(App *a, int key)
         if (key == 9 || key == KEY_DOWN || key == KEY_UP || key == KEY_BACKTAB || key == 13 || key == 10) {
             int step = key == KEY_UP || key == KEY_BACKTAB ? 5 : 1;
             do { s->field = (s->field + step) % 6; }
-            while (s->form_local ? s->field == 1 || s->field == 4 : s->field == 3);
+            while (s->form_local ? (s->auth.saved ? s->field > 0 && s->field < 5 : s->field == 1 || s->field == 4)
+                                 : s->field == 3);
             return;
         }
     }
@@ -3363,6 +3399,7 @@ static Json *browser_state(const App *a)
     put(state, "compact", cJSON_CreateBool(a->compact));
     put(state,"loginSetup",cJSON_CreateBool(a->session.open && a->session.browser_setup));
     put(state,"canConnect",cJSON_CreateBool(a->session.browser_setup && !a->session.linked && !a->session.gateway));
+    put(state,"localServerSaved",cJSON_CreateBool(a->session.auth.saved));
     set(state, "id", a->roleplay ? js(a->story, "id") : js(a->scene, "path"));
     set(state, "title", a->roleplay ? ui_story_name(a) : ui_scene_name(a));
     set(state, "status", str(&a->status));
@@ -3654,6 +3691,7 @@ static int browser_connect(App *a, const Text *input, Text *output)
     if (!a->session.browser_setup) { append(output,"Local setup is available from a loopback client."); return 403; }
     Json *form = cJSON_ParseWithOpts(str(input),nullptr,true);
     const char *kind = js(form,"kind");
+    const bool setup = !a->session.auth.saved && !strcmp(kind,"local");
     int result = 400;
     if (!*kind || memchr(str(input),0,input->len)) append(output,"Choose how to connect.");
     else if (!strcmp(kind,"skip")) { a->session.open = false; result = 200; }
@@ -3666,7 +3704,7 @@ static int browser_connect(App *a, const Text *input, Text *output)
     cJSON_Delete(form);
     if (result == 200) {
         Json *reply = cJSON_CreateObject();
-        put(reply,"localServer",cJSON_CreateBool(a->session.gateway != nullptr));
+        put(reply,"elevatedAtSetup",cJSON_CreateBool(setup));
         put(reply,"newWebPassword",cJSON_CreateBool(a->session.new_web_password));
         encode_session_json(reply,output);
     }
@@ -3690,7 +3728,7 @@ static int browser_response_with_admin(App *a, BrowserRoute route, const Text *i
                 append(output,"Send a provider settings object.");
                 return 400;
             }
-            Inference *request = inference_provider(ui_endpoint(a),a->request_admin,settings);
+            Inference *request = inference_provider(ui_endpoint(a),admin_token(a),settings);
             cJSON_Delete(settings);
             result = 502;
             if (request) {
@@ -3750,8 +3788,8 @@ int app_browser_response(App *a, BrowserRoute route, const Text *input, const ch
     Session *s = &a->session;
     const bool browser = a->browser;
     a->browser = true;
-    const char *known = s->gateway ? str(&s->local_admin) : str(&s->validated_admin);
-    a->request_admin = admin && (route == BROWSER_ADMIN || session_secret_matches(admin,known)) ? admin : nullptr;
+    a->request_admin = admin && (route == BROWSER_ADMIN || (s->gateway ?
+        password_cached(&s->auth.admin,admin) : session_secret_matches(admin,str(&s->validated_admin)))) ? admin : nullptr;
     int result = browser_response_with_admin(a,route,input,output);
     if (route == BROWSER_ADMIN && result == 200 && a->request_admin && !s->gateway) {
         forget_secret(&s->validated_admin);
@@ -3852,6 +3890,15 @@ static int run(int argc, char **argv)
     initial_selection(&a);
     a.session.browser_setup = a.browser && !a.demo && !a.session.serving &&
         !*env("NEUTRINO_WEB_HOST","") && !strcmp(env("NEUTRINO_WEB_BIND","127.0.0.1"),"127.0.0.1");
+    if (!a.demo && !a.ssh_session && !dump && (!a.browser || a.session.browser_setup)) {
+        format(&a.session.auth_path,"%s.local-auth.json",path);
+        if (credentials_load(&a.session.auth,str(&a.session.auth_path)) == CREDENTIALS_INVALID) {
+            fprintf(stderr,"Could not read local server credentials: %s\n",str(&a.session.auth_path));
+            release(&a.session.auth_path);
+            workspace_close(&a.ws);
+            return 1;
+        }
+    }
     a.session.open = (login || argc == 1 || (a.browser && argc == 2)) &&
         !a.demo && !a.ssh_session && (!a.browser || a.session.browser_setup);
     if (a.browser) {
@@ -3859,6 +3906,7 @@ static int run(int argc, char **argv)
         Browser *web = a.session.browser = browser_open(a.session.web_port);
         if (!web) code = 1;
         else {
+            if (a.session.auth.saved) browser_use_password(web,&a.session.auth.connection);
             while (!interrupted) {
                 if (a.session.gateway) gateway_poll(a.session.gateway);
                 update_generation(&a);
@@ -3979,6 +4027,7 @@ static int run(int argc, char **argv)
     release(&a.session.revision);
     release(&a.session.refresh_base);
     release(&a.session.profiles);
+    release(&a.session.auth_path);
     release(&a.session.form_host);
     release(&a.session.error);
     workspace_close(&a.ws);
